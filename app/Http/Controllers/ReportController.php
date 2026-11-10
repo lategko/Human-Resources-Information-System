@@ -42,9 +42,15 @@ class ReportController extends Controller
         return Response::streamDownload(function () use ($request, $type, $from, $to) {
             $output = fopen('php://output', 'wb');
             fwrite($output, "\xEF\xBB\xBF");
+            fputcsv($output, ['Municipality of Camalaniugan']);
+            fputcsv($output, ['Human Resource Management Office', 'Province of Cagayan, Philippines']);
+            fputcsv($output, [ucfirst($type).' report']);
+            fputcsv($output, ['Reporting period', $from, 'through', $to]);
+            fputcsv($output, ['Generated', now()->format('Y-m-d H:i:s')]);
+            fputcsv($output, []);
             if ($type === 'employees') {
                 fputcsv($output, ['Employee ID', 'Last name', 'First name', 'Middle name', 'Department', 'Position', 'Employment status', 'Date hired']);
-                $this->employeeQuery($request)->with(['department','position'])->orderBy('last_name')->chunk(200, function ($employees) use ($output) {
+                $this->employeeQuery($request)->with(['department', 'position'])->orderBy('last_name')->chunk(200, function ($employees) use ($output) {
                     foreach ($employees as $employee) {
                         fputcsv($output, [$employee->employee_no, $employee->last_name, $employee->first_name, $employee->middle_name, $employee->department->name, $employee->position?->title, $employee->employment_status, $employee->date_hired?->format('Y-m-d')]);
                     }
@@ -58,7 +64,7 @@ class ReportController extends Controller
                 });
             } else {
                 fputcsv($output, ['Application ID', 'Employee ID', 'Employee name', 'Department', 'Leave type', 'Start date', 'End date', 'Working days', 'Status', 'Filed date']);
-                $this->leaveQuery($request, $from, $to)->with(['employee.department','leaveType'])->orderBy('created_at')->chunk(200, function ($applications) use ($output) {
+                $this->leaveQuery($request, $from, $to)->with(['employee.department', 'leaveType'])->orderBy('created_at')->chunk(200, function ($applications) use ($output) {
                     foreach ($applications as $application) {
                         fputcsv($output, [$application->id, $application->employee->employee_no, $application->employee->full_name, $application->employee->department->name, $application->leaveType->name, $application->start_date?->format('Y-m-d'), $application->end_date?->format('Y-m-d'), $application->verified_working_days ?? $application->working_days, $application->status, $application->filed_at?->format('Y-m-d')]);
                     }

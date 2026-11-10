@@ -1,13 +1,26 @@
 import './bootstrap';
 import '../css/app.css';
 import Alpine from 'alpinejs';
-import { createIcons, ArrowRight, Bell, CalendarDays, Check, ChevronDown, Clock3, FileText, House, Menu, Search, Users } from 'lucide';
+import {
+    createIcons, Activity, ArrowRight, ArrowUpDown, Bell, BriefcaseBusiness, Building2,
+    CalendarDays, ChartNoAxesCombined, ChartNoAxesColumnIncreasing, Check, ChevronDown,
+    ChevronRight, CircleAlert, CircleCheck, ClipboardCheck, Clock3, ContactRound, FileClock,
+    FilePlus2, Files, History, LayoutDashboard, ListChecks, ListFilter, LogOut, Menu,
+    ReceiptText, Search, Settings2, ShieldCheck, UserRound, UserRoundPlus, Users, UsersRound,
+    Wallet,
+} from 'lucide';
 import Chart from 'chart.js/auto';
 
 window.Alpine = Alpine;
 
 createIcons({
-    icons: { ArrowRight, Bell, CalendarDays, Check, ChevronDown, Clock3, FileText, House, Menu, Search, Users },
+    icons: {
+        Activity, ArrowRight, ArrowUpDown, Bell, BriefcaseBusiness, Building2, CalendarDays,
+        ChartNoAxesCombined, ChartNoAxesColumnIncreasing, Check, ChevronDown, ChevronRight,
+        CircleAlert, CircleCheck, ClipboardCheck, Clock3, ContactRound, FileClock, FilePlus2,
+        Files, History, LayoutDashboard, ListChecks, ListFilter, LogOut, Menu, ReceiptText,
+        Search, Settings2, ShieldCheck, UserRound, UserRoundPlus, Users, UsersRound, Wallet,
+    },
 });
 
 window.leaveApplicationForm = (types, selectedId, workingDaysUrl) => ({
@@ -61,9 +74,9 @@ window.drawAttendanceChart = (data) => {
         data: {
             labels: data.labels,
             datasets: [
-                { label: 'Present', data: data.present, borderColor: '#3579a8', backgroundColor: '#3579a8', tension: .35 },
-                { label: 'Late', data: data.late, borderColor: '#d09a42', backgroundColor: '#d09a42', tension: .35 },
-                { label: 'Absent', data: data.absent, borderColor: '#c95b5b', backgroundColor: '#c95b5b', tension: .35 },
+                { label: 'Present', data: data.present, borderColor: '#1478b9', backgroundColor: '#1478b9', tension: .35 },
+                { label: 'Late', data: data.late, borderColor: '#d5a500', backgroundColor: '#d5a500', tension: .35 },
+                { label: 'Absent', data: data.absent, borderColor: '#c82027', backgroundColor: '#c82027', tension: .35 },
             ],
         },
         options: {
@@ -71,6 +84,33 @@ window.drawAttendanceChart = (data) => {
             maintainAspectRatio: false,
             plugins: { legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 7, font: { size: 10 } } } },
             scales: { y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: '#edf1f4' } }, x: { grid: { display: false } } },
+        },
+    });
+};
+
+window.drawLeaveChart = (data) => {
+    const canvas = document.getElementById('leaveApplicationsTrend');
+    if (!canvas) return;
+    new Chart(canvas, {
+        type: 'bar',
+        data: {
+            labels: data.labels,
+            datasets: [{
+                label: 'Applications filed',
+                data: data.applications,
+                backgroundColor: '#1478b9',
+                borderRadius: 4,
+                maxBarThickness: 26,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: '#edf1f4' } },
+                x: { grid: { display: false } },
+            },
         },
     });
 };

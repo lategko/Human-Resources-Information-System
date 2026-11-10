@@ -2,14 +2,8 @@
 
 namespace Database\Seeders;
 
-use App\Models\User;
-use App\Models\Department;
-use App\Models\Employee;
-use App\Models\LeaveCredit;
 use App\Models\LeaveType;
-use App\Models\Position;
 use Illuminate\Database\Seeder;
-use Illuminate\Support\Facades\Hash;
 
 class DatabaseSeeder extends Seeder
 {
@@ -18,58 +12,9 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        $admin = User::updateOrCreate(['email' => 'admin@camalaniugan.gov.ph'], [
-            'name' => 'HRIS Administrator',
-            'role' => 'admin',
-            'can_final_approve' => true,
-            'password' => Hash::make('ChangeMe123!'),
-        ]);
-        $hrmo = User::updateOrCreate(['email' => 'hrmo@camalaniugan.gov.ph'], [
-            'name' => 'HRMO Officer',
-            'role' => 'hrmo',
-            'password' => Hash::make('ChangeMe123!'),
-        ]);
-        $head = User::updateOrCreate(['email' => 'officehead@camalaniugan.gov.ph'], [
-            'name' => 'Municipal Office Head',
-            'role' => 'office_head',
-            'password' => Hash::make('ChangeMe123!'),
-        ]);
-        $staff = User::updateOrCreate(['email' => 'employee@camalaniugan.gov.ph'], [
-            'name' => 'Juan Dela Cruz',
-            'role' => 'employee',
-            'password' => Hash::make('ChangeMe123!'),
-        ]);
-
-        $department = Department::updateOrCreate(['code' => 'MHO'], [
-            'name' => 'Municipal Health Office',
-            'head_user_id' => $head->id,
-            'is_active' => true,
-        ]);
-        $position = Position::updateOrCreate([
-            'department_id' => $department->id,
-            'title' => 'Administrative Aide',
-        ], ['salary_grade' => 'SG 4', 'is_active' => true]);
-        $employee = Employee::updateOrCreate(['employee_no' => 'CAM-0001'], [
-            'user_id' => $staff->id,
-            'department_id' => $department->id,
-            'position_id' => $position->id,
-            'biometric_id' => 'BIO-0001',
-            'first_name' => 'Juan',
-            'middle_name' => 'Santos',
-            'last_name' => 'Dela Cruz',
-            'sex' => 'Male',
-            'date_of_birth' => '1990-04-15',
-            'civil_status' => 'Single',
-            'contact_number' => '09170000000',
-            'email' => $staff->email,
-            'address' => 'Camalaniugan, Cagayan',
-            'employment_status' => 'Active',
-            'employment_type' => 'Permanent',
-            'date_hired' => '2020-01-06',
-            'salary_grade' => 'SG 4',
-            'salary_step' => 1,
-            'monthly_salary' => 18000,
-        ]);
+        if (app()->environment(['local', 'testing'])) {
+            $this->call(DemoAccountSeeder::class);
+        }
 
         $types = [
             ['Vacation Leave', 'VACATION', 'Normally file in advance where possible. If leave will be spent abroad, provide the destination. Verify current filing rules with HR.', ['Travel destination, if applicable'], true, false],
@@ -91,7 +36,7 @@ class DatabaseSeeder extends Seeder
         ];
 
         foreach ($types as $index => [$name, $code, $guidance, $documents, $requiresCredit, $sensitive]) {
-            LeaveType::updateOrCreate(['code' => $code], [
+            LeaveType::firstOrCreate(['code' => $code], [
                 'name' => $name,
                 'guidance' => $guidance,
                 'required_documents' => $documents,
@@ -100,18 +45,6 @@ class DatabaseSeeder extends Seeder
                 'is_sensitive' => $sensitive,
                 'is_active' => true,
                 'sort_order' => $index + 1,
-            ]);
-        }
-
-        foreach (['VACATION', 'SICK'] as $code) {
-            $type = LeaveType::where('code', $code)->firstOrFail();
-            LeaveCredit::firstOrCreate([
-                'employee_id' => $employee->id,
-                'leave_type_id' => $type->id,
-            ], [
-                'beginning_balance' => 0,
-                'earned_credits' => $code === 'VACATION' ? 12 : 8,
-                'effective_date' => today(),
             ]);
         }
     }

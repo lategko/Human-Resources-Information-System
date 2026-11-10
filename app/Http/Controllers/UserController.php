@@ -54,7 +54,12 @@ class UserController extends Controller
     {
         return view('users.form', [
             'user' => $user->load('employee'),
-            'employees' => Employee::whereNull('user_id')->orWhere('user_id', $user->id)->orderBy('last_name')->get(),
+            'employees' => Employee::whereNull('archived_at')
+                ->where(function ($query) use ($user) {
+                    $query->whereNull('user_id')->orWhere('user_id', $user->id);
+                })
+                ->orderBy('last_name')
+                ->get(),
         ]);
     }
 
@@ -91,7 +96,12 @@ class UserController extends Controller
             'email' => ['required', 'email', 'max:255', Rule::unique('users')->ignore($user?->id)],
             'role' => ['required', Rule::in(['admin', 'hrmo', 'office_head', 'employee'])],
             'can_final_approve' => ['nullable', 'boolean'],
-            'employee_id' => [Rule::requiredIf($request->input('role') === 'employee'), 'nullable', 'integer', Rule::exists('employees', 'id')],
+            'employee_id' => [
+                Rule::requiredIf($request->input('role') === 'employee'),
+                'nullable',
+                'integer',
+                Rule::exists('employees', 'id')->whereNull('deleted_at')->whereNull('archived_at'),
+            ],
             'is_active' => ['nullable', 'boolean'],
             'password' => [$user ? 'nullable' : 'required', 'string', 'min:12', 'confirmed'],
         ]);

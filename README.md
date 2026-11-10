@@ -27,22 +27,25 @@ A Laravel 12, Blade, Tailwind CSS, Alpine.js, and MySQL-ready HRIS prototype for
 
 5. Open the URL printed by `php artisan serve`.
 
-The checked-in local `.env` in this workspace uses SQLite for development. Fresh installations use MySQL from `.env.example`. `php artisan migrate --seed` creates the demo roles, department, employee, leave types, and sample credits. Seeded credit balances are demonstration data only.
+`php artisan migrate --seed` applies pending migrations and adds missing leave-type reference data. In local and testing environments it also creates clearly labeled demo Administrator, HRMO, and Office Head accounts. It does not create employee, department, or position records, and it does not overwrite existing account credentials or employee information.
+
+Each local demo account uses the password `password`. Reseeding resets only these three demo accounts' passwords; it does not change their other account details. Demo accounts must not be used for production. The demo Office Head has no department assignment, and there is no demo Employee account; create/link an employee login only after an authorized employee record exists.
+
+For safe population, first verify `DB_CONNECTION` and `DB_DATABASE` in the active environment, then run `php artisan migrate --seed`. Migrations are additive; never use `migrate:fresh` or truncate tables on a database containing records. Create department and position records from the authorized HR screens, then enter or import verified municipal employee data through the application. Employee records may remain unlinked to a login; employee login accounts must be linked to one existing, non-archived employee record. Demo accounts are only included by the seeder in local/testing environments.
 
 Supporting leave documents are written to Laravel's private `local` disk (`storage/app/private`), not to the public storage directory. Keep that directory access-controlled and include it in secure backups.
 
 ## Demo accounts
 
-All demo accounts use **`ChangeMe123!`**:
+All three local demo accounts use the password **`password`**:
 
 | Role | Email |
 |---|---|
-| Mayor / Administrator and designated final approver | `admin@camalaniugan.gov.ph` |
-| HRMO | `hrmo@camalaniugan.gov.ph` |
-| Office Head | `officehead@camalaniugan.gov.ph` |
-| Staff / Employee | `employee@camalaniugan.gov.ph` |
+| DEMO Administrator and designated final approver | `hradmin@gmail.com` | `HRIS_DEMO_ADMIN_PASSWORD` |
+| DEMO HRMO Officer | `hrmo@gmail.com` | `HRIS_DEMO_HRMO_PASSWORD` |
+| DEMO Office Head | `officehead@gmail.com` | `HRIS_DEMO_OFFICE_HEAD_PASSWORD` |
 
-Change demo passwords and remove or disable sample accounts before any shared or production deployment.
+Demo accounts are created only in local/testing environments. `firstOrCreate` ensures reseeding does not change an existing account's name, role, activation status, or password. Change the local demo password before sharing the environment.
 
 ## Available modules
 

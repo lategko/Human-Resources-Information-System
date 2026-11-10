@@ -34,9 +34,19 @@ class EmployeeController extends Controller
         if ($request->filled('employment_status')) {
             $query->where('employment_status', $request->string('employment_status'));
         }
+        $sortable = [
+            'employee_no' => 'employee_no',
+            'last_name' => 'last_name',
+            'employment_type' => 'employment_type',
+            'employment_status' => 'employment_status',
+            'date_hired' => 'date_hired',
+        ];
+        $sort = $request->string('sort')->toString();
+        $sort = array_key_exists($sort, $sortable) ? $sort : 'last_name';
+        $direction = $request->input('direction') === 'desc' ? 'desc' : 'asc';
 
         return view('employees.index', [
-            'employees' => $query->orderBy('last_name')->paginate(15)->withQueryString(),
+            'employees' => $query->orderBy($sortable[$sort], $direction)->orderBy('id')->paginate(15)->withQueryString(),
             'departments' => Department::where('is_active', true)->orderBy('name')->get(),
         ]);
     }
@@ -46,7 +56,7 @@ class EmployeeController extends Controller
         $this->authorize('create', Employee::class);
 
         return view('employees.form', [
-            'employee' => new Employee(),
+            'employee' => new Employee,
             'departments' => Department::where('is_active', true)->orderBy('name')->get(),
             'positions' => Position::where('is_active', true)->orderBy('title')->get(),
         ]);

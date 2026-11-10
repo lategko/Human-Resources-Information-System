@@ -2,6 +2,11 @@
 @section('title', 'Reports')
 @section('content')
     <div class="page-heading"><div><span class="eyebrow">REPORTS & ANALYTICS</span><h1>Reports</h1><p>Filter attendance and leave activity within your authorized access scope.</p></div><button class="button button-outline" onclick="window.print()">Print this report</button></div>
+    <header class="report-print-header">
+        <img src="{{ asset('image/hrislogo.jpg') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal">
+        <div><strong>Municipality of Camalaniugan</strong><span>Human Resource Management Office</span><span>Province of Cagayan, Philippines</span></div>
+        <div class="report-print-meta"><strong>Human Resources Report</strong><span>Reporting period: {{ \Carbon\Carbon::parse($from)->format('M j, Y') }} – {{ \Carbon\Carbon::parse($to)->format('M j, Y') }}</span><span>Generated: {{ now()->format('M j, Y g:i A') }}</span></div>
+    </header>
     <section class="panel">
         <form class="filter-bar report-filters" method="GET">
             <label>From<input type="date" name="date_from" value="{{ request('date_from', $from) }}"></label><label>To<input type="date" name="date_to" value="{{ request('date_to', $to) }}"></label>
