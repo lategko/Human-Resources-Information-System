@@ -6,7 +6,9 @@ use App\Models\AttendanceRecord;
 use App\Models\AuditLog;
 use App\Models\Department;
 use App\Models\Employee;
+use App\Models\EmployeeImport;
 use App\Models\LeaveApplication;
+use App\Models\LeaveApprovalHistory;
 use App\Models\LeaveCredit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -17,6 +19,10 @@ class DashboardController extends Controller
     public function __invoke(Request $request): View
     {
         $user = $request->user();
+        if ($user->isSuperAdmin()) {
+            return app(SuperAdminDashboardController::class)();
+        }
+
         $employee = $user->employee;
 
         if ($user->isEmployee()) {
@@ -29,8 +35,13 @@ class DashboardController extends Controller
                 'role' => 'employee',
                 'employee' => $employee->load('department', 'position'),
                 'applications' => $employee->leaveApplications()->with('leaveType')->latest()->limit(5)->get(),
+                'applicationStatusCounts' => $employee->leaveApplications()
+                    ->selectRaw('status, count(*) as aggregate')
+                    ->groupBy('status')
+                    ->pluck('aggregate', 'status'),
                 'credits' => $employee->leaveCredits()->with('leaveType')->get(),
                 'recentAttendance' => $employee->attendanceRecords()->latest('work_date')->limit(5)->get(),
+                'recentNotifications' => $user->notifications()->latest()->limit(5)->get(),
                 'upcomingLeaves' => $employee->leaveApplications()
                     ->where('status', 'Approved')
                     ->whereBetween('start_date', [today(), today()->addDays(30)])
@@ -69,6 +80,10 @@ class DashboardController extends Controller
             ->whereNull('archived_at')
             ->where('employment_status', 'Active');
         $scopeEmployees($employees);
+        $inactiveEmployees = Employee::query()
+            ->whereNull('archived_at')
+            ->where('employment_status', '!=', 'Active');
+        $scopeEmployees($inactiveEmployees);
 
         $attendanceToday = AttendanceRecord::query()->whereDate('work_date', today());
         $scopeRelated($attendanceToday);
@@ -108,14 +123,54 @@ class DashboardController extends Controller
             'hrmo' => 'Under HRMO Verification',
             default => 'Pending Final Approval',
         };
-        $pendingTasks = $user->isAdministrator() && ! $user->canFinalApprove()
-            ? collect()
-            : (clone $leaves)
+        if ($user->isAdministrator() && ! $user->canFinalApprove()) {
+            $pendingTasks = collect();
+        } elseif ($user->canFinalApprove()) {
+            $pendingTasks = (clone $leaves)
+                ->where(function ($query) use ($user) {
+                    $query->where('status', 'Pending Final Approval')
+                        ->orWhere(function ($alternate) use ($user) {
+                            $alternate->where('status', 'Under Alternate Office Head Review')
+                                ->where('office_head_reviewer_id', $user->id);
+                        });
+                })
+                ->with(['employee.department', 'leaveType'])
+                ->oldest('created_at')
+                ->limit(8)
+                ->get();
+        } elseif ($user->isOfficeHead()) {
+            $pendingTasks = LeaveApplication::query()
+                ->where('office_head_reviewer_id', $user->id)
+                ->whereIn('status', ['Under Office Head Review', 'Under Alternate Office Head Review'])
+                ->with(['employee.department', 'leaveType'])
+                ->oldest('created_at')
+                ->limit(8)
+                ->get();
+        } else {
+            $pendingTasks = (clone $leaves)
                 ->where('status', $pendingStatus)
                 ->with(['employee.department', 'leaveType'])
                 ->oldest('created_at')
                 ->limit(8)
                 ->get();
+        }
+        $pendingFinalTasks = $user->canFinalApprove()
+            ? (clone $leaves)
+                ->where('status', 'Pending Final Approval')
+                ->with(['employee.department', 'leaveType'])
+                ->oldest('created_at')
+                ->limit(8)
+                ->get()
+            : collect();
+        $pendingAlternateTasks = $user->canFinalApprove()
+            ? (clone $leaves)
+                ->where('status', 'Under Alternate Office Head Review')
+                ->where('office_head_reviewer_id', $user->id)
+                ->with(['employee.department', 'leaveType'])
+                ->oldest('created_at')
+                ->limit(8)
+                ->get()
+            : collect();
 
         $departmentCountQuery = Department::query()->where('is_active', true);
         if ($user->isOfficeHead()) {
@@ -125,9 +180,9 @@ class DashboardController extends Controller
         }
 
         $viewData = [
-            'role' => $user->role,
             'employeeCount' => $employees->count(),
             'departmentCount' => $departmentCountQuery->count(),
+            'inactiveEmployeeCount' => $inactiveEmployees->count(),
             'presentCount' => (clone $attendanceToday)->whereIn('status', ['Present', 'Late'])->count(),
             'absentCount' => (clone $attendanceToday)->where('status', 'Absent')->count(),
             'lateCount' => (clone $attendanceToday)->where('late_minutes', '>', 0)->count(),
@@ -140,8 +195,20 @@ class DashboardController extends Controller
                 ->count(),
             'pendingCount' => $user->isAdministrator() && ! $user->canFinalApprove()
                 ? 0
-                : (clone $leaves)->where('status', $pendingStatus)->count(),
+                : ($user->canFinalApprove()
+                    ? (clone $leaves)->where(function ($query) use ($user) {
+                        $query->where('status', 'Pending Final Approval')
+                            ->orWhere(function ($alternate) use ($user) {
+                                $alternate->where('status', 'Under Alternate Office Head Review')
+                                    ->where('office_head_reviewer_id', $user->id);
+                            });
+                    })->count()
+                    : ($user->isOfficeHead()
+                    ? (clone $pendingTasks)->count()
+                    : (clone $leaves)->where('status', $pendingStatus)->count())),
             'pendingTasks' => $pendingTasks,
+            'pendingFinalTasks' => $pendingFinalTasks,
+            'pendingAlternateTasks' => $pendingAlternateTasks,
             'upcomingLeaves' => (clone $leaves)
                 ->where('status', 'Approved')
                 ->whereBetween('start_date', [today(), today()->addDays(30)])
@@ -182,22 +249,46 @@ class DashboardController extends Controller
                     $scopeEmployees($query);
                 })
                 ->count(),
-            'pageTitle' => match ($user->role) {
-                'office_head' => 'Department overview',
-                'hrmo' => 'HR operations',
-                default => 'Executive overview',
-            },
-        ];
-
-        if ($user->isAdministrator()) {
-            $viewData['departmentDistribution'] = Department::query()
+            'departmentDistribution' => Department::query()
                 ->where('is_active', true)
                 ->when($departmentId, fn ($query) => $query->whereKey($departmentId))
+                ->when($user->isOfficeHead(), fn ($query) => $query->where('head_user_id', $user->id))
                 ->withCount(['employees' => fn ($query) => $query
                     ->whereNull('archived_at')
                     ->where('employment_status', 'Active')])
                 ->orderBy('name')
-                ->get();
+                ->get(),
+            'approvalHistory' => ($user->isOfficeHead() || $user->canFinalApprove())
+                ? LeaveApprovalHistory::query()
+                    ->with(['user:id,name', 'application.employee.department', 'application.leaveType'])
+                    ->when($user->isOfficeHead(), fn ($query) => $query->whereHas(
+                        'application.employee.department',
+                        fn ($department) => $department->where('head_user_id', $user->id)
+                    ))
+                    ->latest()
+                    ->limit(8)
+                    ->get()
+                : collect(),
+            'approvedLeaveCount' => (clone $leaves)->where('status', 'Approved')->count(),
+            'returnedLeaveCount' => (clone $leaves)->where('status', 'Returned for Correction')->count(),
+            'pageTitle' => match ($user->role) {
+                'office_head' => 'Department overview',
+                'hrmo' => 'HR operations',
+                'admin' => $user->canFinalApprove() ? 'Mayor’s executive overview' : 'Administration overview',
+                default => 'Municipal overview',
+            },
+            'role' => $user->canFinalApprove() ? 'mayor' : ($user->isAdministrator() ? 'administrator' : $user->role),
+            'pendingEmployeeImports' => $user->isHrmo()
+                ? EmployeeImport::query()
+                    ->whereIn('status', ['pending_review', 'mapping_approved', 'review_required'])
+                    ->with('uploader:id,name')
+                    ->oldest()
+                    ->limit(5)
+                    ->get()
+                : collect(),
+        ];
+
+        if (($user->isAdministrator() && ! $user->canFinalApprove()) || $user->isHrmo()) {
             $viewData['recentActivities'] = AuditLog::query()
                 ->with('user:id,name')
                 ->latest()

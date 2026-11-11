@@ -18,7 +18,10 @@ class LeaveApplication extends Model
         'certifier_signature', 'hr_remarks', 'recommendation',
         'recommendation_remarks', 'recommended_by', 'recommended_at', 'approved_days_with_pay',
         'approved_days_without_pay', 'approval_others', 'disapproval_reason', 'decision_remarks',
-        'decided_by', 'decided_at',
+        'decided_by', 'decided_at', 'office_head_reviewer_id', 'office_head_routing_reason',
+        'alternate_decision_by', 'alternate_decision_action', 'alternate_decision_days_with_pay',
+        'alternate_decision_days_without_pay', 'alternate_decision_others', 'alternate_decision_reason',
+        'alternate_decision_remarks', 'alternate_decision_at',
     ];
 
     protected function casts(): array
@@ -33,9 +36,12 @@ class LeaveApplication extends Model
             'certified_at' => 'datetime',
             'recommended_at' => 'datetime',
             'decided_at' => 'datetime',
+            'alternate_decision_at' => 'datetime',
             'salary_snapshot' => 'decimal:2',
             'approved_days_with_pay' => 'decimal:2',
             'approved_days_without_pay' => 'decimal:2',
+            'alternate_decision_days_with_pay' => 'decimal:2',
+            'alternate_decision_days_without_pay' => 'decimal:2',
         ];
     }
 
@@ -62,5 +68,15 @@ class LeaveApplication extends Model
     public function applicant(): BelongsTo
     {
         return $this->belongsTo(Employee::class, 'employee_id');
+    }
+
+    public function officeHeadReviewer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'office_head_reviewer_id');
+    }
+
+    public function alternateDecisionMaker(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'alternate_decision_by');
     }
 }

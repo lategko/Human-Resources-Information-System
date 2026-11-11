@@ -4,13 +4,13 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#1478B9">
-    <link rel="icon" type="image/jpeg" href="{{ asset('image/hrislogo.jpg') }}">
+    <link rel="icon" type="image/webp" href="{{ asset('image/hrislogo.webp') }}">
     <title>Municipality of Camalaniugan · Human Resource Management Office</title>
-    @vite(['resources/js/app.js'])
+    @vite(['resources/css/app.css', 'resources/js/app.js'])
 </head>
 <body class="public-body">
     <header class="public-nav">
-        <a class="brand" href="{{ route('home') }}"><img class="brand-logo public-logo" src="{{ asset('image/hrislogo.jpg') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal"><span><strong>Municipality of Camalaniugan</strong><small>Human Resource Management Office</small></span></a>
+        <a class="brand" href="{{ route('home') }}"><img class="brand-logo public-logo" src="{{ asset('image/hrislogo.webp') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal" width="48" height="48" decoding="async"><span><strong>Municipality of Camalaniugan</strong><small>Human Resource Management Office</small></span></a>
         <a class="button button-primary" href="{{ route('login') }}">Sign in <span>→</span></a>
     </header>
     <main class="hero">
@@ -21,7 +21,7 @@
             <div class="hero-actions"><a class="button button-primary" href="{{ route('login') }}">Access your account <span>→</span></a><span class="hero-note">For authorized municipal personnel</span></div>
         </div>
         <div class="hero-card">
-            <div class="hero-card-top"><img class="hero-seal" src="{{ asset('image/hrislogo.jpg') }}" alt="Official Municipality of Camalaniugan HRMO seal"><span>MUNICIPALITY OF CAMALANIUGAN<br><b>HUMAN RESOURCE MANAGEMENT OFFICE</b></span><span class="status-pill">SECURE PORTAL</span></div>
+            <div class="hero-card-top"><img class="hero-seal" src="{{ asset('image/hrislogo.webp') }}" alt="Official Municipality of Camalaniugan HRMO seal" width="54" height="54" decoding="async"><span>MUNICIPALITY OF CAMALANIUGAN<br><b>HUMAN RESOURCE MANAGEMENT OFFICE</b></span><span class="status-pill">SECURE PORTAL</span></div>
             <div class="hero-card-title">Employee services,<br>in one place.</div>
             <div class="service-list">
                 <div><span class="service-icon">▤</span><span><b>Digital leave applications</b><small>Submit and follow each review step</small></span><span class="service-arrow">↗</span></div>

@@ -3,9 +3,9 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="icon" type="image/jpeg" href="{{ asset('image/hrislogo.jpg') }}">
+    <link rel="icon" type="image/webp" href="{{ asset('image/hrislogo.webp') }}">
     <title>Application for Leave · {{ $application->id }}</title>
-    @vite(['resources/js/app.js', 'resources/js/leave-print.js'])
+    @vite(['resources/css/app.css', 'resources/js/app.js', 'resources/js/leave-print.js'])
 </head>
 <body class="print-body">
     <div class="print-toolbar">
@@ -18,7 +18,7 @@
     </div>
     <main class="paper">
         <section class="paper-page page-one">
-            <header class="paper-header"><img class="paper-logo" src="{{ asset('image/hrislogo.jpg') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal"><div class="paper-official">REPUBLIC OF THE PHILIPPINES<br><b>PROVINCE OF CAGAYAN</b><br><b>MUNICIPALITY OF CAMALANIUGAN</b><br><strong>HUMAN RESOURCE MANAGEMENT OFFICE</strong></div><div class="paper-form-no">Civil Service Form No. 6<br>Revised 2020<br>Application #{{ $application->id }}</div></header>
+            <header class="paper-header"><img class="paper-logo" src="{{ asset('image/hrislogo.webp') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal" width="64" height="64" decoding="async"><div class="paper-official">REPUBLIC OF THE PHILIPPINES<br><b>PROVINCE OF CAGAYAN</b><br><b>MUNICIPALITY OF CAMALANIUGAN</b><br><strong>HUMAN RESOURCE MANAGEMENT OFFICE</strong></div><div class="paper-form-no">Civil Service Form No. 6<br>Revised 2020<br>Application #{{ $application->id }}</div></header>
             <h1 class="paper-title">APPLICATION FOR LEAVE</h1>
             <div class="paper-box"><div class="paper-section">1. OFFICE / DEPARTMENT</div><div class="paper-value">{{ $application->office_snapshot }}</div></div>
             <div class="paper-grid paper-box">
@@ -60,7 +60,7 @@
             <footer class="paper-footer">Status: {{ $application->status }} · Application #{{ $application->id }} · Generated {{ now()->format('M j, Y g:i A') }}</footer>
         </section>
         <section class="paper-page page-two">
-            <header class="paper-header"><img class="paper-logo" src="{{ asset('image/hrislogo.jpg') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal"><div class="paper-official"><b>MUNICIPALITY OF CAMALANIUGAN</b><br>HUMAN RESOURCE MANAGEMENT OFFICE</div><div class="paper-form-no">APPLICATION FOR LEAVE<br>Instructions and requirements</div></header>
+            <header class="paper-header"><img class="paper-logo" src="{{ asset('image/hrislogo.webp') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal" width="64" height="64" decoding="async"><div class="paper-official"><b>MUNICIPALITY OF CAMALANIUGAN</b><br>HUMAN RESOURCE MANAGEMENT OFFICE</div><div class="paper-form-no">APPLICATION FOR LEAVE<br>Instructions and requirements</div></header>
             <h2 class="paper-title">INSTRUCTIONS AND REQUIREMENTS</h2>
             <p class="paper-disclaimer">This guide is configurable and provided for application support. The 2020 form and these examples do not establish current legal entitlements. HR must confirm current Civil Service Commission rules and approved municipal policies before action.</p>
             <ol class="instruction-list">

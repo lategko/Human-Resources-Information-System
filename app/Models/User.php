@@ -3,14 +3,16 @@
 namespace App\Models;
 
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
+use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
-use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class User extends Authenticatable
 {
-    /** @use HasFactory<\Database\Factories\UserFactory> */
+    /** @use HasFactory<UserFactory> */
     use HasFactory, Notifiable;
 
     /**
@@ -25,6 +27,15 @@ class User extends Authenticatable
         'role',
         'is_active',
         'can_final_approve',
+        'profile_photo_path',
+        'first_name',
+        'middle_name',
+        'last_name',
+        'suffix',
+        'profile_gender',
+        'profile_birthdate',
+        'profile_contact_number',
+        'profile_address',
     ];
 
     /**
@@ -49,6 +60,7 @@ class User extends Authenticatable
             'password' => 'hashed',
             'is_active' => 'boolean',
             'can_final_approve' => 'boolean',
+            'profile_birthdate' => 'date',
         ];
     }
 
@@ -57,9 +69,29 @@ class User extends Authenticatable
         return $this->hasOne(Employee::class);
     }
 
+    public function departmentHead(): HasOne
+    {
+        return $this->hasOne(Department::class, 'head_user_id');
+    }
+
+    public function officeHeadAvailabilityRecords(): HasMany
+    {
+        return $this->hasMany(OfficeHeadAvailability::class, 'office_head_user_id');
+    }
+
     public function isAdministrator(): bool
     {
-        return $this->role === 'admin';
+        return in_array($this->role, ['admin', 'super_admin'], true);
+    }
+
+    public function isSuperAdmin(): bool
+    {
+        return $this->role === 'super_admin';
+    }
+
+    public function isMayor(): bool
+    {
+        return $this->role === 'mayor' || ($this->role === 'admin' && $this->can_final_approve);
     }
 
     public function isOfficeHead(): bool
@@ -84,6 +116,6 @@ class User extends Authenticatable
 
     public function canFinalApprove(): bool
     {
-        return $this->isAdministrator() && $this->can_final_approve;
+        return $this->isMayor();
     }
 }

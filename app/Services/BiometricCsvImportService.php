@@ -6,15 +6,15 @@ use App\Models\AttendanceRecord;
 use App\Models\BiometricImport;
 use App\Models\BiometricImportRecord;
 use App\Models\Employee;
-use Carbon\Carbon;
 use DateTimeImmutable;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use RuntimeException;
 
 class BiometricCsvImportService
 {
-    public function import(UploadedFile $file, int $userId): BiometricImport
+    public function import(UploadedFile $file, int $userId, AttendanceWorkHoursCalculator $hoursCalculator): BiometricImport
     {
         $import = BiometricImport::create([
             'uploaded_by' => $userId,
@@ -31,14 +31,14 @@ class BiometricCsvImportService
         if (! is_array($header)) {
             fclose($stream);
             $import->update(['status' => 'failed', 'error_count' => 1]);
-            throw \Illuminate\Validation\ValidationException::withMessages(['file' => 'The uploaded CSV file is empty.']);
+            throw ValidationException::withMessages(['file' => 'The uploaded CSV file is empty.']);
         }
         $header = array_map(fn ($column) => strtolower(trim((string) $column)), $header);
         foreach (['biometric_id', 'date'] as $required) {
             if (! in_array($required, $header, true)) {
                 fclose($stream);
                 $import->update(['status' => 'failed', 'error_count' => 1]);
-                throw \Illuminate\Validation\ValidationException::withMessages([
+                throw ValidationException::withMessages([
                     'file' => 'CSV header is missing the required "'.$required.'" column.',
                 ]);
             }
@@ -50,7 +50,7 @@ class BiometricCsvImportService
         $errors = 0;
 
         try {
-            DB::transaction(function () use ($stream, $header, $import, &$seen, &$rowNumber, &$imported, &$errors) {
+            DB::transaction(function () use ($stream, $header, $import, $hoursCalculator, &$seen, &$rowNumber, &$imported, &$errors) {
                 while (($values = fgetcsv($stream)) !== false) {
                     $rowNumber++;
                     if ($values === [null] || (count($values) === 1 && trim((string) $values[0]) === '')) {
@@ -82,17 +82,20 @@ class BiometricCsvImportService
                     if (($raw['time_out'] ?? '') !== '' && $timeOut === null) {
                         $reason ??= 'Time out must use HH:MM or HH:MM:SS format.';
                     }
+                    if ($timeIn === null) {
+                        $reason ??= 'Time in is required; incomplete attendance rows are not imported.';
+                    }
+                    if ($timeOut === null) {
+                        $reason ??= 'Time out is required; incomplete attendance rows are not imported.';
+                    }
 
                     if ($reason === null) {
-                        $hours = $timeIn && $timeOut
-                            ? round(max(0, Carbon::parse($timeIn)->diffInMinutes(Carbon::parse($timeOut), false)) / 60, 2)
-                            : null;
                         AttendanceRecord::create([
                             'employee_id' => $employee->id,
                             'work_date' => $date,
                             'time_in' => $timeIn,
                             'time_out' => $timeOut,
-                            'total_working_hours' => $hours,
+                            'total_working_hours' => $hoursCalculator->calculate($timeIn, $timeOut),
                             'status' => 'Present',
                             'source' => 'biometric_import',
                         ]);

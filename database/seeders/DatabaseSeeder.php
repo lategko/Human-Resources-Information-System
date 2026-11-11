@@ -12,9 +12,7 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        if (app()->environment(['local', 'testing'])) {
-            $this->call(DemoAccountSeeder::class);
-        }
+        $this->call(ConfiguredAccountSeeder::class);
 
         $types = [
             ['Vacation Leave', 'VACATION', 'Normally file in advance where possible. If leave will be spent abroad, provide the destination. Verify current filing rules with HR.', ['Travel destination, if applicable'], true, false],

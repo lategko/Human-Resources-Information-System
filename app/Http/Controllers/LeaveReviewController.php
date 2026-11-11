@@ -13,18 +13,29 @@ class LeaveReviewController extends Controller
     {
         $this->authorize('review', $application);
         $user = $request->user();
+        $isAssignedAlternateFinalApprover = $user->canFinalApprove()
+            && $application->status === 'Under Alternate Office Head Review'
+            && $application->office_head_reviewer_id === $user->id;
         $rules = match (true) {
+            $isAssignedAlternateFinalApprover => [
+                'action' => ['required', 'in:approve,disapprove,return'],
+                'days_with_pay' => ['required_if:action,approve', 'numeric', 'min:0', 'max:365'],
+                'days_without_pay' => ['nullable', 'numeric', 'min:0', 'max:365'],
+                'approval_others' => ['nullable', 'string', 'max:500'],
+                'reason' => ['required_if:action,disapprove', 'nullable', 'string', 'max:2000'],
+                'remarks' => ['required_if:action,return', 'nullable', 'string', 'max:2000'],
+            ],
             $user->isOfficeHead() => [
                 'action' => ['required', 'in:endorse,return'],
                 'recommendation' => ['required', 'in:For approval,For disapproval'],
                 'remarks' => ['required_if:action,return', 'required_if:recommendation,For disapproval', 'nullable', 'string', 'max:2000'],
             ],
             $user->isHrmo() => [
-                'action' => ['required', 'in:verify'],
-                'verified_working_days' => ['required', 'integer', 'min:1', 'max:365'],
-                'certifier_position' => ['required', 'string', 'max:120'],
-                'certifier_signature' => ['required', 'string', 'max:120'],
-                'remarks' => ['nullable', 'string', 'max:2000'],
+                'action' => ['required', 'in:verify,return'],
+                'verified_working_days' => ['required_if:action,verify', 'nullable', 'integer', 'min:1', 'max:365'],
+                'certifier_position' => ['required_if:action,verify', 'nullable', 'string', 'max:120'],
+                'certifier_signature' => ['required_if:action,verify', 'nullable', 'string', 'max:120'],
+                'remarks' => ['required_if:action,return', 'nullable', 'string', 'max:2000'],
                 'waived_documents' => ['nullable', 'array', 'max:20'],
                 'waived_documents.*' => ['string', 'max:200'],
                 'waiver_justification' => ['required_with:waived_documents', 'nullable', 'string', 'max:2000'],

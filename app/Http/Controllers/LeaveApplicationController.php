@@ -7,6 +7,8 @@ use App\Models\LeaveApplication;
 use App\Models\LeaveApplicationDocument;
 use App\Models\LeaveApprovalHistory;
 use App\Models\LeaveType;
+use App\Models\OfficeHeadAvailability;
+use App\Models\User;
 use App\Notifications\LeaveApplicationUpdated;
 use App\Services\AuditLogger;
 use App\Services\WorkingDayCalculator;
@@ -14,6 +16,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
 class LeaveApplicationController extends Controller
@@ -25,7 +28,10 @@ class LeaveApplicationController extends Controller
         if ($user->isEmployee()) {
             $query->where('employee_id', $user->employee?->id ?? 0);
         } elseif ($user->isOfficeHead()) {
-            $query->whereHas('employee.department', fn ($department) => $department->where('head_user_id', $user->id));
+            $query->where(function ($applications) use ($user) {
+                $applications->where('office_head_reviewer_id', $user->id)
+                    ->orWhereHas('employee.department', fn ($department) => $department->where('head_user_id', $user->id));
+            });
         }
         if ($request->filled('status')) {
             $query->where('status', $request->string('status'));
@@ -66,14 +72,17 @@ class LeaveApplicationController extends Controller
         AuditLogger $auditLogger
     ): RedirectResponse {
         $employee = $request->user()->employee;
-        $application = DB::transaction(function () use ($request, $employee, $calculator, $auditLogger) {
-            $application = new LeaveApplication();
+        $submitted = $request->input('intent') === 'submit';
+        $application = DB::transaction(function () use ($request, $employee, $calculator, $auditLogger, $submitted) {
+            $application = new LeaveApplication;
             $this->saveForm($application, $request, $employee, $calculator);
             $application->save();
-            $intent = $request->input('intent');
-            $application->status = $intent === 'submit' ? 'Submitted' : 'Draft';
-            if ($intent === 'submit') {
+            $application->status = $submitted ? 'Submitted' : 'Draft';
+            if ($submitted) {
                 $this->assertNoOverlap($application);
+                $route = $this->resolveOfficeHeadRoute($employee, $application);
+                $application->office_head_reviewer_id = $route['reviewer_id'];
+                $application->office_head_routing_reason = $route['reason'];
             }
             $application->save();
 
@@ -84,32 +93,36 @@ class LeaveApplicationController extends Controller
                 'action' => $application->status === 'Submitted' ? 'submitted' : 'draft_saved',
                 'to_status' => $application->status,
             ]);
-            if ($intent === 'submit') {
+            if ($submitted) {
+                $nextStatus = $route['status'];
                 LeaveApprovalHistory::create([
                     'leave_application_id' => $application->id,
                     'user_id' => $request->user()->id,
                     'role' => $request->user()->role,
-                    'action' => 'queued_for_office_head_review',
+                    'action' => $route['action'],
                     'from_status' => 'Submitted',
-                    'to_status' => 'Under Office Head Review',
+                    'to_status' => $nextStatus,
                 ]);
-                $application->status = 'Under Office Head Review';
+                $application->status = $nextStatus;
                 $application->save();
             }
-            $auditLogger->record($application->status === 'Submitted' ? 'leave.submitted' : 'leave.draft_saved', $application);
+            $auditLogger->record($submitted ? 'leave.submitted' : 'leave.draft_saved', $application, [
+                'status' => $application->status,
+                'reviewer_id' => $application->office_head_reviewer_id,
+            ]);
 
             return $application;
         });
         $this->saveDocuments($request, $application);
-        if ($application->status === 'Submitted') {
-            $application->load('employee.department.head');
-            $application->employee->department->head?->notify(new LeaveApplicationUpdated(
+        if ($submitted) {
+            $application->load('employee', 'officeHeadReviewer');
+            $application->officeHeadReviewer?->notify(new LeaveApplicationUpdated(
                 $application,
-                'A new leave application from '.$application->employee->full_name.' is awaiting review.'
+                'A new leave application from '.$application->employee->full_name.' is awaiting your review.'
             ));
         }
 
-        return redirect()->route('leave.show', $application)->with('success', $application->status === 'Submitted'
+        return redirect()->route('leave.show', $application)->with('success', $submitted
             ? 'Your leave application has been submitted for review.'
             : 'Your draft has been saved.');
     }
@@ -119,6 +132,7 @@ class LeaveApplicationController extends Controller
         $this->authorize('view', $application);
         $application->load([
             'employee.department', 'employee.position', 'leaveType', 'documents', 'history.user',
+            'officeHeadReviewer', 'alternateDecisionMaker',
         ]);
         $sensitiveDetailsVisible = ! $application->leaveType->is_sensitive
             || auth()->user()->canManageHr()
@@ -149,30 +163,66 @@ class LeaveApplicationController extends Controller
         $this->authorize('update', $application);
         $employee = $request->user()->employee;
 
-        DB::transaction(function () use ($request, $application, $employee, $calculator, $auditLogger) {
+        $submitted = $request->input('intent') === 'submit';
+        DB::transaction(function () use ($request, $application, $employee, $calculator, $auditLogger, $submitted) {
             $previous = $application->status;
             $this->saveForm($application, $request, $employee, $calculator);
-            if ($request->input('intent') === 'submit') {
+            if ($submitted) {
                 $this->assertNoOverlap($application);
-                $application->status = 'Under Office Head Review';
+                $route = $this->resolveOfficeHeadRoute($employee, $application);
+                $application->fill([
+                    'verified_working_days' => null,
+                    'credit_certification' => null,
+                    'certified_by' => null,
+                    'certified_at' => null,
+                    'certifier_position' => null,
+                    'certifier_signature' => null,
+                    'hr_remarks' => null,
+                    'document_waivers' => null,
+                    'recommendation' => null,
+                    'recommendation_remarks' => null,
+                    'recommended_by' => null,
+                    'recommended_at' => null,
+                    'approved_days_with_pay' => null,
+                    'approved_days_without_pay' => null,
+                    'approval_others' => null,
+                    'disapproval_reason' => null,
+                    'decision_remarks' => null,
+                    'decided_by' => null,
+                    'decided_at' => null,
+                    'alternate_decision_by' => null,
+                    'alternate_decision_action' => null,
+                    'alternate_decision_days_with_pay' => null,
+                    'alternate_decision_days_without_pay' => null,
+                    'alternate_decision_others' => null,
+                    'alternate_decision_reason' => null,
+                    'alternate_decision_remarks' => null,
+                    'alternate_decision_at' => null,
+                ]);
+                $application->office_head_reviewer_id = $route['reviewer_id'];
+                $application->office_head_routing_reason = $route['reason'];
+                $application->status = $route['status'];
                 LeaveApprovalHistory::create([
                     'leave_application_id' => $application->id,
                     'user_id' => $request->user()->id,
                     'role' => $request->user()->role,
                     'action' => 'resubmitted',
                     'from_status' => $previous,
-                    'to_status' => 'Under Office Head Review',
+                    'to_status' => $route['status'],
                 ]);
             }
             $application->save();
-            $auditLogger->record('leave.updated', $application, ['status' => $application->status]);
+            $auditLogger->record('leave.updated', $application, [
+                'status' => $application->status,
+                'reviewer_id' => $application->office_head_reviewer_id,
+            ]);
         });
         $this->saveDocuments($request, $application);
-        if ($application->status === 'Under Office Head Review') {
-            $application->load('employee.department.head');
-            $application->employee->department->head?->notify(new LeaveApplicationUpdated(
+        if ($submitted) {
+            $application->load('employee', 'officeHeadReviewer');
+            $application->officeHeadReviewer?->notify(new LeaveApplicationUpdated(
                 $application,
-                'A leave application from '.$application->employee->full_name.' is awaiting review.'
+                'A leave application from '.$application->employee->full_name.' is awaiting your review.'
             ));
         }
 
@@ -261,6 +311,61 @@ class LeaveApplicationController extends Controller
             ->whereDate('end_date', '>=', $application->start_date)
             ->exists();
         abort_unless(! $overlap, 422, 'An active application already overlaps these dates.');
+    }
+
+    private function resolveOfficeHeadRoute($employee, LeaveApplication $application): array
+    {
+        $department = $employee->department()->with('head')->firstOrFail();
+        $head = $department->head;
+        $availability = $head
+            ? OfficeHeadAvailability::query()
+                ->where('department_id', $department->id)
+                ->where('office_head_user_id', $head->id)
+                ->where('availability_status', '!=', 'available')
+                ->whereDate('start_date', '<=', $application->end_date)
+                ->whereDate('end_date', '>=', $application->start_date)
+                ->latest('start_date')
+                ->latest('id')
+                ->first()
+            : null;
+
+        if ($head?->is_active && $head->isOfficeHead()
+            && (! $availability || $availability->availability_status === 'available')) {
+            return [
+                'reviewer_id' => $head->id,
+                'status' => 'Under Office Head Review',
+                'action' => 'queued_for_office_head_review',
+                'reason' => null,
+            ];
+        }
+
+        $alternate = $availability?->alternate;
+        if (! $alternate?->is_active || (! $alternate->isOfficeHead() && ! $alternate->canFinalApprove())) {
+            $finalApprovers = User::query()->where('is_active', true)
+                ->where(fn ($users) => $users
+                    ->where('role', 'mayor')
+                    ->orWhere(fn ($legacy) => $legacy->where('role', 'admin')->where('can_final_approve', true)))
+                ->orderBy('id')
+                ->limit(2)
+                ->get();
+            if ($finalApprovers->count() !== 1) {
+                throw ValidationException::withMessages([
+                    'availability' => 'The Office Head is unavailable and there is no single designated final approver. HRMO or an administrator must assign an authorized alternate before this application can be submitted.',
+                ]);
+            }
+            $alternate = $finalApprovers->first();
+        }
+
+        $reason = $availability
+            ? ucfirst(str_replace('_', ' ', $availability->availability_status)).': '.$availability->reason
+            : ($head ? 'The assigned Office Head account is inactive.' : 'No Office Head is assigned to this department.');
+
+        return [
+            'reviewer_id' => $alternate->id,
+            'status' => 'Under Alternate Office Head Review',
+            'action' => 'queued_for_alternate_office_head_review',
+            'reason' => $reason,
+        ];
     }
 
     private function saveDocuments(SaveLeaveApplicationRequest $request, LeaveApplication $application): void

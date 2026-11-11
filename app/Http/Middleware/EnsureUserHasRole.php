@@ -10,7 +10,13 @@ class EnsureUserHasRole
 {
     public function handle(Request $request, Closure $next, string ...$roles): Response
     {
-        abort_unless($request->user() && in_array($request->user()->role, $roles, true), 403);
+        $user = $request->user();
+        $hasRole = $user && (
+            in_array($user->role, $roles, true)
+            || ($user->isSuperAdmin() && in_array('admin', $roles, true))
+        );
+
+        abort_unless($hasRole, 403);
 
         return $next($request);
     }

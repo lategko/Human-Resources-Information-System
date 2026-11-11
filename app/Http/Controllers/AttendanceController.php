@@ -5,7 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\AttendanceRecord;
 use App\Models\BiometricImport;
 use App\Models\Department;
-use App\Models\Employee;
+use App\Services\AttendanceWorkHoursCalculator;
 use App\Services\AuditLogger;
 use App\Services\BiometricCsvImportService;
 use Illuminate\Http\RedirectResponse;
@@ -51,12 +51,16 @@ class AttendanceController extends Controller
         ]);
     }
 
-    public function import(Request $request, BiometricCsvImportService $importer, AuditLogger $auditLogger): RedirectResponse
-    {
+    public function import(
+        Request $request,
+        BiometricCsvImportService $importer,
+        AttendanceWorkHoursCalculator $hoursCalculator,
+        AuditLogger $auditLogger
+    ): RedirectResponse {
         $request->validate([
             'file' => ['required', 'file', 'max:10240', 'mimes:csv,txt'],
         ]);
-        $import = $importer->import($request->file('file'), $request->user()->id);
+        $import = $importer->import($request->file('file'), $request->user()->id, $hoursCalculator);
         $auditLogger->record('attendance.biometric_imported', $import, [
             'imported' => $import->imported_count,
             'errors' => $import->error_count,
@@ -84,8 +88,12 @@ class AttendanceController extends Controller
         }, 'biometric-attendance-template.csv', ['Content-Type' => 'text/csv; charset=UTF-8']);
     }
 
-    public function correct(Request $request, AttendanceRecord $attendance, AuditLogger $auditLogger): RedirectResponse
-    {
+    public function correct(
+        Request $request,
+        AttendanceRecord $attendance,
+        AttendanceWorkHoursCalculator $hoursCalculator,
+        AuditLogger $auditLogger
+    ): RedirectResponse {
         abort_unless($request->user()->canManageHr() || $request->user()->isAdministrator(), 403);
         $data = $request->validate([
             'status' => ['required', Rule::in(['Present', 'Late', 'Absent', 'On Leave', 'Half Day', 'Rest Day', 'Holiday'])],
@@ -95,9 +103,12 @@ class AttendanceController extends Controller
             'undertime_minutes' => ['required', 'integer', 'min:0', 'max:1440'],
             'correction_remarks' => ['required', 'string', 'max:2000'],
         ]);
-        DB::transaction(function () use ($attendance, $data, $request) {
+        DB::transaction(function () use ($attendance, $data, $request, $hoursCalculator) {
             $locked = AttendanceRecord::query()->lockForUpdate()->findOrFail($attendance->id);
-            $locked->update($data + ['corrected_by' => $request->user()->id]);
+            $locked->fill($data);
+            $locked->total_working_hours = $hoursCalculator->calculate($locked->time_in, $locked->time_out);
+            $locked->corrected_by = $request->user()->id;
+            $locked->save();
         });
         $auditLogger->record('attendance.corrected', $attendance, [
             'remarks' => $data['correction_remarks'],

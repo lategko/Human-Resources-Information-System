@@ -24,4 +24,9 @@ class Department extends Model
     {
         return $this->hasMany(Position::class);
     }
+
+    public function officeHeadAvailabilities(): HasMany
+    {
+        return $this->hasMany(OfficeHeadAvailability::class);
+    }
 }

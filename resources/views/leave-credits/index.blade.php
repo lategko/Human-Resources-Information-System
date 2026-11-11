@@ -1,7 +1,12 @@
 @extends('layouts.app')
 @section('title', 'Leave credits')
 @section('content')
-    <div class="page-heading"><div><span class="eyebrow">LEAVE CREDIT MANAGEMENT</span><h1>Leave credits</h1><p>Authorized HRMO transactions and balances. Every change is recorded in the ledger.</p></div></div>
+    <div class="page-heading"><div><span class="eyebrow">{{ auth()->user()->isEmployee() ? 'MY HR RECORDS' : 'LEAVE CREDIT MANAGEMENT' }}</span><h1>{{ auth()->user()->isEmployee() ? 'My leave credits' : 'Leave credits' }}</h1><p>{{ auth()->user()->isEmployee() ? 'Your current leave balances as recorded by HR.' : 'Authorized HRMO transactions and balances. Every change is recorded in the ledger.' }}</p></div></div>
+    @if(auth()->user()->isEmployee())
+        <section class="panel"><div class="table-wrap"><table><thead><tr><th>LEAVE TYPE</th><th>BEGINNING</th><th>EARNED</th><th>USED</th><th>ADJUSTMENTS</th><th>AVAILABLE</th></tr></thead><tbody>
+            @forelse($credits as $credit)<tr><td><b>{{ $credit->leaveType->name }}</b></td><td>{{ number_format((float) $credit->beginning_balance, 2) }}</td><td>{{ number_format((float) $credit->earned_credits, 2) }}</td><td>{{ number_format((float) $credit->used_credits, 2) }}</td><td>{{ number_format((float) $credit->adjustments, 2) }}</td><td><b>{{ number_format($credit->balance, 2) }}</b></td></tr>@empty<tr><td colspan="6" class="empty-note">No leave credit balances are recorded yet.</td></tr>@endforelse
+        </tbody></table></div><div class="pagination-wrap">{{ $credits->links() }}</div></section>
+    @else
     <div class="content-grid">
         <section class="panel"><form class="filter-bar" method="GET"><label class="search-field"><span>⌕</span><input name="q" value="{{ request('q') }}" placeholder="Employee ID or last name"></label><button class="button button-outline">Search</button></form>
             <div class="table-wrap"><table><thead><tr><th>EMPLOYEE</th><th>LEAVE TYPE</th><th>BEGINNING</th><th>EARNED</th><th>USED</th><th>ADJUSTMENTS</th><th>BALANCE</th><th></th></tr></thead><tbody>
@@ -18,4 +23,5 @@
             </form>
         </aside>
     </div>
+    @endif
 @endsection

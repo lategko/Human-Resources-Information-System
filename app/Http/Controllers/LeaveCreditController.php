@@ -11,13 +11,23 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
 class LeaveCreditController extends Controller
 {
     public function index(Request $request): View
     {
-        $query = LeaveCredit::with(['employee.department', 'leaveType', 'transactions.createdBy']);
+        $relations = ['employee.department', 'leaveType'];
+        if (! $request->user()->isEmployee()) {
+            $relations[] = 'transactions.createdBy';
+        }
+        $query = LeaveCredit::with($relations);
+        if ($request->user()->isEmployee()) {
+            $employee = $request->user()->employee;
+            abort_unless($employee, 403, 'Your account is not linked to an employee record.');
+            $query->where('employee_id', $employee->id);
+        }
         if ($request->filled('q')) {
             $search = $request->string('q')->toString();
             $query->whereHas('employee', fn ($employee) => $employee->where('employee_no', 'like', "%{$search}%")->orWhere('last_name', 'like', "%{$search}%"));
@@ -25,16 +35,25 @@ class LeaveCreditController extends Controller
 
         return view('leave-credits.index', [
             'credits' => $query->latest()->paginate(25)->withQueryString(),
-            'employees' => Employee::whereNull('archived_at')->orderBy('last_name')->get(),
-            'leaveTypes' => LeaveType::where('is_active', true)->orderBy('sort_order')->get(),
+            'employees' => $request->user()->canManageHr()
+                ? Employee::whereNull('archived_at')->orderBy('last_name')->get()
+                : collect(),
+            'leaveTypes' => $request->user()->canManageHr()
+                ? LeaveType::where('is_active', true)->orderBy('sort_order')->get()
+                : collect(),
         ]);
     }
 
     public function store(Request $request, AuditLogger $auditLogger): RedirectResponse
     {
         $data = $request->validate([
-            'employee_id' => ['required', 'exists:employees,id'],
-            'leave_type_id' => ['required', 'exists:leave_types,id'],
+            'employee_id' => ['required', 'integer', Rule::exists('employees', 'id')->whereNull('archived_at')->whereNull('deleted_at')],
+            'leave_type_id' => [
+                'required',
+                'integer',
+                Rule::exists('leave_types', 'id')->where('is_active', true),
+                Rule::unique('leave_credits', 'leave_type_id')->where('employee_id', $request->input('employee_id')),
+            ],
             'beginning_balance' => ['required', 'numeric', 'min:0', 'max:999999'],
             'effective_date' => ['required', 'date'],
             'remarks' => ['required', 'string', 'max:2000'],
@@ -81,7 +100,7 @@ class LeaveCreditController extends Controller
                 $credit->adjustments = (float) $credit->adjustments + (float) $data['amount'];
             }
             if ($credit->balance < 0) {
-                throw \Illuminate\Validation\ValidationException::withMessages([
+                throw ValidationException::withMessages([
                     'amount' => 'This transaction would make the leave credit balance negative.',
                 ]);
             }

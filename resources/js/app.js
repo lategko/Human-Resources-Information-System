@@ -1,5 +1,4 @@
 import './bootstrap';
-import '../css/app.css';
 import Alpine from 'alpinejs';
 import {
     createIcons, Activity, ArrowRight, ArrowUpDown, Bell, BriefcaseBusiness, Building2,
@@ -12,6 +11,10 @@ import {
 import Chart from 'chart.js/auto';
 
 window.Alpine = Alpine;
+Chart.defaults.font.family = '"Inter Variable", Inter, "Segoe UI", Arial, sans-serif';
+Chart.defaults.font.size = 12;
+Chart.defaults.font.weight = 400;
+Chart.defaults.color = '#536678';
 
 createIcons({
     icons: {

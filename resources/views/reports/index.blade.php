@@ -1,9 +1,10 @@
 @extends('layouts.app')
 @section('title', 'Reports')
 @section('content')
+    <div class="report-print-document">
     <div class="page-heading"><div><span class="eyebrow">REPORTS & ANALYTICS</span><h1>Reports</h1><p>Filter attendance and leave activity within your authorized access scope.</p></div><button class="button button-outline" onclick="window.print()">Print this report</button></div>
     <header class="report-print-header">
-        <img src="{{ asset('image/hrislogo.jpg') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal">
+        <img src="{{ asset('image/hrislogo.webp') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal" width="84" height="84" decoding="async">
         <div><strong>Municipality of Camalaniugan</strong><span>Human Resource Management Office</span><span>Province of Cagayan, Philippines</span></div>
         <div class="report-print-meta"><strong>Human Resources Report</strong><span>Reporting period: {{ \Carbon\Carbon::parse($from)->format('M j, Y') }} – {{ \Carbon\Carbon::parse($to)->format('M j, Y') }}</span><span>Generated: {{ now()->format('M j, Y g:i A') }}</span></div>
     </header>
@@ -25,4 +26,5 @@
         <div class="table-wrap"><table><thead><tr><th>EMPLOYEE</th><th>DEPARTMENT</th><th>LEAVE TYPE</th><th>DATES</th><th>DAYS</th><th>STATUS</th></tr></thead><tbody>@forelse($leaves as $leave)<tr><td>{{ $leave->employee->full_name }}</td><td>{{ $leave->employee->department->name }}</td><td>{{ $leave->leaveType->name }}</td><td>{{ $leave->start_date?->format('M j') }}{{ $leave->end_date?->ne($leave->start_date) ? ' – '.$leave->end_date?->format('M j, Y') : '' }}</td><td>{{ $leave->verified_working_days ?? $leave->working_days }}</td><td><span class="status-tag">{{ $leave->status }}</span></td></tr>@empty<tr><td colspan="6" class="empty-note">No leave applications for this report.</td></tr>@endforelse</tbody></table></div><div class="pagination-wrap">{{ $leaves->links() }}</div>
     </section>
     @can('create', App\Models\Employee::class)<div class="panel panel-spaced"><div class="panel-heading"><div><h2>Employee master list</h2><p>Export an employee directory without salary or identification references.</p></div><a class="button button-outline" href="{{ route('reports.csv', ['type'=>'employees'] + request()->query()) }}">Download employee CSV</a></div></div>@endcan
+    </div>
 @endsection

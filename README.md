@@ -27,30 +27,53 @@ A Laravel 12, Blade, Tailwind CSS, Alpine.js, and MySQL-ready HRIS prototype for
 
 5. Open the URL printed by `php artisan serve`.
 
-`php artisan migrate --seed` applies pending migrations and adds missing leave-type reference data. In local and testing environments it also creates clearly labeled demo Administrator, HRMO, and Office Head accounts. It does not create employee, department, or position records, and it does not overwrite existing account credentials or employee information.
+`php artisan migrate --seed` applies pending migrations and adds missing leave-type reference data. It does not invent or create account identities unless optional initial-account settings are explicitly supplied. It never creates employee, department, or position records.
 
-Each local demo account uses the password `password`. Reseeding resets only these three demo accounts' passwords; it does not change their other account details. Demo accounts must not be used for production. The demo Office Head has no department assignment, and there is no demo Employee account; create/link an employee login only after an authorized employee record exists.
+To bootstrap an installation, configure `HRIS_INITIAL_SUPER_ADMIN_NAME`, `HRIS_INITIAL_SUPER_ADMIN_EMAIL`, and a strong `HRIS_INITIAL_SUPER_ADMIN_PASSWORD` in the protected active environment file, then run `php artisan db:seed`. The Super Admin account is created only if that email is unused; a conflicting existing non-Super-Admin account causes seeding to stop rather than promote it. Optional initial ADMIN, HRMO, and Office Head accounts can be configured with the corresponding `HRIS_INITIAL_*` values; an Office Head also requires an existing `HRIS_INITIAL_OFFICE_HEAD_DEPARTMENT_ID`. Remove bootstrap credentials from the environment after setup. Rerunning seeders never updates existing names, roles, passwords, status, or relationships.
 
-For safe population, first verify `DB_CONNECTION` and `DB_DATABASE` in the active environment, then run `php artisan migrate --seed`. Migrations are additive; never use `migrate:fresh` or truncate tables on a database containing records. Create department and position records from the authorized HR screens, then enter or import verified municipal employee data through the application. Employee records may remain unlinked to a login; employee login accounts must be linked to one existing, non-archived employee record. Demo accounts are only included by the seeder in local/testing environments.
+For safe population, first verify `DB_CONNECTION` and `DB_DATABASE` in the active environment. In production, back up and test restoration before applying approved migrations. Migrations are additive; never use `migrate:fresh` or truncate tables on a database containing records. Create department and position records from the authorized HR screens, then enter verified municipal employee data. Employee accounts must be linked to one existing, non-archived employee record.
 
 Supporting leave documents are written to Laravel's private `local` disk (`storage/app/private`), not to the public storage directory. Keep that directory access-controlled and include it in secure backups.
 
-## Demo accounts
+## Office Head availability and alternate routing
 
-All three local demo accounts use the password **`password`**:
+HRMO or an administrator can record a dated Office Head availability period from **Office Head availability**. Records include the reason and, when authorized, a temporary alternate approver. Office Heads cannot create their own unavailability records. Periods for the same department cannot overlap.
 
-| Role | Email |
-|---|---|
-| DEMO Administrator and designated final approver | `hradmin@gmail.com` | `HRIS_DEMO_ADMIN_PASSWORD` |
-| DEMO HRMO Officer | `hrmo@gmail.com` | `HRIS_DEMO_HRMO_PASSWORD` |
-| DEMO Office Head | `officehead@gmail.com` | `HRIS_DEMO_OFFICE_HEAD_PASSWORD` |
+Leave applications are routed to the assigned Office Head when available. If an unavailable period overlaps the requested leave dates, the application is routed to its assigned alternate or, when no alternate is assigned, to the single active designated final approver. If the route is ambiguous, submission is blocked until an authorized alternate is configured. A final approver who acts as the substitute records one decision; HRMO verifies it, and that same decision is finalized without a duplicate final-approval step. Leave credits are deducted only at finalization.
 
-Demo accounts are created only in local/testing environments. `firstOrCreate` ensures reseeding does not change an existing account's name, role, activation status, or password. Change the local demo password before sharing the environment.
+## Database backup and deployment
+
+Before deploying schema changes or importing authorized personnel data:
+
+1. Confirm the target database and environment without exposing credentials: `php artisan about` and `php artisan migrate:status`.
+2. Take a consistent MySQL backup to an access-restricted location. From `cmd.exe`, use the MySQL client with a password prompt (do not put the password in the command line):
+
+   ```text
+   mysqldump --single-transaction --routines --triggers --user=<database-user> --password --result-file="C:\secure-backups\hris-before-deploy.sql" <database-name>
+   ```
+
+3. Verify that the backup is non-empty and test restoration into a separate, isolated database before relying on it. From `cmd.exe`, a restore is:
+
+   ```text
+   mysql --user=<database-user> --password <isolated-database-name> < "C:\secure-backups\hris-before-deploy.sql"
+   ```
+
+4. Deploy code, review pending migrations, and only then apply approved additive migrations with `php artisan migrate --force`. Never use `migrate:fresh` or truncate tables on a database containing records.
+5. Keep backups encrypted or otherwise access-controlled, retain them under municipal policy, and include `storage/app/private` in the protected backup plan.
+
+The supplied November 2026 workbook was inspected locally: it has 100 data rows and 27 columns. Columns H and S both have the header `OFFICE` but contain different values; column X has no header and contains one date-formatted value. HRMO directed that all three remain separate source fields, with the unnamed date source-only unless HRMO explicitly approves a mapping. The workbook has not been imported; complete the HRMO review, create only verified department/position reference records, and take a verified backup before applying the pending import migrations.
+
+## Account setup and management
+
+The application does not include hardcoded municipal account names or email addresses. A Super Admin can manage all user roles, create ADMIN accounts, promote HRMO accounts, and demote ADMIN accounts; regular ADMIN accounts can manage only HRMO, Office Head, and Employee accounts. HRMO access to the account directory remains read-only. Employee accounts must link to an existing verified employee record; Office Head accounts must be assigned to an existing department. New Mayor accounts have a distinct `mayor` role; existing `admin` accounts with final-approver permission are preserved and continue to act as Mayor without changing their stored role. Users manage their own permitted details, profile photo, and password through **My profile**.
+
+The optional `HRIS_INITIAL_*` environment values are for first-install account bootstrapping only. Choose the actual account information and credentials through the municipality's authorized process; the project does not supply or presume personal details.
 
 ## Available modules
 
 - Session authentication, role middleware, policies, account activation, and audit events
 - Role-aware dashboards, employee profiles, employee CRUD/archive, departments, positions, and user accounts
+- Private XLSX employee-import staging and review, pre-import validation preview, duplicate detection, explicit department/position/name/status/date mapping approval, row-level HRMO name correction, import history, audit records, and retained position/appointment history
 - Digital Application for Leave with profile snapshots, conditional leave details, private supporting files, working-day calculations, draft/submit, cancellation, approval history, and notification inbox
 - Office Head recommendation, HRMO credit/day certification and document waiver with justification, and designated Administrator final decision
 - Leave credit balances, adjustments, transaction ledger, and approval-time deductions for credit-tracked leave types
@@ -67,11 +90,13 @@ Demo accounts are created only in local/testing environments. `firstOrCreate` en
 - Set the municipal workweek in System settings and maintain active holiday dates in Holiday calendar.
 - HRMO / Administrator can edit leave guidance, document checklists, sensitivity flags, and credit requirements on Leave requirements.
 - Requirements are examples based on the provided Civil Service Form No. 6 (Revised 2020) field description. Confirm current CSC rules and approved municipal policies before setting filing deadlines, entitlements, document requirements, or waivers.
+- The transparent municipal seal/logo used by the interface is `public/image/hrislogo.webp`.
+- Employee XLSX import is restricted to HRMO and administrators. It retains the original workbook and per-cell source values in private storage/staging; duplicate or existing employee reference numbers are skipped, departments/positions must map to existing records, and no login accounts are created. Both `OFFICE` source columns remain distinct. The unnamed date remains unmapped by default. HRMO must review the name format, verified employment status, source-to-department/position mappings, pre-import row issues, and import preview, then explicitly confirm valid rows. Rows needing review stay staged and can be corrected without changing their original source values.
 - Only the employee, HRMO, and authorized Administrator can access documents marked sensitive. Office Heads are denied access to those downloads and do not see restricted application details.
 
 ## Leave form printing
 
-Open an application and choose **Print / Save PDF**. The dedicated print page is formatted for A4 portrait and contains the application and instruction pages. **Download PDF** generates a two-page PDF in the browser; this PDF embeds page images, so its text is not searchable. **Print** opens the browser print dialog, where you can save a browser-rendered PDF or send the form to a printer. An official municipal seal/logo was not present in the workspace; the prototype does not imitate one.
+Open an application and choose **Print / Save PDF**. The dedicated print page is formatted for A4 portrait and contains the application and instruction pages. **Download PDF** generates a two-page PDF in the browser; this PDF embeds page images, so its text is not searchable. **Print** opens the browser print dialog, where you can save a browser-rendered PDF or send the form to a printer. Confirm the form's current wording and required fields with HRMO before official use.
 
 ## Biometric CSV format
 
@@ -93,4 +118,4 @@ npm run build
 
 ## Before municipal use
 
-Review current law and municipal policy with HR/legal/payroll, replace seeded accounts and sample balances, configure MySQL backups and private-file retention, set production session/cookie settings and HTTPS, establish an approved attendance schedule and deduction methodology, and perform a privacy/security review. The supplied prompt contained the form's fields and instructions but no reference image or authorized logo asset was available in the workspace, so the print layout is a structured text-based reproduction rather than a pixel-exact copy.
+Review current law and municipal policy with HR/legal/payroll, configure MySQL backups and private-file retention, set production session/cookie settings and HTTPS, establish an approved attendance schedule and deduction methodology, and perform a privacy/security review. Confirm the supplied form's current wording and required fields with HRMO before official use.

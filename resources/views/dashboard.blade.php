@@ -1,7 +1,7 @@
 @extends('layouts.app')
 @section('title', $pageTitle)
 @section('content')
-    <div class="page-heading">
+    <div class="page-heading dashboard-heading">
         <div>
             <span class="eyebrow">MUNICIPAL HRIS</span>
             <h1>{{ $pageTitle }}</h1>
@@ -23,7 +23,7 @@
         </div>
         <div class="quick-links" aria-label="Employee shortcuts">
             <a class="button button-primary" href="{{ route('leave.create') }}"><i data-lucide="file-plus-2"></i> Apply for leave</a>
-            <a class="button button-outline" href="#leave-credits"><i data-lucide="wallet"></i> View leave credits</a>
+            <a class="button button-outline" href="{{ route('leave-credits.index') }}"><i data-lucide="wallet"></i> View leave credits</a>
             <a class="button button-outline" href="{{ route('attendance.index') }}"><i data-lucide="clock-3"></i> View attendance</a>
             <a class="button button-outline" href="{{ route('my-profile.edit') }}"><i data-lucide="user-round"></i> Update my profile</a>
             <a class="button button-outline" href="{{ route('leave.index') }}"><i data-lucide="file-clock"></i> Track applications</a>
@@ -33,7 +33,12 @@
             <article class="stat-card"><span class="stat-label">PRESENT THIS MONTH</span><strong>{{ $presentCount }}</strong><small>recorded as present or late</small><span class="stat-icon"><i data-lucide="circle-check"></i></span></article>
             <article class="stat-card"><span class="stat-label">LATE ARRIVALS</span><strong>{{ $lateCount }}</strong><small>recorded this month</small><span class="stat-icon"><i data-lucide="clock-3"></i></span></article>
         </div>
-        <div class="content-grid">
+        <div class="stats-grid stats-grid-3">
+            <article class="stat-card"><span class="stat-label">PENDING APPLICATIONS</span><strong>{{ $applicationStatusCounts->get('Under Office Head Review', 0) + $applicationStatusCounts->get('Under Alternate Office Head Review', 0) + $applicationStatusCounts->get('Under HRMO Verification', 0) + $applicationStatusCounts->get('Pending Final Approval', 0) }}</strong><small>currently awaiting review</small><span class="stat-icon"><i data-lucide="file-clock"></i></span></article>
+            <article class="stat-card"><span class="stat-label">APPROVED</span><strong>{{ $applicationStatusCounts->get('Approved', 0) }}</strong><small>approved leave applications</small><span class="stat-icon"><i data-lucide="circle-check"></i></span></article>
+            <article class="stat-card"><span class="stat-label">DISAPPROVED</span><strong>{{ $applicationStatusCounts->get('Disapproved', 0) }}</strong><small>completed decisions</small><span class="stat-icon"><i data-lucide="circle-x"></i></span></article>
+        </div>
+        <div class="content-grid dashboard-content-grid">
             <section id="leave-credits" class="panel">
                 <div class="panel-heading"><div><h2>Leave credits</h2><p>Current balances from your HR records</p></div><i class="panel-icon" data-lucide="wallet"></i></div>
                 @forelse($credits as $credit)
@@ -58,8 +63,22 @@
                     <div class="application-row"><span class="row-date">{{ $leave->start_date?->format('M d') }}</span><span class="row-main"><b>{{ $leave->leaveType->name }}</b><small>{{ $leave->end_date?->format('M j, Y') }}</small></span><span class="status-tag status-approved">Approved</span></div>
                 @empty<p class="empty-note">No upcoming approved leave is recorded.</p>@endforelse
             </section>
+            <section class="panel">
+                <div class="panel-heading"><div><h2>Notifications</h2><p>Recent updates about your HRIS activity</p></div><a href="{{ route('notifications.index') }}" class="text-link">View all <i data-lucide="arrow-right"></i></a></div>
+                @forelse($recentNotifications as $notification)
+                    <a class="application-row" href="{{ isset($notification->data['application_id']) ? route('leave.show', $notification->data['application_id']) : route('notifications.index') }}"><span class="row-main"><b>{{ $notification->data['message'] ?? 'HRIS notification' }}</b><small>{{ $notification->created_at->diffForHumans() }}</small></span><span class="status-tag {{ $notification->read_at ? '' : 'status-submitted' }}">{{ $notification->read_at ? 'Read' : 'New' }}</span></a>
+                @empty<p class="empty-note">No notifications are available.</p>@endforelse
+            </section>
         </div>
     @else
+        @if($role === 'hrmo')
+            <div class="role-intro"><span class="role-intro-icon"><i data-lucide="briefcase-business" aria-hidden="true"></i></span><div><h2>Human resources operations</h2><p>Personnel records, leave verification, attendance monitoring, and municipal HR activity.</p></div></div>
+        @elseif($role === 'office_head')
+            <div class="role-intro"><span class="role-intro-icon"><i data-lucide="building-2" aria-hidden="true"></i></span><div><h2>Your department workspace</h2><p>Operational summaries and leave tasks are limited to your assigned department.</p></div></div>
+        @elseif($role === 'mayor')
+            <div class="role-intro"><span class="role-intro-icon"><i data-lucide="landmark" aria-hidden="true"></i></span><div><h2>Municipal executive overview</h2><p>Workforce, attendance, and approval decisions across the municipality.</p></div></div>
+        @endif
+
         <form class="dashboard-filters panel" method="GET" aria-label="Dashboard filters">
             <label>Trend from<input type="date" name="date_from" value="{{ $dateFrom }}"></label>
             <label>Trend to<input type="date" name="date_to" value="{{ $dateTo }}"></label>
@@ -75,8 +94,10 @@
                 <article class="stat-card"><span class="stat-label">PRESENT TODAY</span><strong>{{ number_format($presentCount) }}</strong><small>recorded present or late</small><span class="stat-icon"><i data-lucide="circle-check"></i></span></article>
                 <article class="stat-card"><span class="stat-label">RECORDED ABSENCES</span><strong>{{ number_format($absentCount) }}</strong><small>absence records for today</small><span class="stat-icon"><i data-lucide="circle-alert"></i></span></article>
                 <article class="stat-card"><span class="stat-label">PENDING RECOMMENDATIONS</span><strong>{{ number_format($pendingCount) }}</strong><small>awaiting your department review</small><span class="stat-icon"><i data-lucide="file-clock"></i></span></article>
+                <article class="stat-card"><span class="stat-label">APPROVED LEAVE REQUESTS</span><strong>{{ number_format($approvedLeaveCount) }}</strong><small>within your assigned office</small><span class="stat-icon"><i data-lucide="circle-check"></i></span></article>
+                <article class="stat-card"><span class="stat-label">RETURNED FOR CORRECTION</span><strong>{{ number_format($returnedLeaveCount) }}</strong><small>department applications</small><span class="stat-icon"><i data-lucide="corner-up-left"></i></span></article>
             </div>
-            <div class="content-grid">
+            <div class="content-grid dashboard-content-grid">
                 <section class="panel panel-wide">
                     <div class="panel-heading"><div><h2>Leave applications for your review</h2><p>Only applications from your assigned department are shown.</p></div><a href="{{ route('leave.index') }}" class="text-link">Open applications <i data-lucide="arrow-right"></i></a></div>
                     @forelse($pendingTasks as $application)
@@ -94,22 +115,45 @@
                     <div class="stat-inline"><strong>{{ number_format($leaveTodayCount) }}</strong><span>employees with approved leave today</span></div>
                     <a class="button button-outline button-wide top-space" href="{{ route('leave.index', ['status' => 'Approved']) }}">View approved applications</a>
                 </section>
+                <section class="panel">
+                    <div class="panel-heading"><div><h2>Recent leave requests</h2><p>Applications from your assigned department</p></div><a href="{{ route('leave.index') }}" class="text-link">View all <i data-lucide="arrow-right"></i></a></div>
+                    @forelse($recentApplications as $application)
+                        <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->leaveType->name }}</small></span><span class="status-tag status-{{ \Illuminate\Support\Str::slug($application->status) }}">{{ $application->status }}</span></a>
+                    @empty<p class="empty-note">No leave requests have been recorded for your department.</p>@endforelse
+                </section>
+                <section id="approval-history" class="panel">
+                    <div class="panel-heading"><div><h2>Your approval history</h2><p>Actions you recorded for your department</p></div></div>
+                    @forelse($approvalHistory as $history)
+                        <a class="application-row" href="{{ route('leave.show', $history->application) }}"><span class="row-date">{{ $history->created_at->format('M d') }}</span><span class="row-main"><b>{{ $history->application->employee->full_name }}</b><small>{{ \Illuminate\Support\Str::headline($history->action) }} · {{ $history->application->leaveType->name }}</small></span><span class="status-tag">{{ $history->to_status ?? $history->from_status }}</span></a>
+                    @empty<p class="empty-note">No approval actions have been recorded yet.</p>@endforelse
+                </section>
             </div>
         @elseif($role === 'hrmo')
             <div class="stats-grid stats-grid-3">
                 <article class="stat-card"><span class="stat-label">ACTIVE EMPLOYEES</span><strong>{{ number_format($employeeCount) }}</strong><small>{{ $departmentCount }} departments in scope</small><span class="stat-icon"><i data-lucide="users"></i></span></article>
+                <article class="stat-card"><span class="stat-label">INACTIVE EMPLOYEES</span><strong>{{ number_format($inactiveEmployeeCount) }}</strong><small>non-archived records not marked active</small><span class="stat-icon"><i data-lucide="user-round-x"></i></span></article>
                 <article class="stat-card"><span class="stat-label">HRMO VERIFICATION</span><strong>{{ number_format($pendingCount) }}</strong><small>leave applications awaiting HR review</small><span class="stat-icon"><i data-lucide="clipboard-check"></i></span></article>
                 <article class="stat-card"><span class="stat-label">ACTIVE LEAVE CREDIT RECORDS</span><strong>{{ number_format($activeCreditCount) }}</strong><small>records available for monitoring</small><span class="stat-icon"><i data-lucide="wallet"></i></span></article>
                 <article class="stat-card"><span class="stat-label">LATE TODAY</span><strong>{{ number_format($lateCount) }}</strong><small>recorded late arrivals</small><span class="stat-icon"><i data-lucide="clock-3"></i></span></article>
                 <article class="stat-card"><span class="stat-label">RECORDED ABSENCES</span><strong>{{ number_format($absentCount) }}</strong><small>absence records for today</small><span class="stat-icon"><i data-lucide="circle-alert"></i></span></article>
                 <article class="stat-card"><span class="stat-label">ON APPROVED LEAVE</span><strong>{{ number_format($leaveTodayCount) }}</strong><small>approved leave covering today</small><span class="stat-icon"><i data-lucide="calendar-days"></i></span></article>
             </div>
-            <div class="content-grid">
+            <div class="content-grid dashboard-content-grid">
                 <section class="panel panel-wide">
                     <div class="panel-heading"><div><h2>Pending HR actions</h2><p>Leave applications requiring HRMO verification and certification</p></div><a href="{{ route('leave.index', ['status' => 'Under HRMO Verification']) }}" class="text-link">View all <i data-lucide="arrow-right"></i></a></div>
                     @forelse($pendingTasks as $application)
                         <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department->name }} · {{ $application->leaveType->name }}</small></span><span class="status-tag status-under-hrmo-verification">HR verification</span></a>
                     @empty<p class="empty-note">There are no leave applications awaiting HRMO verification.</p>@endforelse
+                </section>
+                <section class="panel">
+                    <div class="panel-heading"><div><h2>Employee workbook review</h2><p>Confidential imports awaiting mapping or row review</p></div><a href="{{ route('employee-imports.index') }}" class="text-link">Import history <i data-lucide="arrow-right"></i></a></div>
+                    @forelse($pendingEmployeeImports as $import)
+                        <a class="application-row" href="{{ route('employee-imports.show', $import) }}">
+                            <span class="row-date">#{{ $import->id }}</span>
+                            <span class="row-main"><b>{{ $import->original_name }}</b><small>{{ $import->row_count }} source rows · {{ $import->imported_count }} imported · {{ $import->review_count }} need review</small></span>
+                            <span class="status-tag">{{ str_replace('_', ' ', $import->status) }}</span>
+                        </a>
+                    @empty<p class="empty-note">No employee workbooks are waiting for review.</p>@endforelse
                 </section>
                 <section class="panel">
                     <div class="panel-heading"><div><h2>Attendance monitoring</h2><p>Today’s recorded attendance</p></div><a href="{{ route('attendance.index') }}" class="text-link">Open attendance <i data-lucide="arrow-right"></i></a></div>
@@ -129,27 +173,41 @@
                     <div class="chart-wrap"><canvas id="attendanceTrend" aria-label="Attendance trend chart"></canvas></div>
                     <script>document.addEventListener('DOMContentLoaded', () => window.drawAttendanceChart(@json($chartData)));</script>
                 </section>
+                <section class="panel">
+                    <div class="panel-heading"><div><h2>Department staffing</h2><p>Active employees by office</p></div><a href="{{ route('departments.index') }}" class="text-link">Departments <i data-lucide="arrow-right"></i></a></div>
+                    @forelse($departmentDistribution as $department)
+                        <div class="distribution-row"><span><b>{{ $department->name }}</b><small>{{ $department->employees_count }} active {{ \Illuminate\Support\Str::plural('employee', $department->employees_count) }}</small></span><span class="distribution-bar" aria-hidden="true"><i style="width: {{ $employeeCount > 0 ? min(100, round($department->employees_count / $employeeCount * 100)) : 0 }}%"></i></span></div>
+                    @empty<p class="empty-note">No active departments are recorded.</p>@endforelse
+                </section>
+                <section class="panel">
+                    <div class="panel-heading"><div><h2>Recent HR activities</h2><p>System audit events for operational review</p></div><a href="{{ route('audit.index') }}" class="text-link">Audit logs <i data-lucide="arrow-right"></i></a></div>
+                    @forelse($recentActivities as $activity)
+                        <div class="activity-row"><span class="activity-icon"><i data-lucide="activity"></i></span><span class="row-main"><b>{{ \Illuminate\Support\Str::headline($activity->action) }}</b><small>{{ $activity->user?->name ?? 'System' }} · {{ $activity->created_at->diffForHumans() }}</small></span></div>
+                    @empty<p class="empty-note">No HR activity has been recorded.</p>@endforelse
+                </section>
             </div>
-        @else
+        @elseif($role === 'mayor')
             <div class="stats-grid stats-grid-3">
                 <article class="stat-card"><span class="stat-label">ACTIVE EMPLOYEES</span><strong>{{ number_format($employeeCount) }}</strong><small>{{ $departmentCount }} departments in scope</small><span class="stat-icon"><i data-lucide="users"></i></span></article>
+                <article class="stat-card"><span class="stat-label">INACTIVE EMPLOYEES</span><strong>{{ number_format($inactiveEmployeeCount) }}</strong><small>non-archived records not marked active</small><span class="stat-icon"><i data-lucide="user-round-x"></i></span></article>
                 <article class="stat-card"><span class="stat-label">PRESENT TODAY</span><strong>{{ number_format($presentCount) }}</strong><small>recorded present or late</small><span class="stat-icon"><i data-lucide="circle-check"></i></span></article>
                 <article class="stat-card"><span class="stat-label">RECORDED ABSENCES</span><strong>{{ number_format($absentCount) }}</strong><small>absence records for today</small><span class="stat-icon"><i data-lucide="circle-alert"></i></span></article>
-                @if(auth()->user()->canFinalApprove())
-                    <article class="stat-card"><span class="stat-label">PENDING FINAL DECISIONS</span><strong>{{ number_format($pendingCount) }}</strong><small>leave applications awaiting your decision</small><span class="stat-icon"><i data-lucide="file-clock"></i></span></article>
-                @endif
+                <article class="stat-card"><span class="stat-label">PENDING FINAL DECISIONS</span><strong>{{ number_format($pendingFinalTasks->count()) }}</strong><small>leave applications awaiting your decision</small><span class="stat-icon"><i data-lucide="file-clock"></i></span></article>
+                <article class="stat-card"><span class="stat-label">ESCALATED OFFICE REVIEWS</span><strong>{{ number_format($pendingAlternateTasks->count()) }}</strong><small>routed to you as alternate approver</small><span class="stat-icon"><i data-lucide="user-round-check"></i></span></article>
                 <article class="stat-card"><span class="stat-label">ON APPROVED LEAVE</span><strong>{{ number_format($leaveTodayCount) }}</strong><small>approved leave covering today</small><span class="stat-icon"><i data-lucide="calendar-days"></i></span></article>
             </div>
-            <div class="content-grid">
+            <div class="content-grid dashboard-content-grid">
                 <section class="panel panel-wide">
                     <div class="panel-heading"><div><h2>Pending executive decisions</h2><p>Final approvals assigned to your account</p></div><a href="{{ route('leave.index', ['status' => 'Pending Final Approval']) }}" class="text-link">Review applications <i data-lucide="arrow-right"></i></a></div>
-                    @if(auth()->user()->canFinalApprove())
-                        @forelse($pendingTasks as $application)
-                            <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department->name }} · {{ $application->leaveType->name }}</small></span><span class="status-tag status-pending-final-approval">Final approval</span></a>
-                        @empty<p class="empty-note">There are no leave applications awaiting your final decision.</p>@endforelse
-                    @else
-                        <p class="empty-note">Final approval actions are available only to the designated approver.</p>
-                    @endif
+                    @forelse($pendingFinalTasks as $application)
+                        <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department->name }} · {{ $application->leaveType->name }}</small></span><span class="status-tag status-pending-final-approval">Final approval</span></a>
+                    @empty<p class="empty-note">There are no leave applications awaiting your final decision.</p>@endforelse
+                </section>
+                <section class="panel panel-wide">
+                    <div class="panel-heading"><div><h2>Office Head unavailability escalations</h2><p>You are the assigned alternate approver; HRMO verification follows your decision.</p></div><a href="{{ route('leave.index', ['status' => 'Under Alternate Office Head Review']) }}" class="text-link">View escalations <i data-lucide="arrow-right"></i></a></div>
+                    @forelse($pendingAlternateTasks as $application)
+                        <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department->name }} · {{ $application->leaveType->name }} · {{ $application->office_head_routing_reason }}</small></span><span class="status-tag">Alternate review</span></a>
+                    @empty<p class="empty-note">No leave requests are currently escalated to your account.</p>@endforelse
                 </section>
                 <section class="panel">
                     <div class="panel-heading"><div><h2>Department staffing</h2><p>Active employees by department</p></div><a href="{{ route('reports.index') }}" class="text-link">Reports <i data-lucide="arrow-right"></i></a></div>
@@ -172,14 +230,34 @@
                     <div class="chart-wrap"><canvas id="leaveApplicationsTrend" aria-label="Leave applications trend"></canvas></div>
                     <script>document.addEventListener('DOMContentLoaded', () => window.drawLeaveChart(@json($leaveChartData)));</script>
                 </section>
+                <section id="approval-history" class="panel">
+                    <div class="panel-heading"><div><h2>Recent approval activity</h2><p>Recorded decisions and workflow transitions</p></div><a href="{{ route('leave.index') }}" class="text-link">Approval history <i data-lucide="arrow-right"></i></a></div>
+                    @forelse($approvalHistory as $history)
+                        <a class="application-row" href="{{ route('leave.show', $history->application) }}"><span class="row-date">{{ $history->created_at->format('M d') }}</span><span class="row-main"><b>{{ $history->application->employee->full_name }}</b><small>{{ \Illuminate\Support\Str::headline($history->action) }} · {{ $history->application->leaveType->name }}</small></span><span class="status-tag">{{ $history->to_status ?? $history->from_status }}</span></a>
+                    @empty<p class="empty-note">No approval history has been recorded.</p>@endforelse
+                </section>
+            </div>
+            <div class="dashboard-footnote">Dashboard summaries use current database records. Missing attendance is not inferred as an absence. Personal and supporting-document details are not included in this overview.</div>
+        @else
+            <div class="stats-grid stats-grid-3">
+                <article class="stat-card"><span class="stat-label">ACTIVE EMPLOYEES</span><strong>{{ number_format($employeeCount) }}</strong><small>{{ $departmentCount }} departments in scope</small><span class="stat-icon"><i data-lucide="users"></i></span></article>
+                <article class="stat-card"><span class="stat-label">PRESENT TODAY</span><strong>{{ number_format($presentCount) }}</strong><small>recorded present or late</small><span class="stat-icon"><i data-lucide="circle-check"></i></span></article>
+                <article class="stat-card"><span class="stat-label">RECORDED ABSENCES</span><strong>{{ number_format($absentCount) }}</strong><small>recorded absences only</small><span class="stat-icon"><i data-lucide="circle-alert"></i></span></article>
+            </div>
+            <div class="content-grid dashboard-content-grid">
                 <section class="panel">
-                    <div class="panel-heading"><div><h2>Recent HR activity</h2><p>Administrative events recorded by the system</p></div><a href="{{ route('audit.index') }}" class="text-link">Audit logs <i data-lucide="arrow-right"></i></a></div>
+                    <div class="panel-heading"><div><h2>Department staffing</h2><p>Active employees by department</p></div></div>
+                    @forelse($departmentDistribution as $department)
+                        <div class="distribution-row"><span><b>{{ $department->name }}</b><small>{{ $department->employees_count }} active employees</small></span><span class="distribution-bar" aria-hidden="true"><i style="width: {{ $employeeCount > 0 ? min(100, round($department->employees_count / $employeeCount * 100)) : 0 }}%"></i></span></div>
+                    @empty<p class="empty-note">No active departments are recorded.</p>@endforelse
+                </section>
+                <section class="panel">
+                    <div class="panel-heading"><div><h2>Recent administrative activity</h2><p>System audit events</p></div><a href="{{ route('audit.index') }}" class="text-link">Audit logs <i data-lucide="arrow-right"></i></a></div>
                     @forelse($recentActivities as $activity)
                         <div class="activity-row"><span class="activity-icon"><i data-lucide="activity"></i></span><span class="row-main"><b>{{ \Illuminate\Support\Str::headline($activity->action) }}</b><small>{{ $activity->user?->name ?? 'System' }} · {{ $activity->created_at->diffForHumans() }}</small></span></div>
                     @empty<p class="empty-note">No administrative activity has been recorded.</p>@endforelse
                 </section>
             </div>
-            <div class="dashboard-footnote">Dashboard summaries use current database records. Missing attendance is not inferred as an absence. Personal and supporting-document details are not included in this overview.</div>
         @endif
     @endif
 @endsection

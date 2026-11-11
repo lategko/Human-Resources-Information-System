@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Employee extends Model
@@ -58,6 +59,16 @@ class Employee extends Model
     public function attendanceRecords(): HasMany
     {
         return $this->hasMany(AttendanceRecord::class);
+    }
+
+    public function employmentHistories(): HasMany
+    {
+        return $this->hasMany(EmployeeEmploymentHistory::class)->orderBy('sequence');
+    }
+
+    public function serviceProfile(): HasOne
+    {
+        return $this->hasOne(EmployeeServiceProfile::class);
     }
 
     public function getFullNameAttribute(): string

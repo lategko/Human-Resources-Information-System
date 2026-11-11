@@ -76,7 +76,7 @@ class EmployeeController extends Controller
     public function show(Employee $employee): View
     {
         $this->authorize('view', $employee);
-        $employee->load(['department', 'position', 'leaveCredits.leaveType']);
+        $employee->load(['department', 'position', 'leaveCredits.leaveType', 'employmentHistories', 'serviceProfile']);
 
         return view('employees.show', compact('employee'));
     }

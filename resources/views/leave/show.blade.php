@@ -14,6 +14,12 @@
                     <div><small>Office / department</small><b>{{ $application->office_snapshot }}</b></div><div><small>Position</small><b>{{ $application->position_snapshot ?? '—' }}</b></div><div><small>Employee</small><b>{{ $application->last_name_snapshot }}, {{ $application->first_name_snapshot }} {{ $application->middle_name_snapshot }}</b></div>                    @if(!auth()->user()->isOfficeHead())<div><small>Salary snapshot</small><b>{{ $application->salary_snapshot ? '₱'.number_format((float)$application->salary_snapshot, 2) : '—' }}</b></div>@endif
                     <div><small>Leave type</small><b>{{ $application->leaveType->name }}{{ $application->other_leave_type ? ' · '.$application->other_leave_type : '' }}</b></div><div><small>Commutation</small><b>{{ $application->commutation_requested === null ? 'Not selected' : ($application->commutation_requested ? 'Requested' : 'Not Requested') }}</b></div>
                     <div><small>Inclusive dates</small><b>{{ $application->start_date?->format('M j, Y') ?? '—' }}{{ $application->end_date?->ne($application->start_date) ? ' – '.$application->end_date?->format('M j, Y') : '' }}</b></div><div><small>Working days</small><b>{{ $application->verified_working_days ?? $application->working_days ?? '—' }}</b></div>
+                    @if($application->officeHeadReviewer)
+                        <div class="field-span"><small>Assigned Office Head reviewer</small><b>{{ $application->officeHeadReviewer->name }}{{ $application->status === 'Under Alternate Office Head Review' ? ' · Authorized alternate review' : '' }}</b></div>
+                    @endif
+                    @if($application->office_head_routing_reason)
+                        <div class="field-span"><small>Alternate routing</small><b>{{ auth()->user()->canManageHr() || auth()->user()->isAdministrator() || $application->office_head_reviewer_id === auth()->id() ? $application->office_head_routing_reason : 'The assigned Office Head was unavailable; the application was routed to an authorized alternate.' }}</b></div>
+                    @endif
                     @if($sensitiveDetailsVisible)
                         @if($application->leave_detail_category)<div><small>Specific details</small><b>{{ $application->leave_detail_category }}</b></div>@endif
                         @if($application->destination)<div><small>Destination</small><b>{{ $application->destination }}</b></div>@endif
@@ -58,9 +64,9 @@
                 @if(auth()->user()->isOfficeHead())
                     <section class="panel review-panel"><div class="panel-heading"><div><h2>Office Head review</h2><p>Record recommendation and remarks.</p></div></div>
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf
-                            <label>Recommendation<select name="recommendation" required><option value="For approval">For approval</option><option value="For disapproval">For disapproval</option></select></label>
+                            <label>{{ $application->status === 'Under Alternate Office Head Review' ? 'Alternate recommendation' : 'Recommendation' }}<select name="recommendation" required><option value="For approval">For approval</option><option value="For disapproval">For disapproval</option></select></label>
                             <label>Remarks<textarea name="remarks" rows="3" placeholder="Required for disapproval or return"></textarea></label>
-                            <button class="button button-primary button-wide" name="action" value="endorse">Endorse for HRMO review</button>
+                            <button class="button button-primary button-wide" name="action" value="endorse">Send for HRMO review</button>
                             <button class="button button-outline button-wide" name="action" value="return">Return for correction</button>
                         </form>
                     </section>
@@ -81,6 +87,30 @@
                                 </div>
                             @endif
                             <button class="button button-primary button-wide" type="submit">Certify and send for approval</button>
+                        </form>
+                        <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack review-divider">@csrf
+                            <input type="hidden" name="action" value="return">
+                            <label>Return to employee for correction *<textarea name="remarks" rows="2" required></textarea></label>
+                            <button class="button button-outline button-wide" type="submit">Return for correction</button>
+                        </form>
+                    </section>
+                @elseif(auth()->user()->isAdministrator() && $application->status === 'Under Alternate Office Head Review')
+                    <section class="panel review-panel"><div class="panel-heading"><div><h2>Alternate Office Head decision</h2><p>You are acting as the authorized substitute. HRMO verification is required before this recorded decision is finalized.</p></div></div>
+                        <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf
+                            <label>Number of days with pay<input type="number" min="0" step=".5" name="days_with_pay" value="{{ $application->working_days }}" required></label>
+                            <label>Number of days without pay<input type="number" min="0" step=".5" name="days_without_pay" value="0"></label>
+                            <label>Others (specify)<input name="approval_others"></label>
+                            <label>Remarks<textarea name="remarks" rows="2"></textarea></label>
+                            <button class="button button-primary button-wide" name="action" value="approve">Record approval for HRMO verification</button>
+                        </form>
+                        <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack review-divider">@csrf
+                            <input type="hidden" name="action" value="disapprove"><label>Reason for disapproval *<textarea name="reason" rows="2" required></textarea></label>
+                            <label>Additional remarks<textarea name="remarks" rows="2"></textarea></label>
+                            <button class="button button-danger button-wide" type="submit">Record disapproval for HRMO verification</button>
+                        </form>
+                        <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack review-divider">@csrf
+                            <input type="hidden" name="action" value="return"><label>Return remarks *<textarea name="remarks" rows="2" required></textarea></label>
+                            <button class="button button-outline button-wide" type="submit">Return for correction</button>
                         </form>
                     </section>
                 @elseif(auth()->user()->isAdministrator())

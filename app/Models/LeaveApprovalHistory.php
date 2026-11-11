@@ -15,4 +15,9 @@ class LeaveApprovalHistory extends Model
     {
         return $this->belongsTo(User::class);
     }
+
+    public function application(): BelongsTo
+    {
+        return $this->belongsTo(LeaveApplication::class, 'leave_application_id');
+    }
 }

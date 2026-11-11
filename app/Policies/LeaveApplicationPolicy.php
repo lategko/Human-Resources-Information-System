@@ -14,7 +14,8 @@ class LeaveApplicationPolicy
         }
 
         if ($user->isOfficeHead()) {
-            return $application->employee?->department?->head_user_id === $user->id;
+            return $application->office_head_reviewer_id === $user->id
+                || $application->employee?->department?->head_user_id === $user->id;
         }
 
         return $user->employee?->id === $application->employee_id;
@@ -35,8 +36,16 @@ class LeaveApplicationPolicy
     public function review(User $user, LeaveApplication $application): bool
     {
         if ($user->isOfficeHead()) {
-            return $application->employee?->department?->head_user_id === $user->id
-                && $application->status === 'Under Office Head Review';
+            return in_array($application->status, ['Under Office Head Review', 'Under Alternate Office Head Review'], true)
+                && ($application->office_head_reviewer_id
+                    ? $application->office_head_reviewer_id === $user->id
+                    : $application->employee?->department?->head_user_id === $user->id);
+        }
+
+        if ($user->canFinalApprove()
+            && $application->status === 'Under Alternate Office Head Review'
+            && $application->office_head_reviewer_id === $user->id) {
+            return true;
         }
 
         return $user->isHrmo() && $application->status === 'Under HRMO Verification'
