@@ -15,7 +15,7 @@ class AccountAccessTest extends TestCase
     public function test_each_role_logs_in_to_its_assigned_dashboard_and_logout_invalidates_the_session(): void
     {
         $department = Department::create(['name' => 'Administration']);
-        $accounts = collect(['super_admin', 'admin', 'hrmo', 'employee'])
+        $accounts = collect(['super_admin', 'admin', 'hrmo', 'office_head', 'employee'])
             ->mapWithKeys(fn (string $role) => [
                 $role => User::factory()->create([
                     'name' => ucfirst($role).' User',
@@ -32,11 +32,13 @@ class AccountAccessTest extends TestCase
             'first_name' => 'Employee',
             'last_name' => 'User',
         ]);
+        $department->update(['head_user_id' => $accounts['office_head']->id]);
 
         foreach ([
             'super_admin' => 'Super Admin overview',
             'admin' => 'Administration overview',
             'hrmo' => 'HR operations',
+            'office_head' => 'Department overview',
             'employee' => 'My workspace',
         ] as $role => $dashboardHeading) {
             $this->post(route('login.store'), [
@@ -51,6 +53,55 @@ class AccountAccessTest extends TestCase
             $this->assertGuest();
             $this->assertNotSame($sessionId, session()->getId());
         }
+    }
+
+    public function test_login_rejects_an_incorrect_password_and_unknown_email(): void
+    {
+        $user = User::factory()->create([
+            'email' => 'authorized@example.test',
+            'password' => 'CorrectPassword123!',
+            'is_active' => true,
+        ]);
+
+        $this->post(route('login.store'), [
+            'email' => $user->email,
+            'password' => 'IncorrectPassword123!',
+        ])->assertSessionHasErrors('email');
+        $this->assertGuest();
+
+        $this->post(route('login.store'), [
+            'email' => 'unknown@example.test',
+            'password' => 'CorrectPassword123!',
+        ])->assertSessionHasErrors('email');
+        $this->assertGuest();
+    }
+
+    public function test_office_head_can_only_review_employee_records_in_their_assigned_department(): void
+    {
+        $department = Department::create(['name' => 'Assigned Department']);
+        $otherDepartment = Department::create(['name' => 'Other Department']);
+        $officeHead = User::factory()->create(['role' => 'office_head', 'is_active' => true]);
+        $department->update(['head_user_id' => $officeHead->id]);
+        $assignedEmployee = Employee::create([
+            'department_id' => $department->id,
+            'employee_no' => 'EMP-ASSIGNED',
+            'first_name' => 'Assigned',
+            'last_name' => 'Employee',
+        ]);
+        $otherEmployee = Employee::create([
+            'department_id' => $otherDepartment->id,
+            'employee_no' => 'EMP-OTHER',
+            'first_name' => 'Other',
+            'last_name' => 'Employee',
+        ]);
+
+        $this->actingAs($officeHead)
+            ->get(route('employees.index'))
+            ->assertOk()
+            ->assertSee($assignedEmployee->employee_no)
+            ->assertDontSee($otherEmployee->employee_no);
+
+        $this->get(route('employees.show', $otherEmployee))->assertForbidden();
     }
 
     public function test_inactive_accounts_cannot_log_in_and_restricted_pages_reject_direct_requests(): void

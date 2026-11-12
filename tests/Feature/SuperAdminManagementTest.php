@@ -17,6 +17,7 @@ class SuperAdminManagementTest extends TestCase
         $superAdmin = $this->createUser('super_admin');
         $admin = $this->createUser('admin');
         $hrmo = $this->createUser('hrmo');
+        $target = $this->createUser('employee');
 
         $this->actingAs($superAdmin)->get(route('dashboard'))
             ->assertOk()
@@ -27,6 +28,10 @@ class SuperAdminManagementTest extends TestCase
         $this->actingAs($admin)->get(route('super-admin.users.index'))->assertForbidden();
         $this->actingAs($hrmo)->get(route('super-admin.users.index'))->assertForbidden();
         $this->actingAs($admin)->get(route('super-admin.users.show', $hrmo))->assertForbidden();
+        $this->actingAs($admin)
+            ->patch(route('super-admin.users.role', $target), ['role' => 'super_admin'])
+            ->assertForbidden();
+        $this->assertSame('employee', $target->fresh()->role);
     }
 
     public function test_super_admin_can_promote_and_demote_accounts_with_audit_history(): void
