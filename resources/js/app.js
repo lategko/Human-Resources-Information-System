@@ -16,6 +16,24 @@ Chart.defaults.font.size = 12;
 Chart.defaults.font.weight = 400;
 Chart.defaults.color = '#536678';
 
+window.publicNavigation = () => ({
+    menuOpen: false,
+    activeSection: 'home',
+    init() {
+        if (!('IntersectionObserver' in window)) return;
+
+        const observer = new IntersectionObserver((entries) => {
+            const visibleSection = entries
+                .filter((entry) => entry.isIntersecting)
+                .sort((a, b) => Math.abs(a.boundingClientRect.top - 120) - Math.abs(b.boundingClientRect.top - 120))[0];
+
+            if (visibleSection) this.activeSection = visibleSection.target.id;
+        }, { rootMargin: '-120px 0px -65% 0px', threshold: 0 });
+
+        document.querySelectorAll('.public-body main section[id]').forEach((section) => observer.observe(section));
+    },
+});
+
 createIcons({
     icons: {
         Activity, ArrowRight, ArrowUpDown, Bell, BriefcaseBusiness, Building2, CalendarDays,

@@ -23,20 +23,12 @@ class ConfiguredAccountSeeder extends Seeder
                 throw new RuntimeException("The initial {$role} account requires a name, email, and password.");
             }
 
-            if (! filter_var($account['email'], FILTER_VALIDATE_EMAIL)
-                || mb_strlen($account['password']) < 12
-                || ! in_array($role, User::VALID_ROLES, true)) {
-                throw new RuntimeException("The configured initial {$role} account has invalid account information.");
+            if (! in_array($role, User::VALID_ROLES, true)) {
+                throw new RuntimeException("The configured initial account has an unsupported role: {$role}.");
             }
 
-            $existingUser = User::where('email', $account['email'])->first();
-
-            if ($existingUser) {
-                if ($role === 'super_admin' && ! $existingUser->isSuperAdmin()) {
-                    throw new RuntimeException('The configured Super Admin email is already assigned to a non-Super Admin account.');
-                }
-
-                continue;
+            if (! filter_var($account['email'], FILTER_VALIDATE_EMAIL)) {
+                throw new RuntimeException("The configured initial {$role} account requires a valid email address.");
             }
 
             $department = null;
@@ -50,7 +42,34 @@ class ConfiguredAccountSeeder extends Seeder
                 if (! $department) {
                     throw new RuntimeException('The configured Office Head department does not exist.');
                 }
+            }
 
+            $existingUser = User::where('email', $account['email'])->first();
+
+            if ($existingUser) {
+                $status = $existingUser->is_active ? 'active' : 'inactive';
+
+                if ($existingUser->role !== $role || ! $existingUser->is_active) {
+                    throw new RuntimeException(
+                        "The configured {$role} account already exists with role '{$existingUser->role}' "
+                        ."and status '{$status}'; no account data was changed."
+                    );
+                }
+
+                if ($department && (int) $department->head_user_id !== (int) $existingUser->id) {
+                    throw new RuntimeException(
+                        'The existing Office Head account is not assigned to its configured department; no account data was changed.'
+                    );
+                }
+
+                continue;
+            }
+
+            if (! is_string($account['password']) || mb_strlen($account['password']) < 12) {
+                throw new RuntimeException("The configured initial {$role} account password must be at least 12 characters.");
+            }
+
+            if ($department) {
                 if ($department->head_user_id) {
                     throw new RuntimeException('The configured Office Head department is already assigned to another user.');
                 }

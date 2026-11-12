@@ -3,26 +3,49 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#1478B9">
+    <meta name="theme-color" content="#12365b">
     <link rel="icon" type="image/webp" href="{{ asset('image/hrislogo.webp') }}">
-    <title>Sign in · Camalaniugan Municipal HRMO</title>
+    <title>Sign in · Municipality of Camalaniugan HRMO</title>
     @vite(['resources/css/app.css', 'resources/js/app.js'])
 </head>
-<body class="login-page" x-data="{ showPassword: false }">
-    <div class="login-panel">
-        <a href="{{ route('home') }}" class="login-back">← Back to portal</a>
-        <div class="login-brand"><img class="login-logo" src="{{ asset('image/hrislogo.webp') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal" width="64" height="64" decoding="async"><div><strong>Municipality of Camalaniugan</strong><small>Human Resource Management Office · Province of Cagayan, Philippines</small></div></div>
-        <div class="login-heading"><span class="eyebrow">HUMAN RESOURCE INFORMATION SYSTEM</span><h1>Welcome back</h1><p>Sign in with your authorized municipal account.</p></div>
-        @if($errors->any())<div class="alert alert-error" role="alert">{{ $errors->first() }}</div>@endif
-        <form method="POST" action="{{ route('login.store') }}" class="form-stack">
+<body class="login-page" style="--login-image: url('{{ asset('image/login.background.jpg') }}')" x-data="{ showPassword: false, isSubmitting: false }">
+    <main class="login-panel">
+        <a href="{{ route('home') }}" class="login-back"><span aria-hidden="true">←</span> Back to portal</a>
+        <div class="login-brand">
+            <img class="login-logo" src="{{ asset('image/hrislogo.webp') }}" alt="Municipality of Camalaniugan HRMO seal" width="64" height="64" decoding="async">
+            <div>
+                <strong>MUNICIPALITY OF CAMALANIUGAN</strong>
+                <small>Human Resource Management Office<br>Province of Cagayan, Philippines</small>
+            </div>
+        </div>
+        <div class="login-heading">
+            <span class="eyebrow">HUMAN RESOURCE INFORMATION SYSTEM</span>
+            <h1>Welcome Back</h1>
+            <p>Sign in to access your municipal Human Resource Information System.</p>
+        </div>
+        @if($errors->any())
+            <div id="login-error" class="alert alert-error" role="alert" aria-live="assertive">{{ $errors->first() }}</div>
+        @endif
+        <form method="POST" action="{{ route('login.store') }}" class="form-stack login-form" @submit="isSubmitting = true">
             @csrf
-            <label>Email address<input type="email" name="email" value="{{ old('email') }}" placeholder="name@camalaniugan.gov.ph" autocomplete="username" required autofocus></label>
-            <label>Password<span class="password-control"><input aria-label="Password" :type="showPassword ? 'text' : 'password'" name="password" placeholder="Enter your password" autocomplete="current-password" required><button type="button" class="password-toggle" @click="showPassword = !showPassword" :aria-label="showPassword ? 'Hide password' : 'Show password'" :aria-pressed="showPassword.toString()" x-text="showPassword ? 'Hide' : 'Show'"></button></span></label>
-            <label class="checkbox-label"><input type="checkbox" name="remember" value="1"> Keep me signed in</label>
-            <button type="submit" class="button button-primary button-wide">Sign in <span>→</span></button>
+            <label for="email">Email Address
+                <input id="email" type="email" name="email" value="{{ old('email') }}" placeholder="Enter your email address" autocomplete="username" required autofocus @if($errors->any()) aria-describedby="login-error" aria-invalid="true" @endif>
+            </label>
+            <label for="password">Password
+                <span class="password-control">
+                    <input id="password" :type="showPassword ? 'text' : 'password'" name="password" placeholder="Enter your password" autocomplete="current-password" required @if($errors->any()) aria-describedby="login-error" aria-invalid="true" @endif>
+                    <button type="button" class="password-toggle" @click="showPassword = !showPassword" :aria-label="showPassword ? 'Hide password' : 'Show password'" :aria-pressed="showPassword.toString()" x-text="showPassword ? 'Hide' : 'Show'"></button>
+                </span>
+            </label>
+            <label class="checkbox-label login-remember"><input type="checkbox" name="remember" value="1" @checked(old('remember'))> <span>Keep me signed in</span></label>
+            <button type="submit" class="button button-primary button-wide login-submit" :disabled="isSubmitting">
+                <span class="login-spinner" x-show="isSubmitting" aria-hidden="true"></span>
+                <span x-text="isSubmitting ? 'Signing in…' : 'Sign In'">Sign In</span>
+                <span aria-hidden="true">→</span>
+            </button>
         </form>
         <p class="login-privacy">Access is limited to authorized personnel. Your activity may be logged for security and accountability.</p>
-    </div>
-    <aside class="login-aside"><div class="login-aside-inner"><img class="login-seal" src="{{ asset('image/hrislogo.webp') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal" width="240" height="240" decoding="async"><span class="eyebrow">MUNICIPALITY OF CAMALANIUGAN</span><h2>Human Resource Information System</h2><p>Human Resource Management Office<br>Province of Cagayan, Philippines</p><div class="login-aside-bottom">PUBLIC SERVICE · ACCOUNTABILITY · TRUST</div></div></aside>
+    </main>
+    <footer class="login-footer">© {{ date('Y') }} Municipality of Camalaniugan. All Rights Reserved.</footer>
 </body>
 </html>
