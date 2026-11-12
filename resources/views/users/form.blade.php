@@ -22,7 +22,7 @@
                         <option value="{{ $value }}" @selected(old('role', $user->role) === $value)>{{ $label }}</option>
                     @endforeach
                 </select>
-                <small>Only a Super Admin can assign ADMIN or Mayor access. Existing Mayor accounts retain their current final-approver authorization.</small>
+                <small>@if(auth()->user()->isSuperAdmin())Only a Super Admin can assign ADMIN, HRMO, or Mayor access.@elseAdmin accounts may assign Employee or Office Head access. Only a Super Admin can assign ADMIN, HRMO, or Mayor access.@endif</small>
             </label>
             <label x-show="role === 'office_head'" x-cloak>Assigned office / department *
                 <select name="department_id" :disabled="role !== 'office_head'" :required="role === 'office_head'">

@@ -56,10 +56,10 @@ class ReportController extends Controller
                     }
                 });
             } elseif ($type === 'attendance') {
-                fputcsv($output, ['Employee ID', 'Employee name', 'Department', 'Date', 'Time in', 'Time out', 'Hours', 'Late minutes', 'Undertime minutes', 'Status']);
+                fputcsv($output, ['Employee ID', 'Employee name', 'Department', 'Date', 'Time in', 'Time out', 'Net hours', 'Late minutes', 'Undertime minutes', 'Unapproved extra minutes', 'Calendar classification', 'Attendance status', 'Calculation warning']);
                 $this->attendanceQuery($request, $from, $to)->with('employee.department')->orderBy('work_date')->chunk(200, function ($records) use ($output) {
                     foreach ($records as $record) {
-                        fputcsv($output, [$record->employee->employee_no, $record->employee->full_name, $record->employee->department->name, $record->work_date->format('Y-m-d'), $record->time_in, $record->time_out, $record->total_working_hours, $record->late_minutes, $record->undertime_minutes, $record->status]);
+                        fputcsv($output, [$record->employee->employee_no, $record->employee->full_name, $record->employee->department->name, $record->work_date->format('Y-m-d'), $record->time_in, $record->time_out, $record->total_working_hours, $record->late_minutes, $record->undertime_minutes, $record->unapproved_extra_minutes, $record->calendar_classification, $record->display_status, $record->calculation_warning]);
                     }
                 });
             } else {
@@ -94,7 +94,9 @@ class ReportController extends Controller
 
     private function attendanceQuery(Request $request, string $from, string $to): Builder
     {
-        $query = AttendanceRecord::query()->whereBetween('work_date', [$from, $to]);
+        $query = AttendanceRecord::query()
+            ->whereDate('work_date', '>=', $from)
+            ->whereDate('work_date', '<=', $to);
         $this->applyScope($query, $request);
         if ($request->filled('attendance_status')) {
             $query->where('status', $request->string('attendance_status'));

@@ -21,6 +21,7 @@ class HolidayController extends Controller
         $data = $request->validate([
             'holiday_date' => ['required', 'date', 'unique:holidays,holiday_date'],
             'name' => ['required', 'string', 'max:150'],
+            'holiday_type' => ['required', Rule::in(['regular', 'special_non_working'])],
         ]);
         $holiday = Holiday::create($data + ['is_active' => true]);
         $auditLogger->record('holiday.created', $holiday);
@@ -33,6 +34,7 @@ class HolidayController extends Controller
         $data = $request->validate([
             'holiday_date' => ['required', 'date', Rule::unique('holidays')->ignore($holiday->id)],
             'name' => ['required', 'string', 'max:150'],
+            'holiday_type' => ['required', Rule::in(['regular', 'special_non_working'])],
             'is_active' => ['required', 'boolean'],
         ]);
         $holiday->update($data);

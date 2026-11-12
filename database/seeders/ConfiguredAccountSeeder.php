@@ -25,7 +25,7 @@ class ConfiguredAccountSeeder extends Seeder
 
             if (! filter_var($account['email'], FILTER_VALIDATE_EMAIL)
                 || mb_strlen($account['password']) < 12
-                || ! in_array($role, ['super_admin', 'admin', 'hrmo', 'office_head'], true)) {
+                || ! in_array($role, User::VALID_ROLES, true)) {
                 throw new RuntimeException("The configured initial {$role} account has invalid account information.");
             }
 

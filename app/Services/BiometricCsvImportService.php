@@ -6,6 +6,7 @@ use App\Models\AttendanceRecord;
 use App\Models\BiometricImport;
 use App\Models\BiometricImportRecord;
 use App\Models\Employee;
+use App\Models\WorkSchedule;
 use DateTimeImmutable;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -90,14 +91,23 @@ class BiometricCsvImportService
                     }
 
                     if ($reason === null) {
+                        $resolved = WorkSchedule::resolveFor($employee, $date);
+                        $metrics = $hoursCalculator->calculateMetrics(
+                            $timeIn,
+                            $timeOut,
+                            $resolved['schedule'],
+                            $resolved['calendar_classification']
+                        );
                         AttendanceRecord::create([
                             'employee_id' => $employee->id,
                             'work_date' => $date,
                             'time_in' => $timeIn,
                             'time_out' => $timeOut,
-                            'total_working_hours' => $hoursCalculator->calculate($timeIn, $timeOut),
-                            'status' => 'Present',
+                            ...$metrics,
+                            'status' => $metrics['late_minutes'] > 0 ? 'Late' : 'Present',
                             'source' => 'biometric_import',
+                            'calendar_classification' => $resolved['calendar_classification'],
+                            'schedule_snapshot' => $resolved['schedule'],
                         ]);
                         $imported++;
                     } else {

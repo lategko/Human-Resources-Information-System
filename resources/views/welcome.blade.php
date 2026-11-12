@@ -3,12 +3,13 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#1478B9">
+    <meta name="theme-color" content="#102b48">
     <link rel="icon" type="image/webp" href="{{ asset('image/hrislogo.webp') }}">
+    <link rel="preload" as="image" href="{{ asset('image/backgroundlanding.jpg') }}" fetchpriority="high">
     <title>Municipality of Camalaniugan · Human Resource Management Office</title>
     @vite(['resources/css/app.css', 'resources/js/app.js'])
 </head>
-<body class="public-body">
+<body class="public-body" style="--landing-image: url('{{ asset('image/backgroundlanding.jpg') }}')">
     <header class="public-nav">
         <a class="brand" href="{{ route('home') }}"><img class="brand-logo public-logo" src="{{ asset('image/hrislogo.webp') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal" width="48" height="48" decoding="async"><span><strong>Municipality of Camalaniugan</strong><small>Human Resource Management Office</small></span></a>
         <a class="button button-primary" href="{{ route('login') }}">Sign in <span>→</span></a>

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\AuditLog;
+use App\Models\Employee;
 use App\Models\User;
 use App\Services\AuditLogger;
 use Illuminate\Http\RedirectResponse;
@@ -45,8 +46,16 @@ class SuperAdminUserController extends Controller
             $query->where('is_active', false);
         }
 
+        $users = $query->orderBy('name')->paginate(20)->withQueryString();
+
         return view('super-admin.users.index', [
-            'users' => $query->orderBy('name')->paginate(20)->withQueryString(),
+            'users' => $users,
+            'lastLogins' => AuditLog::query()
+                ->where('action', 'auth.login')
+                ->whereIn('user_id', $users->pluck('id'))
+                ->selectRaw('user_id, MAX(created_at) as last_login_at')
+                ->groupBy('user_id')
+                ->pluck('last_login_at', 'user_id'),
             'filters' => $filters,
             'recentRoleChanges' => AuditLog::query()
                 ->with('user:id,name')
@@ -61,6 +70,13 @@ class SuperAdminUserController extends Controller
     {
         return view('super-admin.users.show', [
             'account' => $user->load(['employee.department', 'employee.position', 'departmentHead']),
+            'availableEmployees' => Employee::query()
+                ->whereNull('archived_at')
+                ->where(function ($employees) use ($user) {
+                    $employees->whereNull('user_id')->orWhere('user_id', $user->id);
+                })
+                ->orderBy('last_name')
+                ->get(),
             'history' => AuditLog::query()
                 ->with('user:id,name')
                 ->where('subject_type', User::class)
@@ -74,19 +90,45 @@ class SuperAdminUserController extends Controller
     public function changeRole(Request $request, User $user, AuditLogger $auditLogger): RedirectResponse
     {
         $data = $request->validate([
-            'role' => ['required', Rule::in(['super_admin', 'admin', 'hrmo'])],
+            'role' => ['required', Rule::in(User::VALID_ROLES)],
+            'employee_id' => [
+                Rule::requiredIf($request->input('role') === 'employee'),
+                'nullable',
+                'integer',
+                Rule::exists('employees', 'id')->whereNull('deleted_at')->whereNull('archived_at'),
+            ],
         ]);
         abort_if($user->id === $request->user()->id, 403, 'You cannot change your own privileged role.');
 
         [$previousRole, $newRole] = DB::transaction(function () use ($user, $data, $auditLogger): array {
             $lockedUser = User::query()->lockForUpdate()->findOrFail($user->id);
             $allowedTransition = match ($lockedUser->role) {
-                'hrmo' => $data['role'] === 'admin',
-                'admin' => ! $lockedUser->isMayor() && in_array($data['role'], ['hrmo', 'super_admin'], true),
-                'super_admin' => $data['role'] === 'admin',
+                'employee' => in_array($data['role'], ['hrmo', 'admin', 'super_admin'], true),
+                'hrmo' => in_array($data['role'], ['admin', 'employee', 'super_admin'], true),
+                'admin' => ! $lockedUser->isMayor() && in_array($data['role'], ['hrmo', 'super_admin', 'employee'], true),
+                'super_admin' => in_array($data['role'], ['admin', 'employee'], true),
                 default => false,
             };
             abort_unless($allowedTransition, 422, 'This account cannot be changed to the selected role.');
+
+            if ($data['role'] === 'employee') {
+                $employee = Employee::query()
+                    ->lockForUpdate()
+                    ->findOrFail($data['employee_id']);
+                abort_if(
+                    $employee->user_id && $employee->user_id !== $lockedUser->id,
+                    422,
+                    'This employee record is already linked to another account.'
+                );
+                abort_if(
+                    $lockedUser->employee && $lockedUser->employee->id !== $employee->id,
+                    422,
+                    'An existing employee account cannot be linked to a different employee record.'
+                );
+                $employee->user_id = $lockedUser->id;
+                $employee->saveOrFail();
+                $lockedUser->name = $employee->full_name;
+            }
 
             if ($lockedUser->isSuperAdmin() && $lockedUser->is_active) {
                 $activeSuperAdmins = User::query()
@@ -99,7 +141,9 @@ class SuperAdminUserController extends Controller
 
             $previous = $lockedUser->role;
             $lockedUser->role = $data['role'];
-            $lockedUser->can_final_approve = false;
+            if ($data['role'] !== 'admin') {
+                $lockedUser->can_final_approve = false;
+            }
             $lockedUser->saveOrFail();
             $auditLogger->record('user.role_changed', $lockedUser, [
                 'previous_role' => $previous,

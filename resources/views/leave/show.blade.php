@@ -79,9 +79,10 @@
                             <label>Digital signature (type your full name) *<input name="certifier_signature" maxlength="120" value="{{ auth()->user()->name }}" required></label>
                             <label>Verification remarks<textarea name="remarks" rows="3"></textarea></label>
                             @if($application->leaveType->required_documents)
-                                <div class="waiver-box"><b>Document waiver / flag</b><small>Check only an applicable document HR policy permits waiving. A justification is required and will be included in the approval history.</small>
+                                <div class="waiver-box"><b>Required supporting documents</b><small>Every checklist item must have an attached file or a documented HRMO waiver before verification. Waivers require an approved policy basis and justification.</small>
                                     @foreach($application->leaveType->required_documents as $document)
-                                        <label class="checkbox-label"><input type="checkbox" name="waived_documents[]" value="{{ $document }}" @checked(in_array($document, $application->document_waivers['documents'] ?? [], true))> {{ $document }}</label>
+                                        @php($matchingDocument = $application->documents->firstWhere('document_type', $document))
+                                        <div class="document-requirement-row"><span><b>{{ $document }}</b><small>{{ $matchingDocument ? 'Attached: '.$matchingDocument->original_name : 'Not attached' }}</small></span>@if($matchingDocument)<a class="table-link" href="{{ route('leave.documents', [$application, $matchingDocument]) }}">Open attachment</a>@else<label class="checkbox-label"><input type="checkbox" name="waived_documents[]" value="{{ $document }}" @checked(in_array($document, $application->document_waivers['documents'] ?? [], true))> HRMO waiver</label>@endif</div>
                                     @endforeach
                                     <label>Waiver justification<textarea name="waiver_justification" rows="2">{{ $application->document_waivers['justification'] ?? '' }}</textarea></label>
                                 </div>
@@ -94,7 +95,7 @@
                             <button class="button button-outline button-wide" type="submit">Return for correction</button>
                         </form>
                     </section>
-                @elseif(auth()->user()->isAdministrator() && $application->status === 'Under Alternate Office Head Review')
+                @elseif(auth()->user()->canFinalApprove() && $application->status === 'Under Alternate Office Head Review')
                     <section class="panel review-panel"><div class="panel-heading"><div><h2>Alternate Office Head decision</h2><p>You are acting as the authorized substitute. HRMO verification is required before this recorded decision is finalized.</p></div></div>
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf
                             <label>Number of days with pay<input type="number" min="0" step=".5" name="days_with_pay" value="{{ $application->working_days }}" required></label>
@@ -113,7 +114,7 @@
                             <button class="button button-outline button-wide" type="submit">Return for correction</button>
                         </form>
                     </section>
-                @elseif(auth()->user()->isAdministrator())
+                @elseif(auth()->user()->canFinalApprove())
                     <section class="panel review-panel"><div class="panel-heading"><div><h2>Final decision</h2><p>Record the authorized final action.</p></div></div>
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf
                             <label>Number of days with pay<input type="number" min="0" step=".5" name="days_with_pay" value="{{ $application->verified_working_days ?? $application->working_days }}" required></label>

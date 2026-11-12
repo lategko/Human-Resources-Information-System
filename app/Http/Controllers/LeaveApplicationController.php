@@ -6,6 +6,7 @@ use App\Http\Requests\SaveLeaveApplicationRequest;
 use App\Models\LeaveApplication;
 use App\Models\LeaveApplicationDocument;
 use App\Models\LeaveApprovalHistory;
+use App\Models\Employee;
 use App\Models\LeaveType;
 use App\Models\OfficeHeadAvailability;
 use App\Models\User;
@@ -18,6 +19,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
+use Throwable;
 
 class LeaveApplicationController extends Controller
 {
@@ -31,6 +33,16 @@ class LeaveApplicationController extends Controller
             $query->where(function ($applications) use ($user) {
                 $applications->where('office_head_reviewer_id', $user->id)
                     ->orWhereHas('employee.department', fn ($department) => $department->where('head_user_id', $user->id));
+            });
+        } elseif ($user->canFinalApprove() && ! $user->isAdministrator()) {
+            $query->where(function ($applications) use ($user) {
+                $applications->where('status', 'Pending Final Approval')
+                    ->orWhere(function ($alternate) use ($user) {
+                        $alternate->where('status', 'Under Alternate Office Head Review')
+                            ->where('office_head_reviewer_id', $user->id);
+                    })
+                    ->orWhere('decided_by', $user->id)
+                    ->orWhere('alternate_decision_by', $user->id);
             });
         }
         if ($request->filled('status')) {
@@ -73,47 +85,54 @@ class LeaveApplicationController extends Controller
     ): RedirectResponse {
         $employee = $request->user()->employee;
         $submitted = $request->input('intent') === 'submit';
-        $application = DB::transaction(function () use ($request, $employee, $calculator, $auditLogger, $submitted) {
-            $application = new LeaveApplication;
-            $this->saveForm($application, $request, $employee, $calculator);
-            $application->save();
-            $application->status = $submitted ? 'Submitted' : 'Draft';
-            if ($submitted) {
-                $this->assertNoOverlap($application);
-                $route = $this->resolveOfficeHeadRoute($employee, $application);
-                $application->office_head_reviewer_id = $route['reviewer_id'];
-                $application->office_head_routing_reason = $route['reason'];
-            }
-            $application->save();
+        $storedPaths = [];
+        try {
+            $application = DB::transaction(function () use ($request, $employee, $calculator, $auditLogger, $submitted, &$storedPaths) {
+                $employee = Employee::query()->lockForUpdate()->findOrFail($employee->id);
+                $application = new LeaveApplication;
+                $this->saveForm($application, $request, $employee, $calculator);
+                $application->save();
+                $application->status = $submitted ? 'Submitted' : 'Draft';
+                if ($submitted) {
+                    $this->assertNoOverlap($application);
+                    $route = $this->resolveOfficeHeadRoute($employee, $application);
+                    $application->office_head_reviewer_id = $route['reviewer_id'];
+                    $application->office_head_routing_reason = $route['reason'];
+                }
+                $application->save();
 
-            LeaveApprovalHistory::create([
-                'leave_application_id' => $application->id,
-                'user_id' => $request->user()->id,
-                'role' => $request->user()->role,
-                'action' => $application->status === 'Submitted' ? 'submitted' : 'draft_saved',
-                'to_status' => $application->status,
-            ]);
-            if ($submitted) {
-                $nextStatus = $route['status'];
                 LeaveApprovalHistory::create([
                     'leave_application_id' => $application->id,
                     'user_id' => $request->user()->id,
                     'role' => $request->user()->role,
-                    'action' => $route['action'],
-                    'from_status' => 'Submitted',
-                    'to_status' => $nextStatus,
+                    'action' => $application->status === 'Submitted' ? 'submitted' : 'draft_saved',
+                    'to_status' => $application->status,
                 ]);
-                $application->status = $nextStatus;
-                $application->save();
-            }
-            $auditLogger->record($submitted ? 'leave.submitted' : 'leave.draft_saved', $application, [
-                'status' => $application->status,
-                'reviewer_id' => $application->office_head_reviewer_id,
-            ]);
+                if ($submitted) {
+                    $nextStatus = $route['status'];
+                    LeaveApprovalHistory::create([
+                        'leave_application_id' => $application->id,
+                        'user_id' => $request->user()->id,
+                        'role' => $request->user()->role,
+                        'action' => $route['action'],
+                        'from_status' => 'Submitted',
+                        'to_status' => $nextStatus,
+                    ]);
+                    $application->status = $nextStatus;
+                    $application->save();
+                }
+                $this->saveDocuments($request, $application, $storedPaths);
+                $auditLogger->record($submitted ? 'leave.submitted' : 'leave.draft_saved', $application, [
+                    'status' => $application->status,
+                    'reviewer_id' => $application->office_head_reviewer_id,
+                ]);
 
-            return $application;
-        });
-        $this->saveDocuments($request, $application);
+                return $application;
+            });
+        } catch (Throwable $exception) {
+            Storage::disk('local')->delete($storedPaths);
+            throw $exception;
+        }
         if ($submitted) {
             $application->load('employee', 'officeHeadReviewer');
             $application->officeHeadReviewer?->notify(new LeaveApplicationUpdated(
@@ -164,13 +183,23 @@ class LeaveApplicationController extends Controller
         $employee = $request->user()->employee;
 
         $submitted = $request->input('intent') === 'submit';
-        DB::transaction(function () use ($request, $application, $employee, $calculator, $auditLogger, $submitted) {
-            $previous = $application->status;
-            $this->saveForm($application, $request, $employee, $calculator);
-            if ($submitted) {
-                $this->assertNoOverlap($application);
-                $route = $this->resolveOfficeHeadRoute($employee, $application);
-                $application->fill([
+        $storedPaths = [];
+        try {
+            $application = DB::transaction(function () use ($request, $application, $employee, $calculator, $auditLogger, $submitted, &$storedPaths) {
+                $application = LeaveApplication::query()->lockForUpdate()->findOrFail($application->id);
+                abort_unless(
+                    $application->employee_id === $employee->id
+                        && in_array($application->status, ['Draft', 'Returned for Correction'], true),
+                    409,
+                    'This leave application is no longer available for editing.'
+                );
+                $employee = Employee::query()->lockForUpdate()->findOrFail($employee->id);
+                $previous = $application->status;
+                $this->saveForm($application, $request, $employee, $calculator);
+                if ($submitted) {
+                    $this->assertNoOverlap($application);
+                    $route = $this->resolveOfficeHeadRoute($employee, $application);
+                    $application->fill([
                     'verified_working_days' => null,
                     'credit_certification' => null,
                     'certified_by' => null,
@@ -198,26 +227,32 @@ class LeaveApplicationController extends Controller
                     'alternate_decision_reason' => null,
                     'alternate_decision_remarks' => null,
                     'alternate_decision_at' => null,
+                    ]);
+                    $application->office_head_reviewer_id = $route['reviewer_id'];
+                    $application->office_head_routing_reason = $route['reason'];
+                    $application->status = $route['status'];
+                    LeaveApprovalHistory::create([
+                        'leave_application_id' => $application->id,
+                        'user_id' => $request->user()->id,
+                        'role' => $request->user()->role,
+                        'action' => 'resubmitted',
+                        'from_status' => $previous,
+                        'to_status' => $route['status'],
+                    ]);
+                }
+                $application->save();
+                $this->saveDocuments($request, $application, $storedPaths);
+                $auditLogger->record('leave.updated', $application, [
+                    'status' => $application->status,
+                    'reviewer_id' => $application->office_head_reviewer_id,
                 ]);
-                $application->office_head_reviewer_id = $route['reviewer_id'];
-                $application->office_head_routing_reason = $route['reason'];
-                $application->status = $route['status'];
-                LeaveApprovalHistory::create([
-                    'leave_application_id' => $application->id,
-                    'user_id' => $request->user()->id,
-                    'role' => $request->user()->role,
-                    'action' => 'resubmitted',
-                    'from_status' => $previous,
-                    'to_status' => $route['status'],
-                ]);
-            }
-            $application->save();
-            $auditLogger->record('leave.updated', $application, [
-                'status' => $application->status,
-                'reviewer_id' => $application->office_head_reviewer_id,
-            ]);
-        });
-        $this->saveDocuments($request, $application);
+
+                return $application;
+            });
+        } catch (Throwable $exception) {
+            Storage::disk('local')->delete($storedPaths);
+            throw $exception;
+        }
         if ($submitted) {
             $application->load('employee', 'officeHeadReviewer');
             $application->officeHeadReviewer?->notify(new LeaveApplicationUpdated(
@@ -368,16 +403,20 @@ class LeaveApplicationController extends Controller
         ];
     }
 
-    private function saveDocuments(SaveLeaveApplicationRequest $request, LeaveApplication $application): void
+    private function saveDocuments(SaveLeaveApplicationRequest $request, LeaveApplication $application, array &$storedPaths): void
     {
         $type = $application->leaveType;
         foreach ($request->file('documents', []) as $index => $file) {
             $path = $file->store('leave-documents/'.$application->id, 'local');
+            if (! $path) {
+                throw new \RuntimeException('A supporting document could not be stored. The leave transaction was rolled back.');
+            }
+            $storedPaths[] = $path;
             LeaveApplicationDocument::create([
                 'leave_application_id' => $application->id,
                 'uploaded_by' => $request->user()->id,
                 'document_type' => $request->input("document_types.{$index}"),
-                'original_name' => $file->getClientOriginalName(),
+                'original_name' => mb_substr($file->getClientOriginalName(), 0, 255),
                 'stored_path' => $path,
                 'mime_type' => $file->getMimeType() ?? 'application/octet-stream',
                 'size_bytes' => $file->getSize(),

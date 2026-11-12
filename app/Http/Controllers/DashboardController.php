@@ -28,7 +28,8 @@ class DashboardController extends Controller
         if ($user->isEmployee()) {
             abort_unless($employee, 403, 'Your account is not linked to an employee record.');
             $attendance = $employee->attendanceRecords()
-                ->whereBetween('work_date', [now()->startOfMonth()->toDateString(), now()->endOfMonth()->toDateString()])
+                ->whereDate('work_date', '>=', now()->startOfMonth()->toDateString())
+                ->whereDate('work_date', '<=', now()->endOfMonth()->toDateString())
                 ->get();
 
             return view('dashboard', [
@@ -89,13 +90,16 @@ class DashboardController extends Controller
         $scopeRelated($attendanceToday);
 
         $attendanceThisMonth = AttendanceRecord::query()
-            ->whereBetween('work_date', [now()->startOfMonth()->toDateString(), now()->endOfMonth()->toDateString()]);
+            ->whereDate('work_date', '>=', now()->startOfMonth()->toDateString())
+            ->whereDate('work_date', '<=', now()->endOfMonth()->toDateString());
         $scopeRelated($attendanceThisMonth);
 
         $leaves = LeaveApplication::query();
         $scopeRelated($leaves);
 
-        $trendQuery = AttendanceRecord::query()->whereBetween('work_date', [$dateFrom, $dateTo]);
+        $trendQuery = AttendanceRecord::query()
+            ->whereDate('work_date', '>=', $dateFrom)
+            ->whereDate('work_date', '<=', $dateTo);
         $scopeRelated($trendQuery);
         $trendRecords = $trendQuery
             ->get(['work_date', 'status'])

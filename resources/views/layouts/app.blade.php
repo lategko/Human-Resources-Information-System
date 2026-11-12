@@ -15,8 +15,8 @@
     $roleTheme = $currentUser->isSuperAdmin() ? 'super_admin' : ($currentUser->canFinalApprove() ? 'mayor' : ($currentUser->isAdministrator() ? 'administrator' : $currentUser->role));
     $roleLabel = match ($roleTheme) {
         'super_admin' => 'SUPER ADMIN',
-        'administrator' => 'ADMIN',
-        'mayor' => 'Mayor / Final Approver',
+        'administrator' => $currentUser->canFinalApprove() ? 'ADMIN · FINAL APPROVER' : 'ADMIN',
+        'mayor' => $currentUser->role === 'admin' ? 'ADMIN · FINAL APPROVER' : 'Mayor / Final Approver',
         'hrmo' => 'HRMO',
         'office_head' => 'Office Head',
         'employee' => 'Employee / Staff',
@@ -36,7 +36,7 @@
 
                 @if($currentUser->isSuperAdmin())
                     <span class="nav-caption">SUPER ADMINISTRATION</span>
-                    <a href="{{ route('super-admin.users.index') }}" class="{{ request()->routeIs('super-admin.users.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="shield-user" aria-hidden="true"></i><span>Manage accounts</span></a>
+                    <a href="{{ route('super-admin.users.index') }}" class="{{ request()->routeIs('super-admin.users.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="shield-user" aria-hidden="true"></i><span>Configured accounts</span></a>
                     <a href="{{ route('audit.index') }}" class="{{ request()->routeIs('audit.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="history" aria-hidden="true"></i><span>Audit logs</span></a>
                     <span class="nav-caption">HR OPERATIONS</span>
                     <a href="{{ route('employees.index') }}" class="{{ request()->routeIs('employees.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="users-round" aria-hidden="true"></i><span>Employees</span></a>
@@ -93,6 +93,10 @@
                     <a href="{{ route('users.index') }}" class="{{ request()->routeIs('users.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="contact-round" aria-hidden="true"></i><span>User management · view only</span></a>
                     <a href="{{ route('audit.index') }}" class="{{ request()->routeIs('audit.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="history" aria-hidden="true"></i><span>Audit logs · view only</span></a>
                 @else
+                    @if($currentUser->canFinalApprove())
+                        <span class="nav-caption">DECISIONS</span>
+                        <a href="{{ route('leave.index', ['status' => 'Pending Final Approval']) }}" class="{{ request()->routeIs('leave.*') && request('status') === 'Pending Final Approval' ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="file-check-2" aria-hidden="true"></i><span>Leave approvals</span></a>
+                    @endif
                     <a href="{{ route('attendance.index') }}" class="{{ request()->routeIs('attendance.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="clock-3" aria-hidden="true"></i><span>Attendance</span></a>
                     <a href="{{ route('leave.index') }}" class="{{ request()->routeIs('leave.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="files" aria-hidden="true"></i><span>Leave applications</span></a>
                     <a href="{{ route('employees.index') }}" class="{{ request()->routeIs('employees.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="users-round" aria-hidden="true"></i><span>Employees</span></a>
@@ -101,7 +105,6 @@
                     <a href="{{ route('positions.index') }}" class="{{ request()->routeIs('positions.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="briefcase-business" aria-hidden="true"></i><span>Positions</span></a>
                     <a href="{{ route('leave-credits.index') }}" class="{{ request()->routeIs('leave-credits.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="wallet" aria-hidden="true"></i><span>Leave credits</span></a>
                     <a href="{{ route('reports.index') }}" class="{{ request()->routeIs('reports.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="chart-no-axes-column-increasing" aria-hidden="true"></i><span>Reports</span></a>
-                    <a href="{{ route('settings.system') }}" class="{{ request()->routeIs('settings.system*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="settings-2" aria-hidden="true"></i><span>System settings</span></a>
                     <a href="{{ route('users.index') }}" class="{{ request()->routeIs('users.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="contact-round" aria-hidden="true"></i><span>User management</span></a>
                     <a href="{{ route('audit.index') }}" class="{{ request()->routeIs('audit.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="history" aria-hidden="true"></i><span>Audit logs</span></a>
                 @endif

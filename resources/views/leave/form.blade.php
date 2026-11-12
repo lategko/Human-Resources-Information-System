@@ -76,7 +76,18 @@
         </section>
         <section class="panel form-panel">
             <div class="form-section-header"><span class="section-number">05</span><div><h2>Supporting documents</h2><p>Upload permitted document formats (PDF, JPG, PNG), up to 10 MB per file.</p></div></div>
-            <div class="upload-area"><label class="upload-control"><span>＋</span><span><b>Choose supporting files</b><small>PDF or image · maximum 10 files</small></span><input type="file" name="documents[]" multiple accept=".pdf,.jpg,.jpeg,.png"></label></div>
+            <div class="upload-area"><label class="upload-control"><span>＋</span><span><b>Choose supporting files</b><small>PDF or image · maximum 10 files</small></span><input type="file" name="documents[]" multiple accept=".pdf,.jpg,.jpeg,.png" @change="setDocuments($event)"></label></div>
+            <div class="form-stack top-space" x-show="documentUploads.length" x-cloak>
+                <template x-for="document in documentUploads" :key="document.index">
+                    <label class="document-upload-row"><span x-text="document.name"></span>
+                        <select :name="`document_types[${document.index}]`" required>
+                            <option value="">Select document type</option>
+                            <template x-for="requiredDocument in (selectedType?.documents ?? [])" :key="requiredDocument"><option :value="requiredDocument" x-text="requiredDocument"></option></template>
+                            <option value="Other supporting document">Other supporting document</option>
+                        </select>
+                    </label>
+                </template>
+            </div>
             <p class="privacy-note">Medical and VAWC documents are stored privately and access is limited. Do not upload documents that are not required for this application.</p>
         </section>
         <div class="section-7-preview"><span class="section-number">07</span><div><b>7. Details of action on application</b><p>Leave credit certification, recommendation, approval, and disapproval fields are reserved for HRMO and authorized approvers.</p></div></div>

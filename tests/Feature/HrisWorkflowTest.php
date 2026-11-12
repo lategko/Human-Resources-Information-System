@@ -16,6 +16,8 @@ use App\Models\LeaveType;
 use App\Models\OfficeHeadAvailability;
 use App\Models\Position;
 use App\Models\User;
+use App\Models\WorkSchedule;
+use App\Services\AttendanceWorkHoursCalculator;
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -90,6 +92,26 @@ class HrisWorkflowTest extends TestCase
         ]);
     }
 
+    private function nextTwoWorkingDays(): array
+    {
+        $calculator = app(\App\Services\WorkingDayCalculator::class);
+        $date = today()->addDay();
+        $lastDate = today()->addYear();
+        $workingDates = [];
+
+        while ($date->lte($lastDate) && count($workingDates) < 2) {
+            $dateString = $date->toDateString();
+            if ($calculator->count($dateString, $dateString) === 1) {
+                $workingDates[] = $dateString;
+            }
+            $date->addDay();
+        }
+
+        $this->assertCount(2, $workingDates, 'The configured calendar must provide two working days within the next year.');
+
+        return $workingDates;
+    }
+
     public function test_employee_can_login_and_submit_a_leave_application_using_workdays(): void
     {
         $employeeUser = User::where('role', 'employee')->firstOrFail();
@@ -121,8 +143,219 @@ class HrisWorkflowTest extends TestCase
         );
     }
 
+    public function test_leave_uploads_require_a_configured_document_type(): void
+    {
+        Storage::fake('local');
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $sensitiveType = LeaveType::where('code', 'VAWC')->firstOrFail();
+        $payload = [
+            'intent' => 'submit',
+            'leave_type_id' => $sensitiveType->id,
+            'start_date' => '2026-12-01',
+            'end_date' => '2026-12-01',
+            'commutation_requested' => '0',
+            'documents' => [UploadedFile::fake()->create('proof.pdf', 100, 'application/pdf')],
+        ];
+
+        $this->actingAs($employee->user)
+            ->post(route('leave.store'), $payload)
+            ->assertSessionHasErrors('document_types');
+        $this->assertDatabaseMissing('leave_applications', ['employee_id' => $employee->id]);
+
+        $singleFilePayload = $payload;
+        $singleFilePayload['documents'] = UploadedFile::fake()->create('single.pdf', 100, 'application/pdf');
+        $this->post(route('leave.store'), $singleFilePayload)
+            ->assertSessionHasErrors(['documents', 'document_types']);
+        $this->assertDatabaseMissing('leave_applications', ['employee_id' => $employee->id]);
+
+        $payload['document_types'] = ['Protection order or appropriate barangay/court certification'];
+        $this->post(route('leave.store'), $payload)->assertRedirect();
+        $application = LeaveApplication::latest('id')->firstOrFail();
+        $document = $application->documents()->firstOrFail();
+        $this->assertSame('Protection order or appropriate barangay/court certification', $document->document_type);
+        Storage::disk('local')->assertExists($document->stored_path);
+    }
+
+    public function test_leave_document_failure_rolls_back_application_and_removes_stored_file(): void
+    {
+        Storage::fake('local');
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $type = LeaveType::where('code', 'VAWC')->firstOrFail();
+        $storedType = $type->required_documents[0];
+        LeaveApplicationDocument::creating(static function (): void {
+            throw new \RuntimeException('Simulated document metadata failure.');
+        });
+
+        $this->actingAs($employee->user)->post(route('leave.store'), [
+                'intent' => 'submit',
+                'leave_type_id' => $type->id,
+                'start_date' => '2026-12-10',
+                'end_date' => '2026-12-10',
+                'commutation_requested' => '0',
+                'documents' => [UploadedFile::fake()->create('proof.pdf', 100, 'application/pdf')],
+                'document_types' => [$storedType],
+            ])->assertServerError();
+
+        $this->assertDatabaseMissing('leave_applications', ['employee_id' => $employee->id]);
+        $this->assertDatabaseCount('leave_approval_histories', 0);
+        $this->assertDatabaseCount('leave_application_documents', 0);
+        $this->assertSame([], Storage::disk('local')->allFiles('leave-documents'));
+    }
+
+    public function test_employee_cannot_submit_overlapping_active_leave_applications(): void
+    {
+        [$startDate, $endDate] = $this->nextTwoWorkingDays();
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $payload = [
+            'intent' => 'submit',
+            'leave_type_id' => LeaveType::where('code', 'VACATION')->value('id'),
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'commutation_requested' => '0',
+        ];
+
+        $this->actingAs($employee->user)->post(route('leave.store'), $payload)->assertRedirect();
+        $this->post(route('leave.store'), $payload)->assertStatus(422);
+        $this->assertDatabaseCount('leave_applications', 1);
+    }
+
+    public function test_final_approval_cannot_use_more_credits_than_available(): void
+    {
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $vacation = LeaveType::where('code', 'VACATION')->firstOrFail();
+        $credit = LeaveCredit::where('employee_id', $employee->id)
+            ->where('leave_type_id', $vacation->id)
+            ->firstOrFail();
+        $credit->update(['used_credits' => (float) $credit->beginning_balance + (float) $credit->earned_credits]);
+        $application = LeaveApplication::create([
+            'employee_id' => $employee->id,
+            'leave_type_id' => $vacation->id,
+            'status' => 'Pending Final Approval',
+            'office_snapshot' => $employee->department->name,
+            'last_name_snapshot' => $employee->last_name,
+            'first_name_snapshot' => $employee->first_name,
+            'working_days' => 1,
+            'verified_working_days' => 1,
+            'start_date' => '2026-12-15',
+            'end_date' => '2026-12-15',
+        ]);
+        $approver = User::where('role', 'admin')->firstOrFail();
+
+        $this->actingAs($approver)->post(route('leave.review', $application), [
+            'action' => 'approve',
+            'days_with_pay' => 1,
+            'days_without_pay' => 0,
+        ])->assertSessionHasErrors('days_with_pay');
+
+        $this->assertSame('Pending Final Approval', $application->fresh()->status);
+        $this->assertSame(0.0, $credit->fresh()->balance);
+        $this->assertDatabaseMissing('leave_credit_transactions', ['leave_application_id' => $application->id]);
+    }
+
+    public function test_distinct_mayor_can_review_only_authorized_leave_records_without_sensitive_details(): void
+    {
+        $mayor = User::create([
+            'name' => 'Test Mayor',
+            'email' => 'mayor@example.test',
+            'password' => 'TestAccount123!',
+            'role' => 'mayor',
+            'is_active' => true,
+        ]);
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $sensitiveType = LeaveType::where('code', 'VAWC')->firstOrFail();
+        $pending = LeaveApplication::create([
+            'employee_id' => $employee->id,
+            'leave_type_id' => $sensitiveType->id,
+            'status' => 'Pending Final Approval',
+            'office_snapshot' => $employee->department->name,
+            'last_name_snapshot' => $employee->last_name,
+            'first_name_snapshot' => $employee->first_name,
+            'leave_detail' => 'Sensitive medical detail',
+            'working_days' => 1,
+            'start_date' => today()->addDays(5),
+            'end_date' => today()->addDays(5),
+        ]);
+        $otherMayor = User::create([
+            'name' => 'Other Mayor',
+            'email' => 'other-mayor@example.test',
+            'password' => 'TestAccount123!',
+            'role' => 'mayor',
+            'is_active' => true,
+        ]);
+        $assignedAlternate = LeaveApplication::create([
+            'employee_id' => $employee->id,
+            'leave_type_id' => $sensitiveType->id,
+            'status' => 'Under Alternate Office Head Review',
+            'office_head_reviewer_id' => $mayor->id,
+            'office_snapshot' => $employee->department->name,
+            'last_name_snapshot' => $employee->last_name,
+            'first_name_snapshot' => $employee->first_name,
+            'working_days' => 1,
+            'start_date' => today()->addDays(6),
+            'end_date' => today()->addDays(6),
+        ]);
+        $otherMayorRequest = LeaveApplication::create([
+            'employee_id' => $employee->id,
+            'leave_type_id' => $sensitiveType->id,
+            'status' => 'Under Alternate Office Head Review',
+            'office_head_reviewer_id' => $otherMayor->id,
+            'office_snapshot' => $employee->department->name,
+            'last_name_snapshot' => $employee->last_name,
+            'first_name_snapshot' => $employee->first_name,
+            'working_days' => 1,
+            'start_date' => today()->addDays(7),
+            'end_date' => today()->addDays(7),
+        ]);
+        $outsideScopeEmployee = Employee::create([
+            'department_id' => $employee->department_id,
+            'employee_no' => 'TEST-0002',
+            'first_name' => 'Outside',
+            'last_name' => 'Scope',
+        ]);
+        $outsideScope = LeaveApplication::create([
+            'employee_id' => $outsideScopeEmployee->id,
+            'leave_type_id' => $sensitiveType->id,
+            'status' => 'Under HRMO Verification',
+            'office_snapshot' => $outsideScopeEmployee->department->name,
+            'last_name_snapshot' => $outsideScopeEmployee->last_name,
+            'first_name_snapshot' => $outsideScopeEmployee->first_name,
+            'working_days' => 1,
+            'start_date' => today()->addDays(5),
+            'end_date' => today()->addDays(5),
+        ]);
+
+        $this->actingAs($mayor)
+            ->get(route('leave.index'))
+            ->assertOk()
+            ->assertSee($employee->full_name)
+            ->assertDontSee($outsideScopeEmployee->full_name)
+            ->assertDontSee('Alternate Office Head decision');
+
+        $this->get(route('leave.show', $pending))
+            ->assertOk()
+            ->assertSee('Final decision')
+            ->assertSee('Restricted details')
+            ->assertDontSee('Sensitive medical detail');
+        $this->get(route('leave.print', $pending))
+            ->assertOk()
+            ->assertDontSee('Sensitive medical detail');
+        $this->get(route('leave.show', $assignedAlternate))
+            ->assertOk()
+            ->assertSee('Alternate Office Head decision');
+        $this->get(route('leave.show', $otherMayorRequest))->assertForbidden();
+        $this->get(route('leave.show', $outsideScope))->assertForbidden();
+
+        $this->post(route('leave.review', $pending), [
+            'action' => 'approve',
+            'days_with_pay' => 1,
+            'days_without_pay' => 0,
+        ])->assertRedirect();
+        $this->assertSame('Approved', $pending->fresh()->status);
+    }
+
     public function test_unavailable_office_head_uses_authorized_mayor_fallback_then_hrmo_finalizes_without_duplicate_decision(): void
     {
+        [$startDate, $endDate] = $this->nextTwoWorkingDays();
         $department = Department::where('code', 'TEST')->firstOrFail();
         $officeHead = User::where('role', 'office_head')->firstOrFail();
         $mayor = User::where('role', 'admin')->firstOrFail();
@@ -131,8 +364,8 @@ class HrisWorkflowTest extends TestCase
             'department_id' => $department->id,
             'office_head_user_id' => $officeHead->id,
             'availability_status' => 'on_leave',
-            'start_date' => today(),
-            'end_date' => today()->addDays(2),
+            'start_date' => $startDate,
+            'end_date' => $endDate,
             'reason' => 'Authorized test availability period',
             'updated_by' => User::where('role', 'hrmo')->value('id'),
         ]);
@@ -141,8 +374,8 @@ class HrisWorkflowTest extends TestCase
         $this->actingAs($employeeUser)->post(route('leave.store'), [
             'intent' => 'submit',
             'leave_type_id' => LeaveType::where('code', 'VACATION')->value('id'),
-            'start_date' => today()->addDays(2)->toDateString(),
-            'end_date' => today()->addDays(3)->toDateString(),
+            'start_date' => $startDate,
+            'end_date' => $endDate,
             'commutation_requested' => '0',
         ])->assertRedirect();
 
@@ -169,6 +402,8 @@ class HrisWorkflowTest extends TestCase
                 'verified_working_days' => 2,
                 'certifier_position' => 'Human Resource Officer',
                 'certifier_signature' => 'HRMO Officer',
+                'waived_documents' => ['Travel destination, if applicable'],
+                'waiver_justification' => 'The employee is not travelling abroad for this leave.',
             ])->assertRedirect();
 
         $application->refresh();
@@ -213,14 +448,15 @@ class HrisWorkflowTest extends TestCase
 
     public function test_hrmo_can_return_a_mismatched_alternate_decision_and_resubmission_clears_it(): void
     {
+        [$startDate, $endDate] = $this->nextTwoWorkingDays();
         $department = Department::where('code', 'TEST')->firstOrFail();
         $officeHead = User::where('role', 'office_head')->firstOrFail();
         OfficeHeadAvailability::create([
             'department_id' => $department->id,
             'office_head_user_id' => $officeHead->id,
             'availability_status' => 'on_leave',
-            'start_date' => today(),
-            'end_date' => today()->addDays(3),
+            'start_date' => $startDate,
+            'end_date' => $endDate,
             'reason' => 'Authorized test availability period',
             'updated_by' => User::where('role', 'hrmo')->value('id'),
         ]);
@@ -229,8 +465,8 @@ class HrisWorkflowTest extends TestCase
         $this->actingAs($employeeUser)->post(route('leave.store'), [
             'intent' => 'submit',
             'leave_type_id' => LeaveType::where('code', 'VACATION')->value('id'),
-            'start_date' => today()->addDays(2)->toDateString(),
-            'end_date' => today()->addDays(3)->toDateString(),
+            'start_date' => $startDate,
+            'end_date' => $endDate,
             'commutation_requested' => '0',
         ])->assertRedirect();
         $application = LeaveApplication::latest('id')->firstOrFail();
@@ -248,6 +484,8 @@ class HrisWorkflowTest extends TestCase
             'verified_working_days' => 1,
             'certifier_position' => 'Human Resource Officer',
             'certifier_signature' => 'HRMO Officer',
+                'waived_documents' => ['Travel destination, if applicable'],
+                'waiver_justification' => 'The employee is not travelling abroad for this leave.',
         ])->assertSessionHasErrors('verified_working_days');
 
         $this->actingAs($hrmo)->post(route('leave.review', $application), [
@@ -259,8 +497,8 @@ class HrisWorkflowTest extends TestCase
         $this->actingAs($employeeUser)->put(route('leave.update', $application), [
             'intent' => 'submit',
             'leave_type_id' => $application->leave_type_id,
-            'start_date' => today()->addDays(2)->toDateString(),
-            'end_date' => today()->addDays(2)->toDateString(),
+            'start_date' => $startDate,
+            'end_date' => $startDate,
             'commutation_requested' => '0',
         ])->assertRedirect();
 
@@ -351,6 +589,8 @@ class HrisWorkflowTest extends TestCase
                 'certifier_position' => 'Human Resource Officer',
                 'certifier_signature' => 'HRMO Officer',
                 'remarks' => 'Verified against leave record.',
+                'waived_documents' => ['Travel destination, if applicable'],
+                'waiver_justification' => 'The employee is not travelling abroad for this leave.',
             ])->assertRedirect();
         $this->assertDatabaseHas('leave_applications', [
             'id' => $application->id,
@@ -408,6 +648,64 @@ class HrisWorkflowTest extends TestCase
             ->assertForbidden();
     }
 
+    public function test_hrmo_verification_requires_every_document_to_be_attached_or_validly_waived(): void
+    {
+        Storage::fake('local');
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $type = LeaveType::where('code', 'VAWC')->firstOrFail();
+        $requiredDocument = $type->required_documents[0];
+        $makeApplication = fn (string $employeeNo) => LeaveApplication::create([
+            'employee_id' => Employee::where('employee_no', $employeeNo)->value('id'),
+            'leave_type_id' => $type->id,
+            'status' => 'Under HRMO Verification',
+            'office_snapshot' => $employee->department->name,
+            'last_name_snapshot' => $employee->last_name,
+            'first_name_snapshot' => $employee->first_name,
+            'working_days' => 1,
+            'verified_working_days' => null,
+            'start_date' => today()->addDays(10),
+            'end_date' => today()->addDays(10),
+        ]);
+        $hrmo = User::where('role', 'hrmo')->firstOrFail();
+        $verification = [
+            'action' => 'verify',
+            'verified_working_days' => 1,
+            'certifier_position' => 'Human Resource Officer',
+            'certifier_signature' => 'HRMO Officer',
+        ];
+        $waiverApplication = $makeApplication('TEST-0001');
+
+        $this->actingAs($hrmo)->post(route('leave.review', $waiverApplication), $verification)
+            ->assertSessionHasErrors('waived_documents');
+        $this->post(route('leave.review', $waiverApplication), $verification + [
+            'waived_documents' => ['Unconfigured document'],
+            'waiver_justification' => 'This item is not in the approved checklist.',
+        ])->assertSessionHasErrors('waived_documents.0');
+        $this->post(route('leave.review', $waiverApplication), $verification + [
+            'waived_documents' => [$requiredDocument],
+            'waiver_justification' => 'Approved policy exception recorded for verification.',
+        ])->assertRedirect();
+        $this->assertSame('Pending Final Approval', $waiverApplication->fresh()->status);
+        $this->assertSame([$requiredDocument], $waiverApplication->fresh()->document_waivers['documents']);
+
+        $attachedApplication = $makeApplication('TEST-0001');
+        $storedPath = Storage::disk('local')->put('leave-documents/'.$attachedApplication->id.'/proof.pdf', 'private');
+        LeaveApplicationDocument::create([
+            'leave_application_id' => $attachedApplication->id,
+            'uploaded_by' => $employee->user_id,
+            'document_type' => $requiredDocument,
+            'original_name' => 'proof.pdf',
+            'stored_path' => $storedPath,
+            'mime_type' => 'application/pdf',
+            'size_bytes' => 7,
+            'is_sensitive' => true,
+        ]);
+
+        $this->post(route('leave.review', $attachedApplication), $verification)->assertRedirect();
+        $this->assertSame('Pending Final Approval', $attachedApplication->fresh()->status);
+        $this->assertNull($attachedApplication->fresh()->document_waivers);
+    }
+
     public function test_biometric_csv_import_reports_duplicates_without_overwriting_records(): void
     {
         $admin = User::where('role', 'admin')->firstOrFail();
@@ -425,6 +723,250 @@ class HrisWorkflowTest extends TestCase
             'error_count' => 1,
         ]);
         $this->assertSame(1, AttendanceRecord::whereDate('work_date', '2026-11-02')->count());
+    }
+
+    public function test_attendance_calculator_applies_lunch_and_reports_late_undertime_and_unapproved_extra_time(): void
+    {
+        $calculator = new AttendanceWorkHoursCalculator;
+        $schedule = [
+            'start_time' => '08:00:00',
+            'end_time' => '17:00:00',
+            'lunch_start' => '12:00:00',
+            'lunch_end' => '13:00:00',
+            'grace_period_minutes' => 0,
+        ];
+
+        $normal = $calculator->calculateMetrics('08:00:00', '17:00:00', $schedule, 'regular_working_day');
+        $this->assertSame(8.0, $normal['total_working_hours']);
+        $this->assertSame(0, $normal['late_minutes']);
+        $this->assertSame(0, $normal['undertime_minutes']);
+
+        $lateAndUndertime = $calculator->calculateMetrics('08:10:00', '16:50:00', $schedule, 'regular_working_day');
+        $this->assertSame(7.67, $lateAndUndertime['total_working_hours']);
+        $this->assertSame(10, $lateAndUndertime['late_minutes']);
+        $this->assertSame(10, $lateAndUndertime['undertime_minutes']);
+
+        $extra = $calculator->calculateMetrics('08:00:00', '17:30:00', $schedule, 'regular_working_day');
+        $this->assertSame(30, $extra['unapproved_extra_minutes']);
+        $this->assertSame(8.5, $extra['total_working_hours']);
+        $this->assertSame(0, $calculator->calculateMetrics('08:00:00', '17:00:00', $schedule, 'regular_holiday')['late_minutes']);
+        $outsideSchedule = $calculator->calculateMetrics('22:00:00', '06:00:00', $schedule, 'regular_working_day');
+        $this->assertNotNull($outsideSchedule['calculation_warning']);
+        $this->assertSame(0, $outsideSchedule['unapproved_extra_minutes']);
+        $this->assertNotNull($calculator->calculateMetrics(null, '17:00:00', $schedule, 'regular_working_day')['calculation_warning']);
+    }
+
+    public function test_hrmo_can_assign_effective_office_and_employee_schedules_without_overlapping_periods(): void
+    {
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $hrmo = User::where('role', 'hrmo')->firstOrFail();
+        $effectiveFrom = today()->toDateString();
+        $officeSchedule = [
+            'working_days' => [1, 2, 3, 4, 5],
+            'start_time' => '08:00',
+            'end_time' => '17:00',
+            'lunch_start' => '12:00',
+            'lunch_end' => '13:00',
+            'grace_period_minutes' => 0,
+            'effective_from' => $effectiveFrom,
+            'reason' => 'Approved municipal office schedule.',
+        ];
+
+        $this->actingAs($hrmo)->get(route('attendance.index'))
+            ->assertOk()
+            ->assertSee('Work schedules')
+            ->assertSee('Default schedule');
+
+        $this->post(route('attendance.schedules.store'), $officeSchedule)
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+        $officeRecord = WorkSchedule::query()->whereNull('employee_id')->firstOrFail();
+
+        $this->post(route('attendance.schedules.store'), array_merge($officeSchedule, [
+            'employee_id' => $employee->id,
+            'start_time' => '09:00',
+            'end_time' => '18:00',
+            'reason' => 'Approved employee-specific schedule.',
+        ]))->assertRedirect()->assertSessionHasNoErrors();
+
+        $resolved = WorkSchedule::resolveFor($employee, $effectiveFrom);
+        $this->assertSame('09:00:00', $resolved['schedule']['start_time']);
+        $this->assertSame('regular_working_day', $resolved['calendar_classification']);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'attendance.schedule_assigned']);
+        $this->get(route('attendance.index'))
+            ->assertOk()
+            ->assertSee($employee->employee_no)
+            ->assertSee('Approved employee-specific schedule')
+            ->assertSee('09:00–18:00');
+
+        $this->post(route('attendance.schedules.store'), array_merge($officeSchedule, [
+            'employee_id' => $employee->id,
+            'reason' => 'Overlapping schedule must fail.',
+        ]))->assertSessionHasErrors('effective_from');
+
+        $this->post(route('attendance.schedules.store'), array_merge($officeSchedule, [
+            'effective_from' => today()->subDay()->toDateString(),
+            'reason' => 'Past-dated schedule must fail.',
+        ]))->assertSessionHasErrors('effective_from');
+        $this->post(route('attendance.schedules.store'), array_merge($officeSchedule, [
+            'lunch_start' => '07:00',
+            'lunch_end' => '07:30',
+            'reason' => 'Lunch outside the shift must fail.',
+        ]))->assertSessionHasErrors('lunch_start');
+        $this->assertSame(2, WorkSchedule::count());
+
+        $this->actingAs($employee->user)->post(route('attendance.schedules.store'), $officeSchedule)
+            ->assertForbidden();
+        $this->actingAs(User::where('role', 'office_head')->firstOrFail())
+            ->post(route('attendance.schedules.store'), $officeSchedule)
+            ->assertForbidden();
+
+        $this->actingAs($hrmo)->patch(route('attendance.schedules.end', $officeRecord), [
+            'effective_to' => $effectiveFrom,
+        ])->assertRedirect()->assertSessionHasNoErrors();
+        $this->assertSame($effectiveFrom, $officeRecord->fresh()->effective_to->toDateString());
+        $this->assertDatabaseHas('audit_logs', ['action' => 'attendance.schedule_ended']);
+    }
+
+    public function test_biometric_import_classifies_worked_holidays_and_rest_days_without_pay_calculations(): void
+    {
+        [$holidayDate, $regularDate] = $this->nextTwoWorkingDays();
+        $restDate = today()->next('Sunday')->toDateString();
+        $regularHolidayDate = today()->addWeeks(2)->next('Monday')->toDateString();
+        Holiday::create([
+            'holiday_date' => $holidayDate,
+            'name' => 'Configured special non-working day',
+            'holiday_type' => 'special_non_working',
+        ]);
+        Holiday::create([
+            'holiday_date' => $regularHolidayDate,
+            'name' => 'Configured regular holiday',
+            'holiday_type' => 'regular',
+        ]);
+        $csv = UploadedFile::fake()->createWithContent(
+            'calendar-attendance.csv',
+            "biometric_id,date,time_in,time_out\nTEST-BIO-0001,{$holidayDate},08:00,18:00\nTEST-BIO-0001,{$regularDate},08:10,17:00\nTEST-BIO-0001,{$restDate},08:00,17:30\nTEST-BIO-0001,{$regularHolidayDate},08:00,17:00\n"
+        );
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->post(route('attendance.import'), ['file' => $csv])
+            ->assertRedirect();
+        $this->assertSame(4, BiometricImport::where('original_name', 'calendar-attendance.csv')->value('imported_count'));
+
+        $holidayRecord = AttendanceRecord::whereDate('work_date', $holidayDate)->firstOrFail();
+        $regularRecord = AttendanceRecord::whereDate('work_date', $regularDate)->firstOrFail();
+        $restRecord = AttendanceRecord::whereDate('work_date', $restDate)->firstOrFail();
+        $regularHolidayRecord = AttendanceRecord::whereDate('work_date', $regularHolidayDate)->firstOrFail();
+        $this->assertSame('special_non_working_holiday', $holidayRecord->calendar_classification);
+        $this->assertSame('Present', $holidayRecord->status);
+        $this->assertSame(60, $holidayRecord->unapproved_extra_minutes);
+        $this->assertSame('Late', $regularRecord->status);
+        $this->assertSame(10, $regularRecord->late_minutes);
+        $this->assertSame('rest_day', $restRecord->calendar_classification);
+        $this->assertSame('Present', $restRecord->status);
+        $this->assertSame('Present - Worked on Rest Day', $restRecord->display_status);
+        $this->assertSame(30, $restRecord->unapproved_extra_minutes);
+        $this->assertSame(0, $restRecord->late_minutes);
+        $this->assertSame('regular_holiday', $regularHolidayRecord->calendar_classification);
+        $this->assertSame('Present - Worked on Regular Holiday', $regularHolidayRecord->display_status);
+        $this->assertSame(0, app(\App\Services\WorkingDayCalculator::class)->count($holidayDate, $holidayDate));
+        $this->assertSame(
+            4,
+            AttendanceRecord::whereDate('work_date', '>=', $holidayDate)
+                ->whereDate('work_date', '<=', $regularHolidayDate)
+                ->count(),
+            'Expected '.$holidayDate.', '.$regularDate.', '.$restDate.', '.$regularHolidayDate.'; stored '.collect([$holidayRecord, $regularRecord, $restRecord, $regularHolidayRecord])->map(fn ($record) => $record->work_date->toDateString())->implode(', ')
+        );
+
+        $admin = User::where('role', 'admin')->firstOrFail();
+        $this->actingAs($admin)->get(route('reports.index', [
+            'date_from' => $holidayDate,
+            'date_to' => $regularHolidayDate,
+        ]))->assertOk()
+            ->assertViewHas('attendanceCount', 4)
+            ->assertSee('UNAPPROVED EXTRA')
+            ->assertSee('special non working holiday')
+            ->assertSee('rest day');
+
+        $csv = $this->get(route('reports.csv', [
+            'type' => 'attendance',
+            'date_from' => $holidayDate,
+            'date_to' => $regularHolidayDate,
+        ]))->assertOk();
+        $this->assertStringContainsString('Unapproved extra minutes', $csv->streamedContent());
+        $this->assertStringContainsString('special_non_working_holiday', $csv->streamedContent());
+    }
+
+    public function test_employee_cannot_correct_an_attendance_record(): void
+    {
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $record = AttendanceRecord::create([
+            'employee_id' => $employee->id,
+            'work_date' => today()->toDateString(),
+            'time_in' => '08:00:00',
+            'time_out' => '17:00:00',
+            'total_working_hours' => 8,
+            'status' => 'Present',
+            'source' => 'manual',
+        ]);
+
+        $this->actingAs($employee->user)->post(route('attendance.correct', $record), [
+            'status' => 'Absent',
+            'time_in' => '',
+            'time_out' => '',
+            'correction_remarks' => 'Unauthorized correction attempt.',
+        ])->assertForbidden();
+
+        $this->assertSame('Present', $record->fresh()->status);
+        $this->assertSame('08:00:00', $record->fresh()->time_in);
+    }
+
+    public function test_attendance_correction_uses_the_recorded_schedule_snapshot(): void
+    {
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $scheduleSnapshot = [
+            'id' => null,
+            'employee_id' => null,
+            'working_days' => [1, 2, 3, 4, 5],
+            'start_time' => '09:00:00',
+            'end_time' => '18:00:00',
+            'lunch_start' => '12:00:00',
+            'lunch_end' => '13:00:00',
+            'grace_period_minutes' => 0,
+        ];
+        $record = AttendanceRecord::create([
+            'employee_id' => $employee->id,
+            'work_date' => today()->toDateString(),
+            'time_in' => '09:00:00',
+            'time_out' => '18:00:00',
+            'total_working_hours' => 8,
+            'status' => 'Present',
+            'calendar_classification' => 'regular_working_day',
+            'schedule_snapshot' => $scheduleSnapshot,
+            'source' => 'biometric_import',
+        ]);
+        WorkSchedule::create([
+            'working_days' => [1, 2, 3, 4, 5],
+            'start_time' => '10:00:00',
+            'end_time' => '19:00:00',
+            'lunch_start' => '12:00:00',
+            'lunch_end' => '13:00:00',
+            'grace_period_minutes' => 0,
+            'effective_from' => today()->toDateString(),
+            'reason' => 'Later schedule for new calculations.',
+            'created_by' => User::where('role', 'hrmo')->firstOrFail()->id,
+        ]);
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->post(route('attendance.correct', $record), [
+                'status' => 'Present',
+                'time_in' => '09:00',
+                'time_out' => '18:00',
+                'correction_remarks' => 'Preserve the schedule used by the original calculation.',
+            ])->assertRedirect();
+
+        $this->assertSame(0, $record->fresh()->late_minutes);
+        $this->assertSame('09:00:00', $record->fresh()->schedule_snapshot['start_time']);
     }
 
     public function test_biometric_import_calculates_overnight_hours_and_rejects_missing_times(): void

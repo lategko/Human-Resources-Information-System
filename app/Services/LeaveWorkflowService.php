@@ -86,6 +86,7 @@ class LeaveWorkflowService
                     $application->status = 'Returned for Correction';
                     $this->recordHistory($application, $user, 'hrmo_returned_for_correction', $from, $application->status, $data['remarks']);
                 } else {
+                    $this->assertRequiredDocumentsSatisfied($application, $data);
                     $application->verified_working_days = $data['verified_working_days'];
                     $application->credit_certification = $this->creditSnapshot($application);
                     $application->certified_by = $user->id;
@@ -205,6 +206,28 @@ class LeaveWorkflowService
         $application->approved_days_without_pay = $withoutPay;
         $application->approval_others = $data['approval_others'] ?? null;
         $application->decision_remarks = $data['remarks'] ?? null;
+    }
+
+    private function assertRequiredDocumentsSatisfied(LeaveApplication $application, array $data): void
+    {
+        $required = $application->leaveType->required_documents ?? [];
+        if ($required === []) {
+            return;
+        }
+
+        $uploaded = $application->documents()
+            ->whereIn('document_type', $required)
+            ->pluck('document_type')
+            ->unique()
+            ->all();
+        $waived = array_values(array_unique($data['waived_documents'] ?? []));
+        $missing = array_values(array_diff($required, $uploaded, $waived));
+
+        if ($missing !== []) {
+            throw ValidationException::withMessages([
+                'waived_documents' => 'Before verification, attach or formally waive each required item: '.implode('; ', $missing).'.',
+            ]);
+        }
     }
 
     private function creditSnapshot(LeaveApplication $application): array

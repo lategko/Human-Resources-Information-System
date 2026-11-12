@@ -47,6 +47,8 @@ Route::middleware(['auth', 'active'])->group(function () {
     Route::post('/attendance/import', [AttendanceController::class, 'import'])->middleware('role:admin,hrmo')->name('attendance.import');
     Route::get('/attendance/imports/{biometricImport}', [AttendanceController::class, 'importDetails'])->middleware('role:admin,hrmo')->name('attendance.imports.show');
     Route::post('/attendance/{attendance}/correct', [AttendanceController::class, 'correct'])->middleware('role:admin,hrmo')->name('attendance.correct');
+    Route::post('/attendance/schedules', [AttendanceController::class, 'storeSchedule'])->middleware('role:admin,hrmo')->name('attendance.schedules.store');
+    Route::patch('/attendance/schedules/{workSchedule}/end', [AttendanceController::class, 'endSchedule'])->middleware('role:admin,hrmo')->name('attendance.schedules.end');
     Route::middleware('role:admin,hrmo,office_head,mayor')->group(function () {
         Route::get('/reports', [ReportController::class, 'index'])->name('reports.index');
         Route::get('/reports/{type}/csv', [ReportController::class, 'export'])->name('reports.csv');
@@ -113,8 +115,8 @@ Route::middleware(['auth', 'active'])->group(function () {
     Route::get('/departments', [DepartmentController::class, 'index'])->middleware('role:admin,hrmo,mayor')->name('departments.index');
 
     Route::middleware('role:admin')->group(function () {
-        Route::get('/settings/system', [SystemSettingsController::class, 'index'])->name('settings.system');
-        Route::put('/settings/system', [SystemSettingsController::class, 'update'])->name('settings.system.update');
+        Route::get('/settings/system', [SystemSettingsController::class, 'index'])->middleware('role:super_admin')->name('settings.system');
+        Route::put('/settings/system', [SystemSettingsController::class, 'update'])->middleware('role:super_admin')->name('settings.system.update');
         Route::get('/users/create', [UserController::class, 'create'])->name('users.create');
         Route::post('/users', [UserController::class, 'store'])->name('users.store');
         Route::get('/users/{user}/edit', [UserController::class, 'edit'])->name('users.edit');

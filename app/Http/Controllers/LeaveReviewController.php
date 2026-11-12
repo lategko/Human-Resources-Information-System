@@ -6,6 +6,7 @@ use App\Models\LeaveApplication;
 use App\Services\LeaveWorkflowService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 
 class LeaveReviewController extends Controller
 {
@@ -37,7 +38,7 @@ class LeaveReviewController extends Controller
                 'certifier_signature' => ['required_if:action,verify', 'nullable', 'string', 'max:120'],
                 'remarks' => ['required_if:action,return', 'nullable', 'string', 'max:2000'],
                 'waived_documents' => ['nullable', 'array', 'max:20'],
-                'waived_documents.*' => ['string', 'max:200'],
+                'waived_documents.*' => ['string', 'max:200', Rule::in($application->leaveType->required_documents ?? [])],
                 'waiver_justification' => ['required_with:waived_documents', 'nullable', 'string', 'max:2000'],
             ],
             $user->canFinalApprove() => [

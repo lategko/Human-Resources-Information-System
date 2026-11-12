@@ -23,7 +23,8 @@ class DeductionController extends Controller
             $date = $request->date('month');
             $query->whereYear('work_date', $date->year)->whereMonth('work_date', $date->month);
         } else {
-            $query->whereBetween('work_date', [now()->startOfMonth()->toDateString(), today()->toDateString()]);
+            $query->whereDate('work_date', '>=', now()->startOfMonth()->toDateString())
+                ->whereDate('work_date', '<=', today()->toDateString());
         }
         if ($request->user()->isOfficeHead()) {
             $query->whereHas('employee.department', fn ($department) => $department->where('head_user_id', $request->user()->id));

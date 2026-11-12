@@ -3,7 +3,9 @@
 namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 use Illuminate\Validation\Rule;
+use App\Models\LeaveType;
 
 class SaveLeaveApplicationRequest extends FormRequest
 {
@@ -15,6 +17,11 @@ class SaveLeaveApplicationRequest extends FormRequest
     public function rules(): array
     {
         $submitting = $this->input('intent') === 'submit';
+        $leaveType = LeaveType::find($this->input('leave_type_id'));
+        $documentTypes = $leaveType?->required_documents ?? [];
+        $documentTypes[] = 'Other supporting document';
+        $uploadedFiles = $this->file('documents', []);
+        $hasDocuments = is_array($uploadedFiles) ? $uploadedFiles !== [] : $uploadedFiles !== null;
 
         return [
             'intent' => ['required', Rule::in(['draft', 'submit'])],
@@ -31,8 +38,21 @@ class SaveLeaveApplicationRequest extends FormRequest
             'applicant_acknowledgment' => ['nullable', 'string', 'max:120'],
             'documents' => ['nullable', 'array', 'max:10'],
             'documents.*' => ['file', 'max:10240', 'mimes:pdf,jpg,jpeg,png'],
-            'document_types' => ['nullable', 'array'],
-            'document_types.*' => ['nullable', 'string', 'max:120'],
+            'document_types' => ['nullable', 'array', 'max:10', Rule::requiredIf($hasDocuments)],
+            'document_types.*' => ['required', 'string', 'max:120', Rule::in($documentTypes)],
         ];
+    }
+
+    public function withValidator(Validator $validator): void
+    {
+        $validator->after(function (Validator $validator): void {
+            $files = $this->file('documents', []);
+            $types = $this->input('document_types', []);
+            $fileCount = is_array($files) ? count($files) : ($files === null ? 0 : 1);
+            $typeCount = is_array($types) ? count($types) : ($types === null ? 0 : 1);
+            if ($fileCount !== $typeCount) {
+                $validator->errors()->add('document_types', 'Select a document type for every uploaded file.');
+            }
+        });
     }
 }

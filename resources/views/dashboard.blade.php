@@ -54,7 +54,7 @@
             <section class="panel">
                 <div class="panel-heading"><div><h2>Recent attendance</h2><p>Latest recorded entries</p></div><a href="{{ route('attendance.index') }}" class="text-link">View attendance <i data-lucide="arrow-right"></i></a></div>
                 @forelse($recentAttendance as $record)
-                    <div class="attendance-row"><span class="row-date">{{ $record->work_date->format('M d') }}</span><span class="row-main"><b>{{ $record->work_date->format('l') }}</b><small>{{ $record->time_in ? substr($record->time_in, 0, 5) : 'No time-in recorded' }}</small></span><span class="status-tag status-{{ \Illuminate\Support\Str::slug($record->status) }} {{ $record->corrected_by ? 'status-corrected' : '' }}">{{ $record->corrected_by ? 'Corrected · ' : '' }}{{ $record->status }}</span></div>
+                    <div class="attendance-row"><span class="row-date">{{ $record->work_date->format('M d') }}</span><span class="row-main"><b>{{ $record->work_date->format('l') }}</b><small>{{ $record->time_in ? substr($record->time_in, 0, 5) : 'No time-in recorded' }}</small></span><span class="status-tag status-{{ \Illuminate\Support\Str::slug($record->status) }} {{ $record->corrected_by ? 'status-corrected' : '' }}">{{ $record->corrected_by ? 'Corrected · ' : '' }}{{ $record->display_status }}</span></div>
                 @empty<p class="empty-note">No attendance records are available yet.</p>@endforelse
             </section>
             <section class="panel">
@@ -158,7 +158,7 @@
                 <section class="panel">
                     <div class="panel-heading"><div><h2>Attendance monitoring</h2><p>Today’s recorded attendance</p></div><a href="{{ route('attendance.index') }}" class="text-link">Open attendance <i data-lucide="arrow-right"></i></a></div>
                     @forelse($recentAttendance as $record)
-                        <div class="attendance-row"><span class="avatar avatar-small">{{ strtoupper(substr($record->employee->first_name, 0, 1)) }}</span><span class="row-main"><b>{{ $record->employee->full_name }}</b><small>{{ $record->employee->department->name }}</small></span><span class="status-tag status-{{ \Illuminate\Support\Str::slug($record->status) }} {{ $record->corrected_by ? 'status-corrected' : '' }}">{{ $record->corrected_by ? 'Corrected · ' : '' }}{{ $record->status }}</span></div>
+                        <div class="attendance-row"><span class="avatar avatar-small">{{ strtoupper(substr($record->employee->first_name, 0, 1)) }}</span><span class="row-main"><b>{{ $record->employee->full_name }}</b><small>{{ $record->employee->department->name }}</small></span><span class="status-tag status-{{ \Illuminate\Support\Str::slug($record->status) }} {{ $record->corrected_by ? 'status-corrected' : '' }}">{{ $record->corrected_by ? 'Corrected · ' : '' }}{{ $record->display_status }}</span></div>
                     @empty<p class="empty-note">No attendance records have been entered today.</p>@endforelse
                     <div class="dashboard-footnote">No attendance record is distinct from a recorded absence.</div>
                 </section>

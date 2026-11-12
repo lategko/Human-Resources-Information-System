@@ -50,7 +50,9 @@ class UserController extends Controller
                 'can_final_approve' => $data['role'] === 'admin' && $request->user()->isSuperAdmin() && ($data['can_final_approve'] ?? false),
                 'password' => $data['password'],
             ]);
-            $this->assignEmployee($user, $data['role'] === 'employee' ? $data['employee_id'] : null);
+            if ($data['role'] === 'employee') {
+                $this->assignEmployee($user, $data['employee_id']);
+            }
             $this->assignOfficeHeadDepartment($user, $data['role'] === 'office_head' ? $data['department_id'] : null);
 
             return $user;
@@ -77,7 +79,7 @@ class UserController extends Controller
                 ->orderBy('name')
                 ->get(),
             'assignedDepartmentId' => Department::where('head_user_id', $user->id)->value('id'),
-            'allowedRoles' => $this->allowedRoles($request->user()),
+            'allowedRoles' => $this->allowedRoles($request->user(), $user),
         ]);
     }
 
@@ -96,7 +98,7 @@ class UserController extends Controller
         $previousStatus = $user->is_active;
         $passwordReset = filled($data['password'] ?? null);
 
-        DB::transaction(function () use ($user, $data, $request, $passwordReset) {
+        DB::transaction(function () use ($user, $data, $request, $passwordReset, $previousStatus) {
             $user->fill([
                 'name' => $this->accountName($data),
                 'email' => $data['email'],
@@ -112,11 +114,16 @@ class UserController extends Controller
                 $user->password = $data['password'];
                 $user->setRememberToken(Str::random(60));
             }
+            if ($previousStatus && ! $user->is_active) {
+                $user->setRememberToken(Str::random(60));
+            }
             $user->save();
-            if ($passwordReset && Schema::hasTable('sessions')) {
+            if (($passwordReset || ($previousStatus && ! $user->is_active)) && Schema::hasTable('sessions')) {
                 DB::table('sessions')->where('user_id', $user->id)->delete();
             }
-            $this->assignEmployee($user, $data['role'] === 'employee' ? $data['employee_id'] : null);
+            if ($data['role'] === 'employee') {
+                $this->assignEmployee($user, $data['employee_id']);
+            }
             $this->assignOfficeHeadDepartment($user, $data['role'] === 'office_head' ? $data['department_id'] : null);
         });
         $newEffectiveRole = $user->canFinalApprove() ? 'mayor' : $user->role;
@@ -149,7 +156,7 @@ class UserController extends Controller
         $data = $request->validate([
             'name' => [$employeeRole ? 'nullable' : 'required', 'string', 'max:150'],
             'email' => ['required', 'email', 'max:255', Rule::unique('users')->ignore($user?->id)],
-            'role' => ['required', Rule::in($this->allowedRoles($request->user()))],
+            'role' => ['required', Rule::in($this->allowedRoles($request->user(), $user))],
             'first_name' => [$employeeRole ? 'nullable' : $namePartsRequired, 'string', 'max:100'],
             'middle_name' => ['nullable', 'string', 'max:100'],
             'last_name' => [$employeeRole ? 'nullable' : $namePartsRequired, 'string', 'max:100'],
@@ -196,11 +203,17 @@ class UserController extends Controller
         return $data;
     }
 
-    private function allowedRoles(User $actor): array
+    private function allowedRoles(User $actor, ?User $target = null): array
     {
-        return $actor->isSuperAdmin()
-            ? ['admin', 'hrmo', 'office_head', 'mayor', 'employee']
-            : ['hrmo', 'office_head', 'employee'];
+        if ($actor->isSuperAdmin()) {
+            return ['admin', 'hrmo', 'office_head', 'mayor', 'employee'];
+        }
+
+        $staffRoles = ['office_head', 'employee'];
+
+        return $target && ! in_array($target->role, $staffRoles, true)
+            ? [$target->role]
+            : $staffRoles;
     }
 
     private function authorizeAccountManagement(User $actor, User $target): void

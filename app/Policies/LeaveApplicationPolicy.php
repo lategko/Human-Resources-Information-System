@@ -18,6 +18,14 @@ class LeaveApplicationPolicy
                 || $application->employee?->department?->head_user_id === $user->id;
         }
 
+        if ($user->canFinalApprove()) {
+            return $application->status === 'Pending Final Approval'
+                || ($application->status === 'Under Alternate Office Head Review'
+                    && $application->office_head_reviewer_id === $user->id)
+                || $application->decided_by === $user->id
+                || $application->alternate_decision_by === $user->id;
+        }
+
         return $user->employee?->id === $application->employee_id;
     }
 

@@ -18,7 +18,8 @@ class WorkingDayCalculator
 
         $holidays = DB::table('holidays')
             ->where('is_active', true)
-            ->whereBetween('holiday_date', [$from->toDateString(), $to->toDateString()])
+            ->whereDate('holiday_date', '>=', $from->toDateString())
+            ->whereDate('holiday_date', '<=', $to->toDateString())
             ->pluck('holiday_date')
             ->map(fn ($date) => Carbon::parse($date)->toDateString())
             ->all();

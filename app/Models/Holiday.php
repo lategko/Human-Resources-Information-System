@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class Holiday extends Model
 {
-    protected $fillable = ['holiday_date', 'name', 'is_active'];
+    protected $fillable = ['holiday_date', 'name', 'holiday_type', 'is_active'];
 
     protected function casts(): array
     {

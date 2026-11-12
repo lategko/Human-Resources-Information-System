@@ -15,7 +15,7 @@
             <a class="button button-outline" href="{{ route('users.edit', $account) }}">Edit account details</a>
         @endunless
         <div class="detail-grid">
-            <div><small>Assigned role</small><b>{{ $account->isSuperAdmin() ? 'SUPER ADMIN' : ($account->isMayor() ? 'MAYOR / FINAL APPROVER' : str_replace('_', ' ', strtoupper($account->role))) }}</b></div>
+            <div><small>Assigned role</small><b>{{ $account->isSuperAdmin() ? 'SUPER ADMIN' : ($account->role === 'admin' && $account->can_final_approve ? 'ADMIN · FINAL APPROVER' : ($account->role === 'mayor' ? 'MAYOR / FINAL APPROVER' : str_replace('_', ' ', strtoupper($account->role)))) }}</b></div>
             <div><small>Account created</small><b>{{ $account->created_at?->format('F j, Y g:i A') ?? '—' }}</b></div>
             <div><small>Last updated</small><b>{{ $account->updated_at?->format('F j, Y g:i A') ?? '—' }}</b></div>
             <div><small>Department / office</small><b>{{ $account->departmentHead?->name ?? $account->employee?->department?->name ?? 'Not assigned' }}</b></div>
@@ -23,15 +23,36 @@
         </div>
         @if($account->id !== auth()->id() && !$account->isMayor())
             <div class="form-actions top-space">
-                @if($account->role === 'hrmo')
+                @if($account->role === 'employee')
+                    <form method="POST" action="{{ route('super-admin.users.role', $account) }}" onsubmit="return confirm('Promote this Employee account to HRMO?')">
+                        @csrf @method('PATCH')<input type="hidden" name="role" value="hrmo">
+                        <button class="button button-primary" type="submit">Promote to HRMO</button>
+                    </form>
+                @elseif($account->role === 'hrmo')
                     <form method="POST" action="{{ route('super-admin.users.role', $account) }}" onsubmit="return confirm('Promote this HRMO account to ADMIN?')">
                         @csrf @method('PATCH')<input type="hidden" name="role" value="admin">
                         <button class="button button-primary" type="submit">Promote to ADMIN</button>
+                    </form>
+                    <form method="POST" action="{{ route('super-admin.users.role', $account) }}" onsubmit="return confirm('Demote this HRMO account to Employee?')">
+                        @csrf @method('PATCH')<input type="hidden" name="role" value="employee"><input type="hidden" name="employee_id" value="{{ $account->employee?->id }}">
+                        <button class="button button-outline" type="submit" @disabled(!$account->employee)>Demote to Employee</button>
                     </form>
                 @elseif($account->role === 'admin')
                     <form method="POST" action="{{ route('super-admin.users.role', $account) }}" onsubmit="return confirm('Demote this ADMIN account to HRMO?')">
                         @csrf @method('PATCH')<input type="hidden" name="role" value="hrmo">
                         <button class="button button-outline" type="submit">Demote to HRMO</button>
+                    </form>
+                    <form method="POST" action="{{ route('super-admin.users.role', $account) }}" onsubmit="return confirm('Demote this ADMIN account to Employee?')">
+                        @csrf @method('PATCH')<input type="hidden" name="role" value="employee">
+                        <label>Linked employee record
+                            <select name="employee_id" required>
+                                <option value="">Select employee</option>
+                                @foreach($availableEmployees as $employee)
+                                    <option value="{{ $employee->id }}" @selected($account->employee?->id === $employee->id)>{{ $employee->employee_no }} · {{ $employee->full_name }}</option>
+                                @endforeach
+                            </select>
+                        </label>
+                        <button class="button button-outline" type="submit">Demote to Employee</button>
                     </form>
                     <form method="POST" action="{{ route('super-admin.users.role', $account) }}" onsubmit="return confirm('Promote this ADMIN account to SUPER ADMIN? This grants system-wide authority.')">
                         @csrf @method('PATCH')<input type="hidden" name="role" value="super_admin">
@@ -41,6 +62,18 @@
                     <form method="POST" action="{{ route('super-admin.users.role', $account) }}" onsubmit="return confirm('Demote this SUPER ADMIN account to ADMIN?')">
                         @csrf @method('PATCH')<input type="hidden" name="role" value="admin">
                         <button class="button button-outline" type="submit">Demote to ADMIN</button>
+                    </form>
+                    <form method="POST" action="{{ route('super-admin.users.role', $account) }}" onsubmit="return confirm('Demote this SUPER ADMIN account to Employee?')">
+                        @csrf @method('PATCH')<input type="hidden" name="role" value="employee">
+                        <label>Linked employee record
+                            <select name="employee_id" required>
+                                <option value="">Select employee</option>
+                                @foreach($availableEmployees as $employee)
+                                    <option value="{{ $employee->id }}" @selected($account->employee?->id === $employee->id)>{{ $employee->employee_no }} · {{ $employee->full_name }}</option>
+                                @endforeach
+                            </select>
+                        </label>
+                        <button class="button button-outline" type="submit">Demote to Employee</button>
                     </form>
                 @endif
             </div>
@@ -59,7 +92,7 @@
             </section>
             <section class="panel form-panel">
                 <div class="panel-heading"><div><h2>Reset account password</h2><p>Set a temporary or user-coordinated password of at least 12 characters. The password is not written to the audit log.</p></div></div>
-                <form method="POST" action="{{ route('super-admin.users.password', $account) }}">
+                <form method="POST" action="{{ route('super-admin.users.password', $account) }}" onsubmit="return confirm('Reset this account password? The user will need the new password to sign in.')">
                     @csrf @method('PUT')
                     <div class="form-grid"><label>New password<input type="password" name="password" minlength="12" autocomplete="new-password" required></label><label>Confirm password<input type="password" name="password_confirmation" minlength="12" autocomplete="new-password" required></label></div>
                     @error('password')<span class="field-error" role="alert">{{ $message }}</span>@enderror

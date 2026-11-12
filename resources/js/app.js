@@ -33,6 +33,7 @@ window.leaveApplicationForm = (types, selectedId, workingDaysUrl) => ({
     startDate: '',
     endDate: '',
     workingDays: null,
+    documentUploads: [],
     dayMessage: 'The server calculates weekdays and excludes configured holidays when dates are selected.',
     init() {
         this.selectedType = this.types.find((type) => String(type.id) === this.selectedId) ?? null;
@@ -42,6 +43,12 @@ window.leaveApplicationForm = (types, selectedId, workingDaysUrl) => ({
     },
     updateType() {
         this.selectedType = this.types.find((type) => String(type.id) === this.selectedId) ?? null;
+    },
+    setDocuments(event) {
+        this.documentUploads = Array.from(event.target.files ?? []).map((file, index) => ({
+            name: file.name,
+            index,
+        }));
     },
     async refreshDays() {
         if (!this.startDate || !this.endDate) {

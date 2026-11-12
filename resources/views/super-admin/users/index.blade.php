@@ -1,8 +1,8 @@
 @extends('layouts.app')
-@section('title', 'Super Admin · User management')
+@section('title', 'Super Admin · Configured accounts')
 @section('content')
     <div class="page-heading">
-        <div><span class="eyebrow">SUPER ADMINISTRATION</span><h1>User management</h1><p>Search accounts, administer access, and review role and account history.</p></div>
+        <div><span class="eyebrow">SUPER ADMINISTRATION</span><h1>Configured accounts</h1><p>Search all system accounts, administer access, and review role and account history.</p></div>
         <a class="button button-primary" href="{{ route('users.create') }}"><i data-lucide="user-plus" aria-hidden="true"></i> Create account</a>
     </div>
 
@@ -28,19 +28,21 @@
         </form>
         <div class="table-wrap">
             <table>
-                <thead><tr><th>ACCOUNT</th><th>ROLE</th><th>OFFICE / EMPLOYEE</th><th>STATUS</th><th>CREATED</th><th>ACTIONS</th></tr></thead>
+                <thead><tr><th>EMPLOYEE / USER NAME</th><th>USERNAME / EMAIL</th><th>ASSIGNED ROLE</th><th>DEPARTMENT</th><th>STATUS</th><th>DATE CREATED</th><th>LAST LOGIN</th><th>ACTIONS</th></tr></thead>
                 <tbody>
                     @forelse($users as $account)
                         <tr>
-                            <td><span class="account-user-cell">@include('shared.avatar', ['user' => $account])<span><strong>{{ $account->name }}</strong><small>{{ $account->email }}</small></span></span></td>
-                            <td>{{ $account->isSuperAdmin() ? 'SUPER ADMIN' : ($account->isMayor() ? 'MAYOR / FINAL APPROVER' : str_replace('_', ' ', strtoupper($account->role))) }}</td>
-                            <td>@if($account->departmentHead){{ $account->departmentHead->name }}@elseif($account->employee){{ $account->employee->employee_no }} · {{ $account->employee->department?->name ?? 'Department not assigned' }}@else—@endif</td>
-                            <td><span class="status-tag {{ $account->is_active ? 'status-approved' : 'status-disapproved' }}">{{ $account->is_active ? 'Active' : 'Inactive' }}</span></td>
-                            <td>{{ $account->created_at?->format('M j, Y') ?? '—' }}</td>
-                            <td><a class="table-link" href="{{ route('super-admin.users.show', $account) }}">View / manage →</a></td>
-                        </tr>
-                    @empty
-                        <tr><td colspan="6" class="empty-note">No accounts match these filters.</td></tr>
+                    <td><span class="account-user-cell">@include('shared.avatar', ['user' => $account])<span><strong>{{ $account->employee?->full_name ?? $account->name }}</strong>@if($account->employee)<small>{{ $account->employee->employee_no }}</small>@endif</span></span></td>
+                    <td>{{ $account->email }}</td>
+                    <td>{{ $account->isSuperAdmin() ? 'SUPER ADMIN' : ($account->role === 'admin' && $account->can_final_approve ? 'ADMIN · FINAL APPROVER' : ($account->role === 'mayor' ? 'MAYOR / FINAL APPROVER' : str_replace('_', ' ', strtoupper($account->role)))) }}</td>
+                    <td>{{ $account->employee?->department?->name ?? $account->departmentHead?->name ?? 'Not assigned' }}</td>
+                    <td><span class="status-tag {{ $account->is_active ? 'status-approved' : 'status-disapproved' }}">{{ $account->is_active ? 'Active' : 'Inactive' }}</span></td>
+                    <td>{{ $account->created_at?->format('M j, Y') ?? '—' }}</td>
+                    <td>{{ isset($lastLogins[$account->id]) ? \Illuminate\Support\Carbon::parse($lastLogins[$account->id])->format('M j, Y g:i A') : 'Never' }}</td>
+                    <td><a class="table-link" href="{{ route('super-admin.users.show', $account) }}">View</a>@unless($account->isSuperAdmin())<span class="muted"> · </span><a class="table-link" href="{{ route('users.edit', $account) }}">Edit</a>@endunless</td>
+                </tr>
+            @empty
+                <tr><td colspan="8" class="empty-note">No accounts match these filters.</td></tr>
                     @endforelse
                 </tbody>
             </table>

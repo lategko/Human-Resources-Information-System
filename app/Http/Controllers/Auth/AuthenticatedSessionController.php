@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Models\User;
 use App\Services\AuditLogger;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -24,7 +25,10 @@ class AuthenticatedSessionController extends Controller
             'password' => ['required', 'string'],
         ]);
 
-        if (! Auth::attempt($credentials + ['is_active' => true], $request->boolean('remember'))) {
+        if (! Auth::attempt($credentials + ['is_active' => true], $request->boolean('remember'))
+            || ! in_array(Auth::user()->role, User::VALID_ROLES, true)) {
+            Auth::logout();
+
             throw ValidationException::withMessages([
                 'email' => 'The provided credentials do not match our records.',
             ]);
@@ -33,7 +37,7 @@ class AuthenticatedSessionController extends Controller
         $request->session()->regenerate();
         $auditLogger->record('auth.login');
 
-        return redirect()->intended(route('dashboard'));
+        return redirect()->route('dashboard');
     }
 
     public function destroy(Request $request, AuditLogger $auditLogger): RedirectResponse
