@@ -28,19 +28,27 @@
         <env name="PULSE_ENABLED" value="false"/>
         <env name="QUEUE_CONNECTION" value="sync"/>
         <env name="SESSION_DRIVER" value="array"/>
-        <env name="HRIS_INITIAL_SUPER_ADMIN_NAME" value="" force="true"/>
-        <env name="HRIS_INITIAL_SUPER_ADMIN_EMAIL" value="" force="true"/>
-        <env name="HRIS_INITIAL_SUPER_ADMIN_PASSWORD" value="" force="true"/>
         <env name="HRIS_INITIAL_ADMIN_NAME" value="" force="true"/>
         <env name="HRIS_INITIAL_ADMIN_EMAIL" value="" force="true"/>
         <env name="HRIS_INITIAL_ADMIN_PASSWORD" value="" force="true"/>
-        <env name="HRIS_INITIAL_HRMO_NAME" value="" force="true"/>
-        <env name="HRIS_INITIAL_HRMO_EMAIL" value="" force="true"/>
-        <env name="HRIS_INITIAL_HRMO_PASSWORD" value="" force="true"/>
+        <env name="HRIS_INITIAL_ADMIN_EMPLOYEE_NO" value="" force="true"/>
+        <env name="HRIS_INITIAL_ADMIN_DEPARTMENT_ID" value="" force="true"/>
+        <env name="HRIS_INITIAL_MAYOR_NAME" value="" force="true"/>
+        <env name="HRIS_INITIAL_MAYOR_EMAIL" value="" force="true"/>
+        <env name="HRIS_INITIAL_MAYOR_PASSWORD" value="" force="true"/>
+        <env name="HRIS_INITIAL_MAYOR_EMPLOYEE_NO" value="" force="true"/>
+        <env name="HRIS_INITIAL_MAYOR_DEPARTMENT_ID" value="" force="true"/>
         <env name="HRIS_INITIAL_OFFICE_HEAD_NAME" value="" force="true"/>
         <env name="HRIS_INITIAL_OFFICE_HEAD_EMAIL" value="" force="true"/>
         <env name="HRIS_INITIAL_OFFICE_HEAD_PASSWORD" value="" force="true"/>
+        <env name="HRIS_INITIAL_OFFICE_HEAD_EMPLOYEE_NO" value="" force="true"/>
         <env name="HRIS_INITIAL_OFFICE_HEAD_DEPARTMENT_ID" value="" force="true"/>
+        <env name="HRIS_INITIAL_EMPLOYEE_NAME" value="" force="true"/>
+        <env name="HRIS_INITIAL_EMPLOYEE_EMAIL" value="" force="true"/>
+        <env name="HRIS_INITIAL_EMPLOYEE_PASSWORD" value="" force="true"/>
+        <env name="HRIS_INITIAL_EMPLOYEE_EMPLOYEE_NO" value="" force="true"/>
+        <env name="HRIS_INITIAL_EMPLOYEE_NO" value="" force="true"/>
+        <env name="HRIS_INITIAL_EMPLOYEE_DEPARTMENT_ID" value="" force="true"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
     </php>
 </phpunit>

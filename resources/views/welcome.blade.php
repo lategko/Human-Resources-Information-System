@@ -186,7 +186,7 @@
                     </div>
                 </div>
 
-                <p class="workflow-exception"><strong>Alternate review:</strong> If an assigned Office Head is unavailable, the application may be routed to an authorized alternate. The alternate records a decision before HRMO verification; HRMO then verifies the supporting documents and finalizes the recorded outcome.</p>
+                <p class="workflow-exception"><strong>Alternate review:</strong> If an assigned Office Head is unavailable, the Mayor may act as the department-level alternate when authorized. HRMO verification remains mandatory, and the Mayor's final approval is a separate action. Personal applications by an Admin or the Mayor require explicitly assigned alternate reviewers; missing assignments are not bypassed.</p>
 
                 <div class="workflow-services">
                     <div class="workflow-services-heading">

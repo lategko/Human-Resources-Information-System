@@ -5,8 +5,11 @@ namespace App\Http\Controllers;
 use App\Models\Employee;
 use App\Models\LeaveCredit;
 use App\Models\LeaveCreditTransaction;
+use App\Models\Department;
 use App\Models\LeaveType;
 use App\Services\AuditLogger;
+use App\Services\LeaveCreditAccountService;
+use App\Services\EmployeeLeaveEntitlementSummary;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -18,28 +21,61 @@ class LeaveCreditController extends Controller
 {
     public function index(Request $request): View
     {
+        $filters = $request->validate([
+            'q' => ['nullable', 'string', 'max:120'],
+            'department_id' => ['nullable', 'integer', Rule::exists('departments', 'id')],
+            'leave_type_id' => ['nullable', 'integer', Rule::exists('leave_types', 'id')],
+            'employment_status' => ['nullable', 'string', 'max:40'],
+        ]);
+        $user = $request->user();
+        $mine = $request->boolean('mine') || ! $user->canManageHr();
         $relations = ['employee.department', 'leaveType'];
-        if (! $request->user()->isEmployee()) {
+        if (! $mine) {
             $relations[] = 'transactions.createdBy';
+        } else {
+            $relations[] = 'transactions';
         }
         $query = LeaveCredit::with($relations);
-        if ($request->user()->isEmployee()) {
-            $employee = $request->user()->employee;
+        if ($mine) {
+            $employee = $user->employee;
             abort_unless($employee, 403, 'Your account is not linked to an employee record.');
+            app(LeaveCreditAccountService::class)->ensureRegularAccounts($employee);
             $query->where('employee_id', $employee->id);
         }
-        if ($request->filled('q')) {
-            $search = $request->string('q')->toString();
+        if (isset($filters['q'])) {
+            $search = $filters['q'];
             $query->whereHas('employee', fn ($employee) => $employee->where('employee_no', 'like', "%{$search}%")->orWhere('last_name', 'like', "%{$search}%"));
+        }
+        if (isset($filters['department_id'])) {
+            $query->whereHas('employee', fn ($employee) => $employee->where('department_id', $filters['department_id']));
+        }
+        if (isset($filters['leave_type_id'])) {
+            $query->where('leave_type_id', $filters['leave_type_id']);
+        }
+        if (isset($filters['employment_status'])) {
+            $query->whereHas('employee', fn ($employee) => $employee->where('employment_status', $filters['employment_status']));
         }
 
         return view('leave-credits.index', [
             'credits' => $query->latest()->paginate(25)->withQueryString(),
-            'employees' => $request->user()->canManageHr()
+            'isPersonalView' => $mine,
+            'history' => $mine
+                ? $user->employee->leaveApplications()->with('leaveType')->latest()->limit(50)->get()
+                : collect(),
+            'specialEntitlements' => $mine
+                ? app(EmployeeLeaveEntitlementSummary::class)->forYear($user->employee)
+                : collect(),
+            'employees' => ! $mine && $user->canManageHr()
                 ? Employee::whereNull('archived_at')->orderBy('last_name')->get()
                 : collect(),
-            'leaveTypes' => $request->user()->canManageHr()
+            'leaveTypes' => ! $mine && $user->canManageHr()
                 ? LeaveType::where('is_active', true)->orderBy('sort_order')->get()
+                : collect(),
+            'departments' => ! $mine && $user->canManageHr()
+                ? Department::where('is_active', true)->orderBy('name')->get()
+                : collect(),
+            'employmentStatuses' => ! $mine && $user->canManageHr()
+                ? Employee::query()->whereNull('archived_at')->distinct()->orderBy('employment_status')->pluck('employment_status')
                 : collect(),
         ]);
     }
@@ -70,6 +106,7 @@ class LeaveCreditController extends Controller
                 'created_by' => $request->user()->id,
                 'type' => 'beginning_balance',
                 'amount' => $data['beginning_balance'],
+                'previous_balance' => 0,
                 'balance_after' => $credit->balance,
                 'effective_date' => $data['effective_date'],
                 'remarks' => $data['remarks'],
@@ -94,6 +131,7 @@ class LeaveCreditController extends Controller
 
         DB::transaction(function () use ($credit, $data, $request) {
             $credit = LeaveCredit::query()->lockForUpdate()->findOrFail($credit->id);
+            $previousBalance = $credit->balance;
             if ($data['type'] === 'earned') {
                 $credit->earned_credits = (float) $credit->earned_credits + (float) $data['amount'];
             } else {
@@ -110,6 +148,7 @@ class LeaveCreditController extends Controller
                 'created_by' => $request->user()->id,
                 'type' => $data['type'],
                 'amount' => $data['amount'],
+                'previous_balance' => $previousBalance,
                 'balance_after' => $credit->balance,
                 'effective_date' => $data['effective_date'],
                 'remarks' => $data['remarks'],

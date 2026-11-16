@@ -29,7 +29,7 @@
         @forelse($employees as $employee)
             <tr>
                 <td><a class="employee-cell" href="{{ route('employees.show', $employee) }}"><span class="avatar avatar-small">{{ strtoupper(substr($employee->first_name,0,1)) }}</span><span><b>{{ $employee->full_name }}</b><small>{{ $employee->employee_no }}</small></span></a></td>
-                <td>{{ $employee->department->name }}</td><td>{{ $employee->position?->title ?? '—' }}</td>
+                <td>{{ $employee->department?->name ?? 'Department not assigned' }}</td><td>{{ $employee->position?->title ?? '—' }}</td>
                 <td>{{ $employee->employment_type ?: '—' }}</td><td>{{ $employee->date_hired?->format('M j, Y') ?? '—' }}</td>
                 <td><span class="status-tag status-{{ \Illuminate\Support\Str::slug($employee->employment_status) }}">{{ $employee->employment_status }}</span></td>
                 <td><a class="table-link" href="{{ route('employees.show', $employee) }}">View <i data-lucide="arrow-right"></i></a></td>

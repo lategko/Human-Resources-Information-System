@@ -32,7 +32,7 @@ class LeaveCredit extends Model
 
     public function employee(): BelongsTo
     {
-        return $this->belongsTo(Employee::class);
+        return $this->belongsTo(Employee::class)->withTrashed();
     }
 
     public function leaveType(): BelongsTo
@@ -42,6 +42,6 @@ class LeaveCredit extends Model
 
     public function transactions(): HasMany
     {
-        return $this->hasMany(LeaveCreditTransaction::class);
+        return $this->hasMany(LeaveCreditTransaction::class)->latest('effective_date')->latest('id');
     }
 }

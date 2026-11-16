@@ -29,7 +29,7 @@ class EmployeeWorkbookImportTest extends TestCase
             'name' => 'Test HRMO User',
             'email' => 'hrmo@example.test',
             'password' => 'TestAccount123!',
-            'role' => 'hrmo',
+            'role' => 'admin',
             'is_active' => true,
         ]);
         Storage::fake('local');
@@ -38,7 +38,7 @@ class EmployeeWorkbookImportTest extends TestCase
     public function test_hrmo_can_stage_all_source_columns_without_mapping_ambiguous_values(): void
     {
         $file = $this->workbookUpload();
-        $hrmo = User::where('role', 'hrmo')->firstOrFail();
+        $hrmo = User::where('role', 'admin')->firstOrFail();
 
         $this->actingAs($hrmo)
             ->post(route('employee-imports.store'), ['file' => $file])
@@ -61,7 +61,15 @@ class EmployeeWorkbookImportTest extends TestCase
             ->assertSee('Column H — duplicate OFFICE header')
             ->assertSee('Column S — duplicate OFFICE header')
             ->assertSee('Column X — Unnamed column X')
-            ->assertSee('source-only by default');
+            ->assertSee('source-only by default')
+            ->assertSee('Pending HRMO review')
+            ->assertSee('Select an OFFICE source column above to load its values before saving mappings.');
+        $this->actingAs($hrmo)->get(route('employee-imports.show', [$import, 'office_column' => 8]))
+            ->assertOk()
+            ->assertSee('name="office_source_column" value="8"', false)
+            ->assertSee('Add existing active departments and positions before approving mappings.')
+            ->assertSee('Save and approve mappings')
+            ->assertSee('disabled', false);
         $this->actingAs($hrmo)->get(route('dashboard'))
             ->assertOk()
             ->assertSee('Employee workbook review')
@@ -79,7 +87,7 @@ class EmployeeWorkbookImportTest extends TestCase
         $officeKey = hash('sha256', 'Office H source');
         $positionKey = hash('sha256', "Office H source\0Import Test Position");
 
-        $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
             ->assertSessionHasErrors('mapping');
 
@@ -103,8 +111,13 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame([8, 19, 24], array_map('intval', array_keys($import->field_mappings['ambiguous_field_notes'])));
         $this->assertDatabaseCount('employee_import_mapping_events', 1);
         $this->assertDatabaseCount('employees', 0);
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', $import))
+            ->assertOk()
+            ->assertSee('Incomplete — HRMO review required')
+            ->assertSee('Employee name does not match the HRMO-approved name format.');
 
-        $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
             ->assertRedirect();
 
@@ -126,8 +139,12 @@ class EmployeeWorkbookImportTest extends TestCase
 
         $import->refresh();
         $this->assertSame('mapping_approved', $import->status);
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', $import))
+            ->assertOk()
+            ->assertSee('Ready for import · Valid');
 
-        $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
             ->assertRedirect();
 
@@ -145,6 +162,14 @@ class EmployeeWorkbookImportTest extends TestCase
         $row = $import->rows()->firstOrFail();
         $this->assertSame('01/02/2024', $row->source_data[23]['display_value']);
         $this->assertSame('imported', $row->status);
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', $import))
+            ->assertOk()
+            ->assertSee('Successfully imported');
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
+            ->assertSessionHasErrors('mapping');
+        $this->assertDatabaseCount('employees', 1);
     }
 
     public function test_import_does_not_overwrite_existing_employees_or_allow_non_hr_roles(): void
@@ -171,10 +196,21 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->actingAs($employeeUser)
             ->get(route('employee-imports.index'))
             ->assertForbidden();
+        $this->actingAs($employeeUser)
+            ->put(route('employee-imports.mapping', $import), [])
+            ->assertForbidden();
+        $this->actingAs($employeeUser)
+            ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
+            ->assertForbidden();
 
         $this->assertSame('duplicate', $import->rows()->firstOrFail()->status);
         $this->assertSame('Existing', $existing->fresh()->first_name);
         $this->assertDatabaseCount('employees', 1);
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', $import))
+            ->assertOk()
+            ->assertSee('Duplicate')
+            ->assertSee('Employee reference number already exists; existing records will not be overwritten.');
     }
 
     public function test_hrmo_can_review_an_individual_name_without_changing_original_source_data(): void
@@ -194,7 +230,7 @@ class EmployeeWorkbookImportTest extends TestCase
             'position_map' => [$positionKey => $position->id],
         ])->assertRedirect();
 
-        $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
             ->assertRedirect();
         $import->refresh();
@@ -202,7 +238,7 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame('review_required', $import->status);
         $this->assertSame('Unusual Name Format', $row->source_data[1]['display_value']);
 
-        $reviewer = User::where('role', 'hrmo')->firstOrFail();
+        $reviewer = User::where('role', 'admin')->firstOrFail();
         $this->actingAs($reviewer)->put(route('employee-imports.rows.review', [$import, $row]), [
             'first_name' => 'Reviewed',
             'middle_name' => 'By HRMO',
@@ -241,7 +277,7 @@ class EmployeeWorkbookImportTest extends TestCase
             ->get(route('employee-imports.source', $import))
             ->assertForbidden();
 
-        $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->get(route('employee-imports.source', $import))
             ->assertOk();
         $this->assertDatabaseHas('audit_logs', [
@@ -252,13 +288,13 @@ class EmployeeWorkbookImportTest extends TestCase
 
     private function putMapping(EmployeeImport $import, array $data)
     {
-        return $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        return $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->put(route('employee-imports.mapping', $import), $data);
     }
 
     private function stage(UploadedFile $file): EmployeeImport
     {
-        $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.store'), ['file' => $file])
             ->assertRedirect();
 

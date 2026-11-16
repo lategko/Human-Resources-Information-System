@@ -14,7 +14,7 @@
                             <td><b>{{ $record->department->name }}</b><small class="table-sub">{{ $record->officeHead->name }}</small></td>
                             <td>{{ str_replace('_', ' ', ucfirst($record->availability_status)) }}</td>
                             <td>{{ $record->start_date->format('M j, Y') }} – {{ $record->end_date->format('M j, Y') }}</td>
-                            <td>{{ $record->alternate?->name ?? 'Designated final approver fallback' }}</td>
+                            <td>{{ $record->alternate?->name ?? 'Mayor fallback when uniquely configured' }}</td>
                             <td>{{ $record->reason }}</td>
                             <td>{{ $record->updater->name }}</td>
                         </tr>
@@ -26,7 +26,7 @@
             <div class="pagination-wrap">{{ $availabilityRecords->links() }}</div>
         </section>
         <aside class="panel">
-            <div class="panel-heading"><div><h2>Record availability</h2><p>HRMO and administrators only.</p></div></div>
+            <div class="panel-heading"><div><h2>Record availability</h2><p>{{ auth()->user()->isOfficeHead() ? 'You may record availability for your assigned department.' : 'Admin may record availability for any assigned Office Head.' }}</p></div></div>
             <form method="POST" action="{{ route('office-head-availability.store') }}" class="form-stack">
                 @csrf
                 <label>Department and assigned Office Head *
@@ -53,9 +53,9 @@
                 </label>
                 <label>Temporary alternate approver
                     <select name="alternate_user_id">
-                        <option value="">Use the designated final approver if necessary</option>
+                        <option value="">Use the Mayor fallback only when there is exactly one active Mayor</option>
                         @foreach($alternates as $alternate)
-                            <option value="{{ $alternate->id }}" @selected(old('alternate_user_id') == $alternate->id)>{{ $alternate->name }} — {{ $alternate->isOfficeHead() ? 'Office Head' : 'Designated final approver' }}</option>
+                            <option value="{{ $alternate->id }}" @selected(old('alternate_user_id') == $alternate->id)>{{ $alternate->name }} — {{ $alternate->isOfficeHead() ? 'Office Head' : 'Mayor' }}</option>
                         @endforeach
                     </select>
                 </label>

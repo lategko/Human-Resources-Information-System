@@ -17,7 +17,7 @@
             <div>
                 <span class="eyebrow">YOUR EMPLOYEE PROFILE</span>
                 <h2>{{ $employee->full_name }}</h2>
-                <p>{{ $employee->position?->title ?? 'Position not set' }} <span>·</span> {{ $employee->department->name }}</p>
+                <p>{{ $employee->position?->title ?? 'Position not set' }} <span>·</span> {{ $employee->department?->name ?? 'Department not assigned' }}</p>
             </div>
             <a href="{{ route('employees.show', $employee) }}" class="text-link">View profile <i data-lucide="arrow-right"></i></a>
         </div>
@@ -29,14 +29,14 @@
             <a class="button button-outline" href="{{ route('leave.index') }}"><i data-lucide="file-clock"></i> Track applications</a>
         </div>
         <div class="stats-grid stats-grid-3">
-            <article class="stat-card"><span class="stat-label">LEAVE CREDITS</span><strong>{{ number_format($credits->sum(fn ($credit) => $credit->balance), 1) }}</strong><small>days available across tracked types</small><span class="stat-icon"><i data-lucide="wallet"></i></span></article>
-            <article class="stat-card"><span class="stat-label">PRESENT THIS MONTH</span><strong>{{ $presentCount }}</strong><small>recorded as present or late</small><span class="stat-icon"><i data-lucide="circle-check"></i></span></article>
-            <article class="stat-card"><span class="stat-label">LATE ARRIVALS</span><strong>{{ $lateCount }}</strong><small>recorded this month</small><span class="stat-icon"><i data-lucide="clock-3"></i></span></article>
+            <article class="stat-card"><span class="stat-label">VACATION LEAVE</span><strong>{{ number_format($credits->firstWhere('leaveType.code', 'VACATION')?->balance ?? 0, 2) }}</strong><small>{{ number_format((float) ($credits->firstWhere('leaveType.code', 'VACATION')?->leaveType->rules['monthly_accrual'] ?? 0), 2) }} monthly accrual, if eligible</small><span class="stat-icon"><i data-lucide="wallet"></i></span></article>
+            <article class="stat-card"><span class="stat-label">SICK LEAVE</span><strong>{{ number_format($credits->firstWhere('leaveType.code', 'SICK')?->balance ?? 0, 2) }}</strong><small>{{ number_format((float) ($credits->firstWhere('leaveType.code', 'SICK')?->leaveType->rules['monthly_accrual'] ?? 0), 2) }} monthly accrual, if eligible</small><span class="stat-icon"><i data-lucide="wallet"></i></span></article>
+            <article class="stat-card"><span class="stat-label">PENDING APPLICATIONS</span><strong>{{ $applicationStatusCounts->get('Under Office Head Review', 0) + $applicationStatusCounts->get('Under Alternate Office Head Review', 0) + $applicationStatusCounts->get('Under HRMO Verification', 0) + $applicationStatusCounts->get('Pending Final Approval', 0) }}</strong><small>currently awaiting review</small><span class="stat-icon"><i data-lucide="file-clock"></i></span></article>
         </div>
         <div class="stats-grid stats-grid-3">
-            <article class="stat-card"><span class="stat-label">PENDING APPLICATIONS</span><strong>{{ $applicationStatusCounts->get('Under Office Head Review', 0) + $applicationStatusCounts->get('Under Alternate Office Head Review', 0) + $applicationStatusCounts->get('Under HRMO Verification', 0) + $applicationStatusCounts->get('Pending Final Approval', 0) }}</strong><small>currently awaiting review</small><span class="stat-icon"><i data-lucide="file-clock"></i></span></article>
             <article class="stat-card"><span class="stat-label">APPROVED</span><strong>{{ $applicationStatusCounts->get('Approved', 0) }}</strong><small>approved leave applications</small><span class="stat-icon"><i data-lucide="circle-check"></i></span></article>
             <article class="stat-card"><span class="stat-label">DISAPPROVED</span><strong>{{ $applicationStatusCounts->get('Disapproved', 0) }}</strong><small>completed decisions</small><span class="stat-icon"><i data-lucide="circle-x"></i></span></article>
+            <article class="stat-card"><span class="stat-label">UPCOMING APPROVED LEAVE</span><strong>{{ $upcomingLeaves->count() }}</strong><small>scheduled within the next 30 days</small><span class="stat-icon"><i data-lucide="calendar-days"></i></span></article>
         </div>
         <div class="content-grid dashboard-content-grid">
             <section id="leave-credits" class="panel">
@@ -45,6 +45,14 @@
                     <div class="credit-row"><span><b>{{ $credit->leaveType->name }}</b><small>Earned {{ number_format((float) $credit->earned_credits, 1) }} days</small></span><strong>{{ number_format($credit->balance, 1) }} <small>days</small></strong></div>
                 @empty<p class="empty-note">No leave credit balances are recorded yet.</p>@endforelse
             </section>
+            @if($specialEntitlements->isNotEmpty())
+                <section class="panel">
+                    <div class="panel-heading"><div><h2>Special leave entitlements</h2><p>Separate from VL and SL balances</p></div><i class="panel-icon" data-lucide="calendar-days"></i></div>
+                    @foreach($specialEntitlements as $summary)
+                        <div class="credit-row"><span><b>{{ $summary['type']->name }}</b><small>{{ $summary['application_count'] }} pending or approved application(s) in {{ $summary['year'] }}</small></span><strong>{{ number_format($summary['available'], 1) }} <small>of {{ number_format($summary['entitlement'], 1) }}</small></strong></div>
+                    @endforeach
+                </section>
+            @endif
             <section class="panel">
                 <div class="panel-heading"><div><h2>Recent applications</h2><p>Track the progress of your requests</p></div><a href="{{ route('leave.index') }}" class="text-link">View all <i data-lucide="arrow-right"></i></a></div>
                 @forelse($applications as $application)
@@ -71,7 +79,7 @@
             </section>
         </div>
     @else
-        @if($role === 'hrmo')
+        @if($role === 'administrator')
             <div class="role-intro"><span class="role-intro-icon"><i data-lucide="briefcase-business" aria-hidden="true"></i></span><div><h2>Human resources operations</h2><p>Personnel records, leave verification, attendance monitoring, and municipal HR activity.</p></div></div>
         @elseif($role === 'office_head')
             <div class="role-intro"><span class="role-intro-icon"><i data-lucide="building-2" aria-hidden="true"></i></span><div><h2>Your department workspace</h2><p>Operational summaries and leave tasks are limited to your assigned department.</p></div></div>
@@ -101,7 +109,7 @@
                 <section class="panel panel-wide">
                     <div class="panel-heading"><div><h2>Leave applications for your review</h2><p>Only applications from your assigned department are shown.</p></div><a href="{{ route('leave.index') }}" class="text-link">Open applications <i data-lucide="arrow-right"></i></a></div>
                     @forelse($pendingTasks as $application)
-                        <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department->name }} · {{ $application->leaveType->name }}</small></span><span class="status-tag status-submitted">Needs recommendation</span></a>
+                        <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department?->name ?? 'Department not assigned' }} · {{ $application->leaveType->name }}</small></span><span class="status-tag status-submitted">Needs recommendation</span></a>
                     @empty<p class="empty-note">There are no leave applications awaiting your recommendation.</p>@endforelse
                 </section>
                 <section class="panel">
@@ -128,7 +136,23 @@
                     @empty<p class="empty-note">No approval actions have been recorded yet.</p>@endforelse
                 </section>
             </div>
-        @elseif($role === 'hrmo')
+        @elseif($role === 'administrator')
+            @if($leaveCreditStats)
+                <div class="stats-grid stats-grid-3">
+                    <article class="stat-card"><span class="stat-label">EMPLOYEES WITH VL</span><strong>{{ number_format($leaveCreditStats['vl_employees']) }}</strong><small>employees with a positive Vacation Leave balance</small><span class="stat-icon"><i data-lucide="wallet"></i></span></article>
+                    <article class="stat-card"><span class="stat-label">EMPLOYEES WITH SL</span><strong>{{ number_format($leaveCreditStats['sl_employees']) }}</strong><small>employees with a positive Sick Leave balance</small><span class="stat-icon"><i data-lucide="wallet"></i></span></article>
+                    <article class="stat-card"><span class="stat-label">PENDING LEAVE APPLICATIONS</span><strong>{{ number_format($leaveCreditStats['pending']) }}</strong><small>all current review stages</small><span class="stat-icon"><i data-lucide="file-clock"></i></span></article>
+                    <article class="stat-card"><span class="stat-label">APPROVED APPLICATIONS</span><strong>{{ number_format($leaveCreditStats['approved']) }}</strong><small>recorded approvals</small><span class="stat-icon"><i data-lucide="circle-check"></i></span></article>
+                    <article class="stat-card"><span class="stat-label">DISAPPROVED APPLICATIONS</span><strong>{{ number_format($leaveCreditStats['disapproved']) }}</strong><small>recorded disapprovals</small><span class="stat-icon"><i data-lucide="circle-x"></i></span></article>
+                    <article class="stat-card"><span class="stat-label">LOW OR ZERO VL / SL</span><strong>{{ number_format($leaveCreditStats['low_balance_employees']) }}</strong><small>regular leave accounts at or below 3 days</small><span class="stat-icon"><i data-lucide="circle-alert"></i></span></article>
+                    <article class="stat-card"><span class="stat-label">MONTHLY ACCRUAL</span><strong>{{ number_format($leaveCreditStats['monthly_accrual'], 2) }}</strong><small>VL and SL credits accrued in {{ $leaveCreditStats['accrual_month'] }}</small><span class="stat-icon"><i data-lucide="calendar-days"></i></span></article>
+                    <article class="stat-card"><span class="stat-label">SPECIAL LEAVE APPLICATIONS</span><strong>{{ number_format($leaveCreditStats['special_applications']) }}</strong><small>special/statutory categories requiring HR review</small><span class="stat-icon"><i data-lucide="file-clock"></i></span></article>
+                </div>
+                <div class="quick-links" aria-label="Leave management shortcuts">
+                    <a class="button button-outline" href="{{ route('leave-credits.index') }}">Review leave credits and ledgers</a>
+                    <a class="button button-outline" href="{{ route('reports.index') }}">Open leave reports</a>
+                </div>
+            @endif
             <div class="stats-grid stats-grid-3">
                 <article class="stat-card"><span class="stat-label">ACTIVE EMPLOYEES</span><strong>{{ number_format($employeeCount) }}</strong><small>{{ $departmentCount }} departments in scope</small><span class="stat-icon"><i data-lucide="users"></i></span></article>
                 <article class="stat-card"><span class="stat-label">INACTIVE EMPLOYEES</span><strong>{{ number_format($inactiveEmployeeCount) }}</strong><small>non-archived records not marked active</small><span class="stat-icon"><i data-lucide="user-round-x"></i></span></article>
@@ -137,14 +161,25 @@
                 <article class="stat-card"><span class="stat-label">LATE TODAY</span><strong>{{ number_format($lateCount) }}</strong><small>recorded late arrivals</small><span class="stat-icon"><i data-lucide="clock-3"></i></span></article>
                 <article class="stat-card"><span class="stat-label">RECORDED ABSENCES</span><strong>{{ number_format($absentCount) }}</strong><small>absence records for today</small><span class="stat-icon"><i data-lucide="circle-alert"></i></span></article>
                 <article class="stat-card"><span class="stat-label">ON APPROVED LEAVE</span><strong>{{ number_format($leaveTodayCount) }}</strong><small>approved leave covering today</small><span class="stat-icon"><i data-lucide="calendar-days"></i></span></article>
+                @if(auth()->user()->canApproveMayorLeave())
+                    <article class="stat-card"><span class="stat-label">MAYOR LEAVE DECISIONS</span><strong>{{ number_format($pendingAuthorizedFinalTasks->count()) }}</strong><small>assigned for your separate authorized decision</small><span class="stat-icon"><i data-lucide="stamp"></i></span></article>
+                @endif
             </div>
             <div class="content-grid dashboard-content-grid">
                 <section class="panel panel-wide">
                     <div class="panel-heading"><div><h2>Pending HR actions</h2><p>Leave applications requiring HRMO verification and certification</p></div><a href="{{ route('leave.index', ['status' => 'Under HRMO Verification']) }}" class="text-link">View all <i data-lucide="arrow-right"></i></a></div>
                     @forelse($pendingTasks as $application)
-                        <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department->name }} · {{ $application->leaveType->name }}</small></span><span class="status-tag status-under-hrmo-verification">HR verification</span></a>
+                        <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department?->name ?? 'Department not assigned' }} · {{ $application->leaveType->name }}</small></span><span class="status-tag status-under-hrmo-verification">HR verification</span></a>
                     @empty<p class="empty-note">There are no leave applications awaiting HRMO verification.</p>@endforelse
                 </section>
+                @if(auth()->user()->canApproveMayorLeave())
+                    <section class="panel panel-wide">
+                        <div class="panel-heading"><div><h2>Mayor personal-leave decisions</h2><p>Only applications explicitly assigned to your account are listed.</p></div><a href="{{ route('leave.index', ['status' => 'Pending Authorized Final Approval']) }}" class="text-link">Open decisions <i data-lucide="arrow-right"></i></a></div>
+                        @forelse($pendingAuthorizedFinalTasks as $application)
+                            <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department?->name ?? 'Department not assigned' }} · {{ $application->leaveType->name }}</small></span><span class="status-tag status-submitted">Authorized decision</span></a>
+                        @empty<p class="empty-note">There are no Mayor personal-leave applications assigned to you.</p>@endforelse
+                    </section>
+                @endif
                 <section class="panel">
                     <div class="panel-heading"><div><h2>Employee workbook review</h2><p>Confidential imports awaiting mapping or row review</p></div><a href="{{ route('employee-imports.index') }}" class="text-link">Import history <i data-lucide="arrow-right"></i></a></div>
                     @forelse($pendingEmployeeImports as $import)
@@ -158,7 +193,7 @@
                 <section class="panel">
                     <div class="panel-heading"><div><h2>Attendance monitoring</h2><p>Today’s recorded attendance</p></div><a href="{{ route('attendance.index') }}" class="text-link">Open attendance <i data-lucide="arrow-right"></i></a></div>
                     @forelse($recentAttendance as $record)
-                        <div class="attendance-row"><span class="avatar avatar-small">{{ strtoupper(substr($record->employee->first_name, 0, 1)) }}</span><span class="row-main"><b>{{ $record->employee->full_name }}</b><small>{{ $record->employee->department->name }}</small></span><span class="status-tag status-{{ \Illuminate\Support\Str::slug($record->status) }} {{ $record->corrected_by ? 'status-corrected' : '' }}">{{ $record->corrected_by ? 'Corrected · ' : '' }}{{ $record->display_status }}</span></div>
+                        <div class="attendance-row"><span class="avatar avatar-small">{{ strtoupper(substr($record->employee->first_name, 0, 1)) }}</span><span class="row-main"><b>{{ $record->employee->full_name }}</b><small>{{ $record->employee->department?->name ?? 'Department not assigned' }}</small></span><span class="status-tag status-{{ \Illuminate\Support\Str::slug($record->status) }} {{ $record->corrected_by ? 'status-corrected' : '' }}">{{ $record->corrected_by ? 'Corrected · ' : '' }}{{ $record->display_status }}</span></div>
                     @empty<p class="empty-note">No attendance records have been entered today.</p>@endforelse
                     <div class="dashboard-footnote">No attendance record is distinct from a recorded absence.</div>
                 </section>
@@ -200,13 +235,13 @@
                 <section class="panel panel-wide">
                     <div class="panel-heading"><div><h2>Pending executive decisions</h2><p>Final approvals assigned to your account</p></div><a href="{{ route('leave.index', ['status' => 'Pending Final Approval']) }}" class="text-link">Review applications <i data-lucide="arrow-right"></i></a></div>
                     @forelse($pendingFinalTasks as $application)
-                        <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department->name }} · {{ $application->leaveType->name }}</small></span><span class="status-tag status-pending-final-approval">Final approval</span></a>
+                        <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department?->name ?? 'Department not assigned' }} · {{ $application->leaveType->name }}</small></span><span class="status-tag status-pending-final-approval">Final approval</span></a>
                     @empty<p class="empty-note">There are no leave applications awaiting your final decision.</p>@endforelse
                 </section>
                 <section class="panel panel-wide">
                     <div class="panel-heading"><div><h2>Office Head unavailability escalations</h2><p>You are the assigned alternate approver; HRMO verification follows your decision.</p></div><a href="{{ route('leave.index', ['status' => 'Under Alternate Office Head Review']) }}" class="text-link">View escalations <i data-lucide="arrow-right"></i></a></div>
                     @forelse($pendingAlternateTasks as $application)
-                        <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department->name }} · {{ $application->leaveType->name }} · {{ $application->office_head_routing_reason }}</small></span><span class="status-tag">Alternate review</span></a>
+                        <a class="application-row" href="{{ route('leave.show', $application) }}"><span class="row-date">{{ $application->created_at->format('M d') }}</span><span class="row-main"><b>{{ $application->employee->full_name }}</b><small>{{ $application->employee->department?->name ?? 'Department not assigned' }} · {{ $application->leaveType->name }} · {{ $application->office_head_routing_reason }}</small></span><span class="status-tag">Alternate review</span></a>
                     @empty<p class="empty-note">No leave requests are currently escalated to your account.</p>@endforelse
                 </section>
                 <section class="panel">

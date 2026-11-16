@@ -18,11 +18,11 @@
             <label>Assigned role *
                 <select name="role" x-model="role" required>
                     @foreach($allowedRoles as $value)
-                        @php($label = ['super_admin' => 'SUPER ADMIN', 'admin' => 'ADMIN', 'hrmo' => 'HRMO', 'office_head' => 'Office Head', 'mayor' => 'Mayor / Final Approver', 'employee' => 'Staff / Employee'][$value])
+                        @php($label = ['admin' => 'ADMIN · HR OFFICE', 'office_head' => 'Office Head', 'mayor' => 'Mayor · Final Approver', 'employee' => 'Employee / Staff'][$value])
                         <option value="{{ $value }}" @selected(old('role', $user->role) === $value)>{{ $label }}</option>
                     @endforeach
                 </select>
-                <small>@if(auth()->user()->isSuperAdmin())Only a Super Admin can assign ADMIN, HRMO, or Mayor access.@elseAdmin accounts may assign Employee or Office Head access. Only a Super Admin can assign ADMIN, HRMO, or Mayor access.@endif</small>
+                <small>Admin manages all accounts. Only assign the Mayor role or the separate Mayor-leave authority when formally authorized.</small>
             </label>
             <label x-show="role === 'office_head'" x-cloak>Assigned office / department *
                 <select name="department_id" :disabled="role !== 'office_head'" :required="role === 'office_head'">
@@ -42,6 +42,15 @@
                 </select>
                 <small>Employee accounts must use an existing, non-archived employee record. No employee records are created here.</small>
             </label>
+            <label x-show="role !== 'employee'" x-cloak>Personal employee record (optional)
+                <select name="employee_id">
+                    <option value="">No employee record linked</option>
+                    @foreach($employees as $employee)
+                        <option value="{{ $employee->id }}" @selected(old('employee_id', $user->employee?->id) == $employee->id)>{{ $employee->employee_no }} · {{ $employee->full_name }} — {{ $employee->department?->name }}</option>
+                    @endforeach
+                </select>
+                <small>Link this account to an existing employee record to enable personal leave and employee-record access.</small>
+            </label>
             @if(!$user->exists)
                 <label>Initial password *<input type="password" name="password" minlength="12" required autocomplete="new-password"><small>At least 12 characters.</small></label>
                 <label>Confirm initial password *<input type="password" name="password_confirmation" minlength="12" required autocomplete="new-password"></label>
@@ -53,10 +62,8 @@
 
         <input type="hidden" name="is_active" value="0">
         <label class="checkbox-label top-space"><input type="checkbox" name="is_active" value="1" @checked(old('is_active', $user->is_active))> Account is active and may sign in</label>
-        @if(auth()->user()->isSuperAdmin())
-            <input type="hidden" name="can_final_approve" value="0">
-            <label class="checkbox-label top-space" x-show="role === 'admin'" x-cloak><input type="checkbox" name="can_final_approve" value="1" @checked(old('can_final_approve', $user->can_final_approve))> Designate as legacy Mayor / final approver</label>
-        @endif
+        <input type="hidden" name="can_final_approve" value="0">
+        <label class="checkbox-label top-space" x-show="role === 'admin'" x-cloak><input type="checkbox" name="can_final_approve" value="1" @checked(old('can_final_approve', $user->can_final_approve))> Explicitly designate as the authorized approver for a Mayor’s personal leave only</label>
         <div class="form-actions"><a class="button button-outline" href="{{ route('users.index') }}">Cancel</a><button type="submit" class="button button-primary">Save account</button></div>
     </form>
 @endsection

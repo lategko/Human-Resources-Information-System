@@ -3,23 +3,38 @@
 namespace Database\Seeders;
 
 use App\Models\Department;
+use App\Models\Employee;
 use App\Models\User;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 class ConfiguredAccountSeeder extends Seeder
 {
+    private const ROLES = [
+        'admin' => 'admin',
+        'mayor' => 'mayor',
+        'office_head' => 'office_head',
+        'employee' => 'employee',
+    ];
+
     public function run(): void
     {
-        foreach (config('hris.initial_accounts', []) as $key => $account) {
-            if (! is_array($account)) {
-                throw new RuntimeException("The configured initial account '{$key}' must be an array.");
-            }
+        DB::transaction(function (): void {
+            User::query()
+                ->whereIn('role', ['super_admin', 'hrmo'])
+                ->update(['role' => 'admin']);
 
-            $this->synchronizeAccount($key, $account);
-        }
+            foreach (config('hris.initial_accounts', []) as $key => $account) {
+                if (! is_array($account)) {
+                    throw new RuntimeException("The configured initial account '{$key}' must be an array.");
+                }
+
+                $this->synchronizeAccount($key, $account);
+            }
+        });
     }
 
     /**
@@ -27,6 +42,10 @@ class ConfiguredAccountSeeder extends Seeder
      */
     private function synchronizeAccount(string $key, array $account): void
     {
+        if (! isset(self::ROLES[$key])) {
+            throw new RuntimeException("Unsupported initial account slot '{$key}'. Configure only the four canonical roles.");
+        }
+
         $credentials = array_intersect_key($account, array_flip(['name', 'email', 'password']));
         if (! collect($credentials)->contains(fn ($value) => filled($value))) {
             return;
@@ -40,158 +59,209 @@ class ConfiguredAccountSeeder extends Seeder
             throw new RuntimeException("The configured initial account '{$key}' requires a valid email address.");
         }
 
-        $role = $account['role'] ?? $key;
-        if (! in_array($role, User::VALID_ROLES, true)) {
-            throw new RuntimeException("The configured initial account '{$key}' has an unsupported role: {$role}.");
-        }
-
-        $department = null;
-        if ($role === 'office_head') {
-            if (! filled($account['department_id'] ?? null)) {
-                $this->command?->warn(
-                    "Skipping configured Office Head '{$key}': set HRIS_INITIAL_OFFICE_HEAD_DEPARTMENT_ID "
-                    .'to an existing department ID. Create the department first; the seeder does not create departments.'
-                );
-
-                return;
-            }
-
-            $department = Department::find($account['department_id']);
-
-            if (! $department) {
-                $this->command?->warn(
-                    "Skipping configured Office Head '{$key}': department ID '{$account['department_id']}' "
-                    .'does not exist. Create the department first or set the value to an existing ID; '
-                    .'the seeder does not create departments.'
-                );
-
-                return;
-            }
-        }
-
         if (array_key_exists('password', $account) && $account['password'] !== null && ! is_string($account['password'])) {
             throw new RuntimeException("The configured initial account '{$key}' password must be a string.");
         }
 
-        if ($key === '') {
-            throw new RuntimeException('Every configured initial account must have a stable configuration identifier.');
+        $role = self::ROLES[$key];
+        $department = null;
+        $departmentId = $account['department_id'] ?? null;
+        if (filled($departmentId)) {
+            if (ctype_digit((string) $departmentId)) {
+                $department = Department::query()->lockForUpdate()->find($departmentId);
+            }
+
+            if (! $department) {
+                $this->warnDepartmentIssue(
+                    $key,
+                    $departmentId,
+                    "the configured department ID does not exist; the employee department will remain unassigned"
+                );
+            }
+        } elseif ($key === 'office_head') {
+            $this->warnDepartmentIssue(
+                $key,
+                null,
+                'no department ID is configured; department-specific Office Head access is unavailable'
+            );
         }
 
-        $isActive = $this->configuredBoolean($account['is_active'] ?? null, 'is_active', $key);
-        $canFinalApprove = $this->configuredBoolean($account['can_final_approve'] ?? null, 'can_final_approve', $key);
+        $user = User::query()->where('seed_key', $key)->lockForUpdate()->first();
 
-        DB::transaction(function () use ($key, $account, $role, $department, $isActive, $canFinalApprove): void {
-            $user = User::query()->where('seed_key', $key)->lockForUpdate()->first();
+        if (! $user) {
+            $user = User::query()->where('email', $account['email'])->lockForUpdate()->first();
 
-            if (! $user) {
-                $legacyUser = User::query()->where('email', $account['email'])->lockForUpdate()->first();
+            if ($user) {
+                $legacyAdminKey = $key === 'admin' && in_array($user->seed_key, ['super_admin', 'hrmo'], true);
+                $expectedLegacyRoles = $key === 'admin' ? ['admin', 'super_admin', 'hrmo'] : [$role];
 
-                if ($legacyUser) {
-                    $legacyRoles = [$key];
-                    if ($key === 'super_admin') {
-                        $legacyRoles[] = 'admin';
-                    }
+                if (! in_array($user->role, $expectedLegacyRoles, true)
+                    || ($user->seed_key !== null && $user->seed_key !== $key && ! $legacyAdminKey)) {
+                    throw new RuntimeException(
+                        "The configured initial account '{$key}' email is assigned to an unrelated account; no account data was changed."
+                    );
+                }
 
-                    if (! in_array($legacyUser->role, $legacyRoles, true)
-                        || $legacyUser->role === 'employee'
-                        || $legacyUser->employee()->exists()) {
-                        throw new RuntimeException(
-                            "The configured initial account '{$key}' email is assigned to an unrelated account; "
-                            .'no account data was changed.'
-                        );
-                    }
-
-                    if ($legacyUser->seed_key !== null && $legacyUser->seed_key !== $key) {
-                        throw new RuntimeException(
-                            "The configured initial account '{$key}' email belongs to configured account '{$legacyUser->seed_key}'."
-                        );
-                    }
-
-                    $user = $legacyUser;
+                if ($legacyAdminKey) {
+                    $user->seed_key = $key;
                 }
             }
+        }
 
-            $emailOwner = User::query()
-                ->where('email', $account['email'])
-                ->when($user, fn ($query) => $query->whereKeyNot($user->getKey()))
-                ->lockForUpdate()
-                ->first();
+        if (! $user && ! filled($account['password'] ?? null)) {
+            throw new RuntimeException("The configured initial account '{$key}' requires a password when first created.");
+        }
 
-            if ($emailOwner) {
+        $emailOwner = User::query()
+            ->where('email', $account['email'])
+            ->when($user, fn ($query) => $query->whereKeyNot($user->getKey()))
+            ->lockForUpdate()
+            ->first();
+
+        if ($emailOwner) {
+            throw new RuntimeException(
+                "The configured initial account '{$key}' email is already assigned to another user; no account data was changed."
+            );
+        }
+
+        $isNewUser = ! $user;
+        $user ??= new User;
+        if ($isNewUser) {
+            $user->name = $account['name'];
+            $user->is_active = true;
+        }
+        $user->name = $account['name'];
+        $user->email = $account['email'];
+        if (filled($account['password'] ?? null)
+            && ($isNewUser || ! Hash::check($account['password'], (string) $user->password))) {
+            $user->password = Hash::make($account['password']);
+        }
+        $user->role = $role;
+        if ($role !== 'admin') {
+            $user->can_final_approve = false;
+        }
+        $user->seed_key = $key;
+        $user->save();
+
+        $employee = Employee::withTrashed()->where('user_id', $user->id)->lockForUpdate()->first();
+        if ($employee?->trashed()) {
+            throw new RuntimeException("The configured initial account '{$key}' is linked to an archived employee record.");
+        }
+
+        $employeeNo = $account['employee_no'] ?? null;
+        if (! $employee && (! is_string($employeeNo) || trim($employeeNo) === '' || strlen($employeeNo) > 50)) {
+            $this->warnDepartmentIssue($key, null, 'no employee number is configured; the account has no employee record yet');
+            $this->clearOfficeHeadAssignment($key, $user);
+
+            return;
+        }
+
+        if (! $employee) {
+            $employee = Employee::withTrashed()->where('employee_no', $employeeNo)->lockForUpdate()->first();
+            if ($employee && ($employee->user_id !== null || $employee->trashed())) {
                 throw new RuntimeException(
-                    "The configured initial account '{$key}' email is already assigned to another user; "
-                    .'no account data was changed.'
+                    "Employee number '{$employeeNo}' is already assigned or archived; no employee record was changed."
                 );
             }
 
-            if (! $user && ! filled($account['password'] ?? null)) {
-                throw new RuntimeException("The configured initial account '{$key}' requires a password when first created.");
+            if ($employee) {
+                $expectedName = $this->employeeName($user->name, $key);
+                if ($employee->first_name !== $expectedName['first_name']
+                    || $employee->last_name !== $expectedName['last_name']) {
+                    throw new RuntimeException(
+                        "Employee number '{$employeeNo}' belongs to a different employee; no employee record was changed."
+                    );
+                }
+            } else {
+                $employee = new Employee;
             }
+        }
 
-            if ($department && $department->head_user_id && (int) $department->head_user_id !== (int) $user?->id) {
+        $name = $this->employeeName($user->name, $key);
+        $employee->user_id = $user->id;
+        if (filled($account['employee_no'] ?? null)) {
+            $employeeNoConflict = Employee::withTrashed()
+                ->where('employee_no', $account['employee_no'])
+                ->whereKeyNot($employee->getKey())
+                ->exists();
+            if ($employeeNoConflict) {
                 throw new RuntimeException(
-                    "The configured Office Head department for '{$key}' is already assigned to another user."
+                    "Employee number '{$account['employee_no']}' is already assigned to another employee record."
                 );
             }
+            $employee->employee_no = $account['employee_no'];
+        } elseif (! $employee->exists) {
+            $this->warnDepartmentIssue($key, null, 'no employee number is configured; the account has no employee record yet');
 
-            $previousDepartment = $user?->role === 'office_head'
-                ? Department::query()->where('head_user_id', $user->id)->lockForUpdate()->first()
-                : null;
+            return;
+        }
+        $employee->department_id = $department?->id;
+        $employee->first_name = $name['first_name'];
+        $employee->last_name = $name['last_name'];
+        $employee->email = $user->email;
+        if (! $employee->exists) {
+            $employee->employment_status = 'Active';
+        }
+        $employee->save();
 
-            if ($previousDepartment && (! $department || $previousDepartment->isNot($department))) {
-                $previousDepartment->update(['head_user_id' => null]);
-            }
-
-            $attributes = [
-                'name' => $account['name'],
-                'email' => $account['email'],
-                'role' => $role,
-            ];
-            if ($isActive !== null) {
-                $attributes['is_active'] = $isActive;
-            } elseif (! $user) {
-                $attributes['is_active'] = true;
-            }
-
-            if ($role !== 'admin') {
-                $attributes['can_final_approve'] = false;
-            } elseif ($canFinalApprove !== null) {
-                $attributes['can_final_approve'] = $canFinalApprove;
-            } elseif (! $user) {
-                $attributes['can_final_approve'] = false;
-            }
-
-            if (filled($account['password'] ?? null)
-                && (! $user || ! Hash::check($account['password'], $user->password))) {
-                $attributes['password'] = Hash::make($account['password']);
-            }
-
-            $user ??= new User;
-            $user->fill($attributes);
-            $user->seed_key = $key;
-            $user->save();
-
-            if ($department && (int) $department->head_user_id !== (int) $user->id) {
-                $department->update(['head_user_id' => $user->id]);
-            }
-        });
+        $this->synchronizeOfficeHeadAssignment($key, $user, $department);
     }
 
-    private function configuredBoolean(mixed $value, string $option, string $key): ?bool
+    /**
+     * @return array{first_name: string, last_name: string}
+     */
+    private function employeeName(string $name, string $key): array
     {
-        if ($value === null || $value === '') {
-            return null;
+        $parts = preg_split('/\s+/', trim($name), -1, PREG_SPLIT_NO_EMPTY);
+        if (! $parts) {
+            throw new RuntimeException("The configured initial account '{$key}' requires a non-empty name.");
         }
 
-        if (is_bool($value)) {
-            return $value;
+        return [
+            'first_name' => array_shift($parts),
+            'last_name' => implode(' ', $parts) ?: ' ',
+        ];
+    }
+
+    private function warnDepartmentIssue(string $key, mixed $departmentId, string $reason): void
+    {
+        $message = "Initial account '{$key}': {$reason}.";
+        if ($departmentId !== null) {
+            $message .= " Configured department ID: '{$departmentId}'.";
         }
 
-        $parsed = filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
-        if ($parsed === null) {
-            throw new RuntimeException("The configured initial account '{$key}' {$option} value must be true or false.");
+        $this->command?->warn($message);
+        Log::warning($message);
+    }
+
+    private function clearOfficeHeadAssignment(string $key, User $user): void
+    {
+        if ($key === 'office_head') {
+            Department::query()
+                ->where('head_user_id', $user->id)
+                ->lockForUpdate()
+                ->update(['head_user_id' => null]);
+        }
+    }
+
+    private function synchronizeOfficeHeadAssignment(string $key, User $user, ?Department $department): void
+    {
+        if ($key !== 'office_head') {
+            return;
         }
 
-        return $parsed;
+        if ($department && $department->head_user_id && (int) $department->head_user_id !== (int) $user->id) {
+            throw new RuntimeException("The configured Office Head department is already assigned to another user.");
+        }
+
+        Department::query()
+            ->where('head_user_id', $user->id)
+            ->when($department, fn ($query) => $query->whereKeyNot($department->id))
+            ->lockForUpdate()
+            ->update(['head_user_id' => null]);
+
+        if ($department && (int) $department->head_user_id !== (int) $user->id) {
+            $department->update(['head_user_id' => $user->id]);
+        }
     }
 }

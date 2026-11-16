@@ -15,6 +15,7 @@ use App\Models\LeaveCreditTransaction;
 use App\Models\LeaveType;
 use App\Models\OfficeHeadAvailability;
 use App\Models\Position;
+use App\Models\SystemSetting;
 use App\Models\User;
 use App\Models\WorkSchedule;
 use App\Services\AttendanceWorkHoursCalculator;
@@ -46,7 +47,14 @@ class HrisWorkflowTest extends TestCase
             'name' => 'Test HRMO User',
             'email' => 'hrmo@example.test',
             'password' => 'TestAccount123!',
-            'role' => 'hrmo',
+            'role' => 'admin',
+            'is_active' => true,
+        ]);
+        User::create([
+            'name' => 'Test Mayor',
+            'email' => 'mayor@example.test',
+            'password' => 'TestAccount123!',
+            'role' => 'mayor',
             'is_active' => true,
         ]);
         $officeHead = User::create([
@@ -84,11 +92,18 @@ class HrisWorkflowTest extends TestCase
             'employment_type' => 'Permanent',
             'date_hired' => '2020-01-06',
         ]);
-        LeaveCredit::create([
-            'employee_id' => $employee->id,
-            'leave_type_id' => LeaveType::where('code', 'VACATION')->value('id'),
-            'earned_credits' => 12,
+        $vacationCredit = LeaveCredit::where('employee_id', $employee->id)
+            ->whereHas('leaveType', fn ($query) => $query->where('code', 'VACATION'))
+            ->firstOrFail();
+        $vacationCredit->update(['beginning_balance' => 12]);
+        LeaveCreditTransaction::create([
+            'leave_credit_id' => $vacationCredit->id,
+            'type' => 'beginning_balance',
+            'amount' => 12,
+            'previous_balance' => 0,
+            'balance_after' => 12,
             'effective_date' => today(),
+            'remarks' => 'Test fixture opening balance.',
         ]);
     }
 
@@ -133,6 +148,8 @@ class HrisWorkflowTest extends TestCase
         $application = LeaveApplication::latest('id')->firstOrFail();
         $this->assertSame('Under Office Head Review', $application->status);
         $this->assertSame(4, $application->working_days);
+        $this->assertSame(0.0, (float) LeaveCredit::where('employee_id', $employeeUser->employee->id)
+            ->where('leave_type_id', $application->leave_type_id)->firstOrFail()->used_credits);
         $this->assertDatabaseHas('leave_approval_histories', [
             'leave_application_id' => $application->id,
             'action' => 'queued_for_office_head_review',
@@ -141,6 +158,107 @@ class HrisWorkflowTest extends TestCase
             User::where('role', 'office_head')->value('id'),
             $application->office_head_reviewer_id
         );
+    }
+
+    public function test_all_four_roles_can_apply_for_personal_leave_through_separate_routes(): void
+    {
+        $adminApplicant = User::where('email', 'administrator@example.test')->firstOrFail();
+        $alternateHrReviewer = User::where('email', 'hrmo@example.test')->firstOrFail();
+        $mayorApplicant = User::where('role', 'mayor')->firstOrFail();
+        $officeHead = User::where('role', 'office_head')->firstOrFail();
+        $department = Department::where('code', 'TEST')->firstOrFail();
+        $vacation = LeaveType::where('code', 'VACATION')->firstOrFail();
+
+        foreach ([
+            [$adminApplicant, 'ADMIN-SELF'],
+            [$mayorApplicant, 'MAYOR-SELF'],
+            [$officeHead, 'HEAD-SELF'],
+        ] as [$user, $employeeNo]) {
+            $employee = Employee::create([
+                'user_id' => $user->id,
+                'department_id' => $department->id,
+                'position_id' => Position::where('department_id', $department->id)->value('id'),
+                'employee_no' => $employeeNo,
+                'first_name' => $user->first_name ?: $user->name,
+                'last_name' => 'Applicant',
+                'employment_status' => 'Active',
+                'employment_type' => 'Permanent',
+                'date_hired' => '2020-01-06',
+            ]);
+            LeaveCredit::updateOrCreate([
+                'employee_id' => $employee->id,
+                'leave_type_id' => $vacation->id,
+            ], [
+                'beginning_balance' => 10,
+                'earned_credits' => 0,
+                'used_credits' => 0,
+                'adjustments' => 0,
+                'effective_date' => today(),
+            ]);
+        }
+
+        SystemSetting::updateOrCreate(['key' => 'leave_alternate_hr_reviewer_id'], [
+            'value' => $alternateHrReviewer->id,
+            'updated_by' => $adminApplicant->id,
+        ]);
+        SystemSetting::updateOrCreate(['key' => 'mayor_leave_approver_id'], [
+            'value' => $adminApplicant->id,
+            'updated_by' => $adminApplicant->id,
+        ]);
+
+        $applicants = [
+            [$adminApplicant, 'ADMIN-SELF'],
+            [$mayorApplicant, 'MAYOR-SELF'],
+            [$officeHead, 'HEAD-SELF'],
+            [Employee::where('employee_no', 'TEST-0001')->firstOrFail()->user, 'TEST-0001'],
+        ];
+        [$startDate, $endDate] = $this->nextTwoWorkingDays();
+        $applications = [];
+
+        foreach ($applicants as [$user, $employeeNo]) {
+            $this->actingAs($user)
+                ->get(route('leave.create'))
+                ->assertOk();
+            $this->get(route('leave-credits.index', ['mine' => 1]))->assertOk();
+            $this->post(route('leave.store'), [
+                'intent' => 'submit',
+                'leave_type_id' => $vacation->id,
+                'start_date' => $startDate,
+                'end_date' => $endDate,
+                'commutation_requested' => '0',
+            ])->assertRedirect();
+            $applications[$employeeNo] = LeaveApplication::where('employee_id', Employee::where('employee_no', $employeeNo)->value('id'))
+                ->latest('id')->firstOrFail();
+        }
+
+        $this->assertSame('Under HRMO Verification', $applications['ADMIN-SELF']->status);
+        $this->assertSame($alternateHrReviewer->id, $applications['ADMIN-SELF']->assigned_hr_reviewer_id);
+        $this->assertSame('Pending Authorized Final Approval', $applications['MAYOR-SELF']->status);
+        $this->assertSame($adminApplicant->id, $applications['MAYOR-SELF']->assigned_final_approver_id);
+        $this->assertSame('Under HRMO Verification', $applications['HEAD-SELF']->status);
+        $this->assertNull($applications['HEAD-SELF']->office_head_reviewer_id);
+        $this->assertSame('Under Office Head Review', $applications['TEST-0001']->status);
+
+        $this->actingAs($adminApplicant)->post(route('leave.review', $applications['ADMIN-SELF']), [
+            'action' => 'verify',
+        ])->assertForbidden();
+        $this->actingAs($mayorApplicant)->post(route('leave.review', $applications['MAYOR-SELF']), [
+            'action' => 'approve',
+            'days_with_pay' => 2,
+            'days_without_pay' => 0,
+        ])->assertForbidden();
+        $this->actingAs($officeHead)->post(route('leave.review', $applications['HEAD-SELF']), [
+            'action' => 'endorse',
+            'recommendation' => 'For approval',
+        ])->assertForbidden();
+
+        $this->actingAs($alternateHrReviewer)->post(route('leave.review', $applications['ADMIN-SELF']), [
+            'action' => 'verify',
+            'verified_working_days' => 2,
+            'certifier_position' => 'Human Resource Officer',
+            'certifier_signature' => 'Alternate HR Reviewer',
+        ])->assertRedirect();
+        $this->assertSame('Pending Final Approval', $applications['ADMIN-SELF']->fresh()->status);
     }
 
     public function test_leave_uploads_require_a_configured_document_type(): void
@@ -154,6 +272,7 @@ class HrisWorkflowTest extends TestCase
             'start_date' => '2026-12-01',
             'end_date' => '2026-12-01',
             'commutation_requested' => '0',
+            'policy_details' => ['protection_order_status' => 'issued'],
             'documents' => [UploadedFile::fake()->create('proof.pdf', 100, 'application/pdf')],
         ];
 
@@ -168,11 +287,11 @@ class HrisWorkflowTest extends TestCase
             ->assertSessionHasErrors(['documents', 'document_types']);
         $this->assertDatabaseMissing('leave_applications', ['employee_id' => $employee->id]);
 
-        $payload['document_types'] = ['Protection order or appropriate barangay/court certification'];
+        $payload['document_types'] = ['Barangay Protection Order (BPO), Temporary Protection Order (TPO), or Permanent Protection Order (PPO)'];
         $this->post(route('leave.store'), $payload)->assertRedirect();
         $application = LeaveApplication::latest('id')->firstOrFail();
         $document = $application->documents()->firstOrFail();
-        $this->assertSame('Protection order or appropriate barangay/court certification', $document->document_type);
+        $this->assertSame('Barangay Protection Order (BPO), Temporary Protection Order (TPO), or Permanent Protection Order (PPO)', $document->document_type);
         Storage::disk('local')->assertExists($document->stored_path);
     }
 
@@ -181,7 +300,7 @@ class HrisWorkflowTest extends TestCase
         Storage::fake('local');
         $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
         $type = LeaveType::where('code', 'VAWC')->firstOrFail();
-        $storedType = $type->required_documents[0];
+        $storedType = 'Barangay Protection Order (BPO), Temporary Protection Order (TPO), or Permanent Protection Order (PPO)';
         LeaveApplicationDocument::creating(static function (): void {
             throw new \RuntimeException('Simulated document metadata failure.');
         });
@@ -192,6 +311,7 @@ class HrisWorkflowTest extends TestCase
                 'start_date' => '2026-12-10',
                 'end_date' => '2026-12-10',
                 'commutation_requested' => '0',
+                'policy_details' => ['protection_order_status' => 'issued'],
                 'documents' => [UploadedFile::fake()->create('proof.pdf', 100, 'application/pdf')],
                 'document_types' => [$storedType],
             ])->assertServerError();
@@ -239,7 +359,7 @@ class HrisWorkflowTest extends TestCase
             'start_date' => '2026-12-15',
             'end_date' => '2026-12-15',
         ]);
-        $approver = User::where('role', 'admin')->firstOrFail();
+        $approver = User::where('role', 'mayor')->firstOrFail();
 
         $this->actingAs($approver)->post(route('leave.review', $application), [
             'action' => 'approve',
@@ -252,21 +372,117 @@ class HrisWorkflowTest extends TestCase
         $this->assertDatabaseMissing('leave_credit_transactions', ['leave_application_id' => $application->id]);
     }
 
+    public function test_final_approver_can_disapprove_a_leave_application_with_a_recorded_reason(): void
+    {
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $application = LeaveApplication::create([
+            'employee_id' => $employee->id,
+            'leave_type_id' => LeaveType::where('code', 'VACATION')->value('id'),
+            'status' => 'Pending Final Approval',
+            'office_snapshot' => $employee->department->name,
+            'last_name_snapshot' => $employee->last_name,
+            'first_name_snapshot' => $employee->first_name,
+            'working_days' => 1,
+            'start_date' => today()->addDays(5),
+            'end_date' => today()->addDays(5),
+        ]);
+
+        $this->actingAs(User::where('role', 'mayor')->firstOrFail())
+            ->post(route('leave.review', $application), [
+                'action' => 'disapprove',
+                'reason' => 'The application does not meet the approved leave requirements.',
+            ])
+            ->assertRedirect(route('leave.show', $application));
+
+        $this->assertSame('Disapproved', $application->fresh()->status);
+        $this->assertSame(
+            'The application does not meet the approved leave requirements.',
+            $application->fresh()->disapproval_reason
+        );
+        $this->assertDatabaseHas('leave_approval_histories', [
+            'leave_application_id' => $application->id,
+            'to_status' => 'Disapproved',
+        ]);
+        $this->assertSame(0.0, (float) LeaveCredit::where('employee_id', $employee->id)
+            ->where('leave_type_id', $application->leave_type_id)->firstOrFail()->used_credits);
+    }
+
+    public function test_category_specific_leave_fields_and_filing_rules_are_enforced(): void
+    {
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $employeeUser = $employee->user;
+        [$startDate, $endDate] = $this->nextTwoWorkingDays();
+
+        $this->actingAs($employeeUser)->post(route('leave.store'), [
+            'intent' => 'submit',
+            'leave_type_id' => LeaveType::where('code', 'MATERNITY')->value('id'),
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'commutation_requested' => '0',
+        ])->assertSessionHasErrors('policy_details.expected_delivery_date');
+
+        $this->actingAs($employeeUser)->post(route('leave.store'), [
+            'intent' => 'submit',
+            'leave_type_id' => LeaveType::where('code', 'SPECIAL_PRIVILEGE')->value('id'),
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'policy_details' => ['travel_location' => 'within_philippines'],
+            'commutation_requested' => '0',
+        ])->assertSessionHasErrors('policy_details.emergency_case');
+
+        $this->actingAs($employeeUser)->post(route('leave.store'), [
+            'intent' => 'submit',
+            'leave_type_id' => LeaveType::where('code', 'WELLNESS')->value('id'),
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'commutation_requested' => '0',
+        ])->assertSessionHasErrors('policy_details.eligibility_basis');
+    }
+
+    public function test_hrmo_can_export_employee_leave_balances_and_monthly_accrual_ledger(): void
+    {
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $credit = LeaveCredit::where('employee_id', $employee->id)
+            ->whereHas('leaveType', fn ($query) => $query->where('code', 'VACATION'))
+            ->firstOrFail();
+        LeaveCreditTransaction::create([
+            'leave_credit_id' => $credit->id,
+            'type' => 'monthly_accrual',
+            'amount' => 1.25,
+            'previous_balance' => 12,
+            'balance_after' => 13.25,
+            'effective_date' => today(),
+            'accrual_month' => today()->startOfMonth(),
+            'remarks' => 'Monthly accrual report test.',
+        ]);
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('reports.index'))
+            ->assertOk()
+            ->assertSee('Leave credit and special leave reports');
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('reports.leave-credit.csv', ['report' => 'balances']))
+            ->assertOk()
+            ->assertHeader('content-type', 'text/csv; charset=UTF-8');
+
+        $ledgerResponse = $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('reports.leave-credit.csv', ['report' => 'accrual']));
+        $ledgerResponse->assertOk();
+        $this->assertStringContainsString('Monthly accrual report test.', $ledgerResponse->streamedContent());
+    }
+
     public function test_distinct_mayor_can_review_only_authorized_leave_records_without_sensitive_details(): void
     {
-        $mayor = User::create([
-            'name' => 'Test Mayor',
-            'email' => 'mayor@example.test',
-            'password' => 'TestAccount123!',
-            'role' => 'mayor',
-            'is_active' => true,
-        ]);
+        $mayor = User::where('role', 'mayor')->firstOrFail();
         $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
         $sensitiveType = LeaveType::where('code', 'VAWC')->firstOrFail();
         $pending = LeaveApplication::create([
             'employee_id' => $employee->id,
             'leave_type_id' => $sensitiveType->id,
             'status' => 'Pending Final Approval',
+            'eligibility_verified_at' => now(),
+            'eligibility_verified_by' => User::where('role', 'admin')->value('id'),
             'office_snapshot' => $employee->department->name,
             'last_name_snapshot' => $employee->last_name,
             'first_name_snapshot' => $employee->first_name,
@@ -329,7 +545,7 @@ class HrisWorkflowTest extends TestCase
             ->assertOk()
             ->assertSee($employee->full_name)
             ->assertDontSee($outsideScopeEmployee->full_name)
-            ->assertDontSee('Alternate Office Head decision');
+            ->assertDontSee('Alternate Office Head review');
 
         $this->get(route('leave.show', $pending))
             ->assertOk()
@@ -341,7 +557,7 @@ class HrisWorkflowTest extends TestCase
             ->assertDontSee('Sensitive medical detail');
         $this->get(route('leave.show', $assignedAlternate))
             ->assertOk()
-            ->assertSee('Alternate Office Head decision');
+            ->assertSee('Alternate Office Head review');
         $this->get(route('leave.show', $otherMayorRequest))->assertForbidden();
         $this->get(route('leave.show', $outsideScope))->assertForbidden();
 
@@ -353,13 +569,12 @@ class HrisWorkflowTest extends TestCase
         $this->assertSame('Approved', $pending->fresh()->status);
     }
 
-    public function test_unavailable_office_head_uses_authorized_mayor_fallback_then_hrmo_finalizes_without_duplicate_decision(): void
+    public function test_mayor_alternate_endorsement_is_separate_from_hr_verification_and_final_approval(): void
     {
         [$startDate, $endDate] = $this->nextTwoWorkingDays();
         $department = Department::where('code', 'TEST')->firstOrFail();
         $officeHead = User::where('role', 'office_head')->firstOrFail();
-        $mayor = User::where('role', 'admin')->firstOrFail();
-        $mayor->update(['role' => 'mayor', 'can_final_approve' => false]);
+        $mayor = User::where('role', 'mayor')->firstOrFail();
         OfficeHeadAvailability::create([
             'department_id' => $department->id,
             'office_head_user_id' => $officeHead->id,
@@ -367,7 +582,7 @@ class HrisWorkflowTest extends TestCase
             'start_date' => $startDate,
             'end_date' => $endDate,
             'reason' => 'Authorized test availability period',
-            'updated_by' => User::where('role', 'hrmo')->value('id'),
+            'updated_by' => User::where('role', 'admin')->value('id'),
         ]);
 
         $employeeUser = Employee::where('employee_no', 'TEST-0001')->firstOrFail()->user;
@@ -384,33 +599,38 @@ class HrisWorkflowTest extends TestCase
         $this->assertSame($mayor->id, $application->office_head_reviewer_id);
 
         $this->actingAs($mayor)->post(route('leave.review', $application), [
-            'action' => 'approve',
-            'days_with_pay' => 2,
-            'days_without_pay' => 0,
-            'remarks' => 'Authorized alternate decision.',
+            'action' => 'endorse',
+            'recommendation' => 'For approval',
+            'remarks' => 'Authorized alternate endorsement.',
         ])->assertRedirect();
         $this->assertSame('Under HRMO Verification', $application->fresh()->status);
         $this->assertDatabaseHas('leave_approval_histories', [
             'leave_application_id' => $application->id,
-            'action' => 'alternate_final_approve_recorded',
+            'action' => 'mayor_alternate_endorsement',
             'user_id' => $mayor->id,
         ]);
 
-        $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        $this->actingAs(User::where('email', 'hrmo@example.test')->firstOrFail())
             ->post(route('leave.review', $application), [
                 'action' => 'verify',
                 'verified_working_days' => 2,
                 'certifier_position' => 'Human Resource Officer',
                 'certifier_signature' => 'HRMO Officer',
-                'waived_documents' => ['Travel destination, if applicable'],
-                'waiver_justification' => 'The employee is not travelling abroad for this leave.',
             ])->assertRedirect();
+
+        $application->refresh();
+        $this->assertSame('Pending Final Approval', $application->status);
+        $this->actingAs($mayor)->post(route('leave.review', $application), [
+            'action' => 'approve',
+            'days_with_pay' => 2,
+            'days_without_pay' => 0,
+            'remarks' => 'Final approval after HR certification.',
+        ])->assertRedirect();
 
         $application->refresh();
         $this->assertSame('Approved', $application->status);
         $this->assertSame($mayor->id, $application->decided_by);
-        $this->assertSame(1, $application->history()->where('action', 'alternate_final_approve_recorded')->count());
-        $this->assertSame(1, $application->history()->where('action', 'verified_and_finalized_alternate_decision')->count());
+        $this->assertSame(1, $application->history()->where('action', 'mayor_alternate_endorsement')->count());
         $this->assertSame(10.0, LeaveCredit::where('employee_id', $employeeUser->employee->id)
             ->where('leave_type_id', $application->leave_type_id)->firstOrFail()->balance);
         $this->assertSame(1, LeaveCreditTransaction::where('leave_application_id', $application->id)->count());
@@ -418,7 +638,7 @@ class HrisWorkflowTest extends TestCase
 
     public function test_unavailable_office_head_without_a_single_authorized_fallback_cannot_submit(): void
     {
-        User::where('role', 'admin')->update(['can_final_approve' => false]);
+        User::where('role', 'mayor')->update(['role' => 'employee']);
         $department = Department::where('code', 'TEST')->firstOrFail();
         $officeHead = User::where('role', 'office_head')->firstOrFail();
         OfficeHeadAvailability::create([
@@ -428,7 +648,7 @@ class HrisWorkflowTest extends TestCase
             'start_date' => today(),
             'end_date' => today()->addDays(3),
             'reason' => 'Authorized test availability period',
-            'updated_by' => User::where('role', 'hrmo')->value('id'),
+            'updated_by' => User::where('role', 'admin')->value('id'),
         ]);
 
         $employeeUser = Employee::where('employee_no', 'TEST-0001')->firstOrFail()->user;
@@ -446,7 +666,7 @@ class HrisWorkflowTest extends TestCase
         ]);
     }
 
-    public function test_hrmo_can_return_a_mismatched_alternate_decision_and_resubmission_clears_it(): void
+    public function test_hr_reviewer_can_return_an_application_and_resubmission_restarts_the_review_route(): void
     {
         [$startDate, $endDate] = $this->nextTwoWorkingDays();
         $department = Department::where('code', 'TEST')->firstOrFail();
@@ -458,7 +678,7 @@ class HrisWorkflowTest extends TestCase
             'start_date' => $startDate,
             'end_date' => $endDate,
             'reason' => 'Authorized test availability period',
-            'updated_by' => User::where('role', 'hrmo')->value('id'),
+            'updated_by' => User::where('role', 'admin')->value('id'),
         ]);
         $employeeUser = Employee::where('employee_no', 'TEST-0001')->firstOrFail()->user;
 
@@ -470,24 +690,14 @@ class HrisWorkflowTest extends TestCase
             'commutation_requested' => '0',
         ])->assertRedirect();
         $application = LeaveApplication::latest('id')->firstOrFail();
-        $admin = User::where('role', 'admin')->firstOrFail();
+        $mayor = User::where('role', 'mayor')->firstOrFail();
 
-        $this->actingAs($admin)->post(route('leave.review', $application), [
-            'action' => 'approve',
-            'days_with_pay' => 2,
-            'days_without_pay' => 0,
+        $this->actingAs($mayor)->post(route('leave.review', $application), [
+            'action' => 'endorse',
+            'recommendation' => 'For approval',
         ])->assertRedirect();
 
-        $hrmo = User::where('role', 'hrmo')->firstOrFail();
-        $this->actingAs($hrmo)->post(route('leave.review', $application), [
-            'action' => 'verify',
-            'verified_working_days' => 1,
-            'certifier_position' => 'Human Resource Officer',
-            'certifier_signature' => 'HRMO Officer',
-                'waived_documents' => ['Travel destination, if applicable'],
-                'waiver_justification' => 'The employee is not travelling abroad for this leave.',
-        ])->assertSessionHasErrors('verified_working_days');
-
+        $hrmo = User::where('role', 'admin')->firstOrFail();
         $this->actingAs($hrmo)->post(route('leave.review', $application), [
             'action' => 'return',
             'remarks' => 'Please correct the dates to match the verified workdays.',
@@ -513,9 +723,10 @@ class HrisWorkflowTest extends TestCase
     {
         $this->actingAs(User::where('role', 'office_head')->firstOrFail())
             ->get(route('office-head-availability.index'))
-            ->assertForbidden();
+            ->assertOk()
+            ->assertSee('Record availability');
 
-        $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->get(route('office-head-availability.index'))
             ->assertOk()
             ->assertSee('Office Head availability');
@@ -532,7 +743,7 @@ class HrisWorkflowTest extends TestCase
             'reason' => 'Authorized test availability period',
         ];
 
-        $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('office-head-availability.store'), $data)
             ->assertRedirect();
 
@@ -552,16 +763,16 @@ class HrisWorkflowTest extends TestCase
         $this->assertDatabaseCount('office_head_availabilities', 1);
     }
 
-    public function test_office_head_hrmo_and_mayor_complete_approval_and_credit_deduction(): void
+    public function test_office_head_hrmo_and_mayor_complete_approval_and_leave_credit_debit(): void
     {
         $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
         $vacation = LeaveType::where('code', 'VACATION')->firstOrFail();
-        $mayor = User::where('role', 'admin')->firstOrFail();
-        $mayor->update(['role' => 'mayor', 'can_final_approve' => false]);
+        $mayor = User::where('role', 'mayor')->firstOrFail();
         $application = LeaveApplication::create([
             'employee_id' => $employee->id,
             'leave_type_id' => $vacation->id,
             'status' => 'Under Office Head Review',
+            'office_head_reviewer_id' => User::where('role', 'office_head')->value('id'),
             'office_snapshot' => $employee->department->name,
             'position_snapshot' => $employee->position->title,
             'salary_snapshot' => $employee->monthly_salary,
@@ -582,15 +793,13 @@ class HrisWorkflowTest extends TestCase
             ])->assertRedirect();
         $this->assertDatabaseHas('leave_applications', ['id' => $application->id, 'status' => 'Under HRMO Verification']);
 
-        $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('leave.review', $application), [
                 'action' => 'verify',
                 'verified_working_days' => 2,
                 'certifier_position' => 'Human Resource Officer',
                 'certifier_signature' => 'HRMO Officer',
                 'remarks' => 'Verified against leave record.',
-                'waived_documents' => ['Travel destination, if applicable'],
-                'waiver_justification' => 'The employee is not travelling abroad for this leave.',
             ])->assertRedirect();
         $this->assertDatabaseHas('leave_applications', [
             'id' => $application->id,
@@ -612,7 +821,9 @@ class HrisWorkflowTest extends TestCase
         $this->assertDatabaseHas('leave_credit_transactions', [
             'leave_application_id' => $application->id,
             'type' => 'used',
-            'amount' => 2,
+            'amount' => -2,
+            'previous_balance' => 12,
+            'balance_after' => 10,
         ]);
     }
 
@@ -653,10 +864,11 @@ class HrisWorkflowTest extends TestCase
         Storage::fake('local');
         $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
         $type = LeaveType::where('code', 'VAWC')->firstOrFail();
-        $requiredDocument = $type->required_documents[0];
+        $requiredDocument = 'Barangay Protection Order (BPO), Temporary Protection Order (TPO), or Permanent Protection Order (PPO)';
         $makeApplication = fn (string $employeeNo) => LeaveApplication::create([
             'employee_id' => Employee::where('employee_no', $employeeNo)->value('id'),
             'leave_type_id' => $type->id,
+            'policy_details' => ['protection_order_status' => 'issued'],
             'status' => 'Under HRMO Verification',
             'office_snapshot' => $employee->department->name,
             'last_name_snapshot' => $employee->last_name,
@@ -666,7 +878,7 @@ class HrisWorkflowTest extends TestCase
             'start_date' => today()->addDays(10),
             'end_date' => today()->addDays(10),
         ]);
-        $hrmo = User::where('role', 'hrmo')->firstOrFail();
+        $hrmo = User::where('role', 'admin')->firstOrFail();
         $verification = [
             'action' => 'verify',
             'verified_working_days' => 1,
@@ -676,6 +888,9 @@ class HrisWorkflowTest extends TestCase
         $waiverApplication = $makeApplication('TEST-0001');
 
         $this->actingAs($hrmo)->post(route('leave.review', $waiverApplication), $verification)
+            ->assertSessionHasErrors('eligibility_verified');
+        $verification['eligibility_verified'] = '1';
+        $this->post(route('leave.review', $waiverApplication), $verification)
             ->assertSessionHasErrors('waived_documents');
         $this->post(route('leave.review', $waiverApplication), $verification + [
             'waived_documents' => ['Unconfigured document'],
@@ -687,6 +902,8 @@ class HrisWorkflowTest extends TestCase
         ])->assertRedirect();
         $this->assertSame('Pending Final Approval', $waiverApplication->fresh()->status);
         $this->assertSame([$requiredDocument], $waiverApplication->fresh()->document_waivers['documents']);
+        $this->assertNotNull($waiverApplication->fresh()->eligibility_verified_at);
+        $this->assertSame($hrmo->id, $waiverApplication->fresh()->eligibility_verified_by);
 
         $attachedApplication = $makeApplication('TEST-0001');
         $storedPath = Storage::disk('local')->put('leave-documents/'.$attachedApplication->id.'/proof.pdf', 'private');
@@ -759,7 +976,7 @@ class HrisWorkflowTest extends TestCase
     public function test_hrmo_can_assign_effective_office_and_employee_schedules_without_overlapping_periods(): void
     {
         $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
-        $hrmo = User::where('role', 'hrmo')->firstOrFail();
+        $hrmo = User::where('role', 'admin')->firstOrFail();
         $effectiveFrom = today()->toDateString();
         $officeSchedule = [
             'working_days' => [1, 2, 3, 4, 5],
@@ -954,7 +1171,7 @@ class HrisWorkflowTest extends TestCase
             'grace_period_minutes' => 0,
             'effective_from' => today()->toDateString(),
             'reason' => 'Later schedule for new calculations.',
-            'created_by' => User::where('role', 'hrmo')->firstOrFail()->id,
+            'created_by' => User::where('role', 'admin')->firstOrFail()->id,
         ]);
 
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
@@ -1016,7 +1233,7 @@ class HrisWorkflowTest extends TestCase
     {
         $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
         $vacation = LeaveType::where('code', 'VACATION')->firstOrFail();
-        $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('leave-credits.store'), [
                 'employee_id' => $employee->id,
                 'leave_type_id' => $vacation->id,
@@ -1035,20 +1252,20 @@ class HrisWorkflowTest extends TestCase
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->get(route('dashboard'))
             ->assertOk()
-            ->assertViewHas('role', 'mayor')
-            ->assertViewHas('pageTitle', 'Mayor’s executive overview')
-            ->assertSee('data-role-theme="mayor"', false)
-            ->assertSee('Escalated requests')
-            ->assertSee('Department staffing');
+            ->assertViewHas('role', 'administrator')
+            ->assertViewHas('pageTitle', 'Administration overview')
+            ->assertSee('data-role-theme="administrator"', false)
+            ->assertSee('User & permissions', false)
+            ->assertSee('Pending HR actions');
 
-        $this->actingAs(User::where('role', 'hrmo')->firstOrFail())
+        $this->actingAs(User::where('role', 'mayor')->firstOrFail())
             ->get(route('dashboard'))
             ->assertOk()
-            ->assertViewHas('pageTitle', 'HR operations')
-            ->assertSee('data-role-theme="hrmo"', false)
-            ->assertSee('User management · view only')
-            ->assertSee('Audit logs · view only')
-            ->assertSee('Pending HR actions');
+            ->assertViewHas('role', 'mayor')
+            ->assertSee('data-role-theme="mayor"', false)
+            ->assertSee('Escalated requests')
+            ->assertSee('Department staffing')
+            ->assertDontSee('System settings');
 
         $this->actingAs(User::where('role', 'office_head')->firstOrFail())
             ->get(route('dashboard'))
@@ -1064,27 +1281,29 @@ class HrisWorkflowTest extends TestCase
             ->assertOk()
             ->assertViewHas('pageTitle', 'My workspace')
             ->assertSee('data-role-theme="employee"', false)
-            ->assertSee('File leave application')
+            ->assertSee('Apply for leave')
             ->assertSee('My leave applications')
             ->assertDontSee('Audit logs');
     }
 
-    public function test_hrmo_user_and_audit_sections_are_read_only_and_system_settings_remain_restricted(): void
+    public function test_admin_can_manage_accounts_and_system_while_mayor_is_restricted(): void
     {
-        $hrmo = User::where('role', 'hrmo')->firstOrFail();
+        $admin = User::where('role', 'admin')->firstOrFail();
 
-        $this->actingAs($hrmo)
+        $this->actingAs($admin)
             ->get(route('users.index'))
             ->assertOk()
-            ->assertSee('Read-only account directory')
-            ->assertDontSee('Manage →')
-            ->assertDontSee(route('users.create'));
+            ->assertSee('Manage →')
+            ->assertSee(route('users.create'));
 
-        $this->actingAs($hrmo)->get(route('audit.index'))->assertOk();
-        $this->actingAs($hrmo)->get(route('users.create'))->assertForbidden();
-        $this->actingAs($hrmo)->get(route('settings.system'))->assertForbidden();
-        $this->actingAs($hrmo)->put(route('users.update', User::where('role', 'office_head')->firstOrFail()), [])
+        $this->get(route('audit.index'))->assertOk();
+        $this->get(route('users.create'))->assertOk();
+        $this->get(route('settings.system'))->assertOk();
+
+        $this->actingAs(User::where('role', 'mayor')->firstOrFail())
+            ->get(route('users.create'))
             ->assertForbidden();
+        $this->get(route('settings.system'))->assertForbidden();
     }
 
     public function test_employee_leave_credit_page_only_contains_the_signed_in_employees_balances(): void
@@ -1101,17 +1320,15 @@ class HrisWorkflowTest extends TestCase
             'employment_type' => 'Permanent',
             'date_hired' => '2021-01-04',
         ]);
-        LeaveCredit::create([
-            'employee_id' => $otherEmployee->id,
-            'leave_type_id' => LeaveType::where('code', 'VACATION')->value('id'),
-            'beginning_balance' => 5,
-            'effective_date' => today(),
-        ]);
+        $otherCredit = LeaveCredit::where('employee_id', $otherEmployee->id)
+            ->whereHas('leaveType', fn ($query) => $query->where('code', 'VACATION'))
+            ->firstOrFail();
+        $otherCredit->update(['beginning_balance' => 5]);
 
         $this->actingAs($employee->user)
             ->get(route('leave-credits.index'))
             ->assertOk()
-            ->assertViewHas('credits', fn ($credits) => $credits->total() === 1)
+            ->assertViewHas('credits', fn ($credits) => $credits->total() === 2)
             ->assertSee('My leave credits')
             ->assertDontSee('Create a credit account')
             ->assertDontSee('Record transaction');
@@ -1312,7 +1529,7 @@ class HrisWorkflowTest extends TestCase
 
     public function test_role_account_passwords_remain_the_values_set_at_creation(): void
     {
-        foreach (['admin', 'hrmo', 'office_head'] as $role) {
+        foreach (['admin', 'mayor', 'office_head'] as $role) {
             $user = User::where('role', $role)->firstOrFail();
             $this->assertTrue(Hash::check('TestAccount123!', $user->password));
         }

@@ -9,14 +9,17 @@ use App\Models\LeaveApprovalHistory;
 use App\Models\Employee;
 use App\Models\LeaveType;
 use App\Models\OfficeHeadAvailability;
+use App\Models\SystemSetting;
 use App\Models\User;
 use App\Notifications\LeaveApplicationUpdated;
 use App\Services\AuditLogger;
+use App\Services\LeaveWorkflowService;
 use App\Services\WorkingDayCalculator;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Carbon;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 use Throwable;
@@ -27,22 +30,31 @@ class LeaveApplicationController extends Controller
     {
         $query = LeaveApplication::with(['employee.department', 'leaveType']);
         $user = $request->user();
-        if ($user->isEmployee()) {
-            $query->where('employee_id', $user->employee?->id ?? 0);
+        $employeeId = $user->employee?->id;
+        if ($request->boolean('mine') || $user->isEmployee()) {
+            $query->where('employee_id', $employeeId ?? 0);
         } elseif ($user->isOfficeHead()) {
             $query->where(function ($applications) use ($user) {
-                $applications->where('office_head_reviewer_id', $user->id)
+                $applications->where('employee_id', $user->employee?->id ?? 0)
+                    ->orWhere('office_head_reviewer_id', $user->id)
                     ->orWhereHas('employee.department', fn ($department) => $department->where('head_user_id', $user->id));
             });
-        } elseif ($user->canFinalApprove() && ! $user->isAdministrator()) {
+        } elseif ($user->isMayor()) {
             $query->where(function ($applications) use ($user) {
-                $applications->where('status', 'Pending Final Approval')
+                $applications->where('employee_id', $user->employee?->id ?? 0)
+                    ->orWhere('status', 'Pending Final Approval')
                     ->orWhere(function ($alternate) use ($user) {
                         $alternate->where('status', 'Under Alternate Office Head Review')
                             ->where('office_head_reviewer_id', $user->id);
                     })
-                    ->orWhere('decided_by', $user->id)
-                    ->orWhere('alternate_decision_by', $user->id);
+                    ->orWhere('decided_by', $user->id);
+            });
+        } elseif ($user->canApproveMayorLeave() && ! $user->canManageHr()) {
+            $query->where(function ($applications) use ($user) {
+                $applications->where('employee_id', $user->employee?->id ?? 0)
+                    ->orWhere(fn ($assigned) => $assigned
+                        ->where('status', 'Pending Authorized Final Approval')
+                        ->where('assigned_final_approver_id', $user->id));
             });
         }
         if ($request->filled('status')) {
@@ -61,12 +73,13 @@ class LeaveApplicationController extends Controller
     public function create(Request $request): View
     {
         $this->authorize('create', LeaveApplication::class);
-        $employee = $request->user()->employee->load(['department', 'position']);
+        $employee = $request->user()->employee?->load(['department', 'position']);
+        abort_unless($employee, 403, 'Link your account to an employee record before filing personal leave.');
 
         return view('leave.form', [
             'application' => new LeaveApplication([
                 'filed_at' => today(),
-                'office_snapshot' => $employee->department->name,
+                'office_snapshot' => $employee->department?->name ?? 'Department not assigned',
                 'position_snapshot' => $employee->position?->title,
                 'salary_snapshot' => $employee->monthly_salary,
                 'last_name_snapshot' => $employee->last_name,
@@ -74,6 +87,7 @@ class LeaveApplicationController extends Controller
                 'middle_name_snapshot' => $employee->middle_name,
             ]),
             'employee' => $employee,
+            'leaveCredits' => $employee->leaveCredits()->with('leaveType')->get(),
             'leaveTypes' => LeaveType::where('is_active', true)->orderBy('sort_order')->get(),
         ]);
     }
@@ -92,12 +106,18 @@ class LeaveApplicationController extends Controller
                 $application = new LeaveApplication;
                 $this->saveForm($application, $request, $employee, $calculator);
                 $application->save();
+                if ($submitted) {
+                    $this->assertCreditAvailable($application);
+                    $this->assertPolicyEntitlementAvailable($application);
+                }
                 $application->status = $submitted ? 'Submitted' : 'Draft';
                 if ($submitted) {
                     $this->assertNoOverlap($application);
-                    $route = $this->resolveOfficeHeadRoute($employee, $application);
+                    $route = $this->resolveSubmissionRoute($request->user(), $employee, $application);
                     $application->office_head_reviewer_id = $route['reviewer_id'];
                     $application->office_head_routing_reason = $route['reason'];
+                    $application->assigned_hr_reviewer_id = $route['hr_reviewer_id'];
+                    $application->assigned_final_approver_id = $route['final_approver_id'];
                 }
                 $application->save();
 
@@ -134,11 +154,7 @@ class LeaveApplicationController extends Controller
             throw $exception;
         }
         if ($submitted) {
-            $application->load('employee', 'officeHeadReviewer');
-            $application->officeHeadReviewer?->notify(new LeaveApplicationUpdated(
-                $application,
-                'A new leave application from '.$application->employee->full_name.' is awaiting your review.'
-            ));
+            $this->notifySubmissionReviewer($application);
         }
 
         return redirect()->route('leave.show', $application)->with('success', $submitted
@@ -146,19 +162,20 @@ class LeaveApplicationController extends Controller
             : 'Your draft has been saved.');
     }
 
-    public function show(LeaveApplication $application): View
+    public function show(LeaveApplication $application, LeaveWorkflowService $workflow): View
     {
         $this->authorize('view', $application);
         $application->load([
             'employee.department', 'employee.position', 'leaveType', 'documents', 'history.user',
-            'officeHeadReviewer', 'alternateDecisionMaker',
+            'officeHeadReviewer', 'alternateDecisionMaker', 'assignedHrReviewer', 'assignedFinalApprover', 'eligibilityVerifier',
         ]);
         $sensitiveDetailsVisible = ! $application->leaveType->is_sensitive
             || auth()->user()->canManageHr()
             || auth()->user()->isAdministrator()
             || auth()->user()->employee?->id === $application->employee_id;
+        $requiredDocuments = $workflow->requiredDocumentsFor($application);
 
-        return view('leave.show', compact('application', 'sensitiveDetailsVisible'));
+        return view('leave.show', compact('application', 'sensitiveDetailsVisible', 'requiredDocuments'));
     }
 
     public function edit(LeaveApplication $application): View
@@ -169,6 +186,7 @@ class LeaveApplicationController extends Controller
         return view('leave.form', [
             'application' => $application->load('leaveType'),
             'employee' => $employee,
+            'leaveCredits' => $employee->leaveCredits()->with('leaveType')->get(),
             'leaveTypes' => LeaveType::where('is_active', true)->orderBy('sort_order')->get(),
         ]);
     }
@@ -197,13 +215,19 @@ class LeaveApplicationController extends Controller
                 $previous = $application->status;
                 $this->saveForm($application, $request, $employee, $calculator);
                 if ($submitted) {
+                    $this->assertCreditAvailable($application);
+                }
+                if ($submitted) {
                     $this->assertNoOverlap($application);
-                    $route = $this->resolveOfficeHeadRoute($employee, $application);
+                    $route = $this->resolveSubmissionRoute($request->user(), $employee, $application);
                     $application->fill([
                     'verified_working_days' => null,
                     'credit_certification' => null,
                     'certified_by' => null,
                     'certified_at' => null,
+                    'eligibility_verified_at' => null,
+                    'eligibility_verified_by' => null,
+                    'eligibility_remarks' => null,
                     'certifier_position' => null,
                     'certifier_signature' => null,
                     'hr_remarks' => null,
@@ -230,6 +254,8 @@ class LeaveApplicationController extends Controller
                     ]);
                     $application->office_head_reviewer_id = $route['reviewer_id'];
                     $application->office_head_routing_reason = $route['reason'];
+                    $application->assigned_hr_reviewer_id = $route['hr_reviewer_id'];
+                    $application->assigned_final_approver_id = $route['final_approver_id'];
                     $application->status = $route['status'];
                     LeaveApprovalHistory::create([
                         'leave_application_id' => $application->id,
@@ -254,11 +280,7 @@ class LeaveApplicationController extends Controller
             throw $exception;
         }
         if ($submitted) {
-            $application->load('employee', 'officeHeadReviewer');
-            $application->officeHeadReviewer?->notify(new LeaveApplicationUpdated(
-                $application,
-                'A leave application from '.$application->employee->full_name.' is awaiting your review.'
-            ));
+            $this->notifySubmissionReviewer($application);
         }
 
         return redirect()->route('leave.show', $application)->with('success', 'Your application has been saved.');
@@ -311,10 +333,22 @@ class LeaveApplicationController extends Controller
     private function saveForm(LeaveApplication $application, SaveLeaveApplicationRequest $request, $employee, WorkingDayCalculator $calculator): void
     {
         $data = $request->validated();
+        $workingDays = isset($data['start_date'], $data['end_date'])
+            ? $calculator->count($data['start_date'], $data['end_date'])
+            : ($data['working_days'] ?? null);
+        $leaveType = LeaveType::findOrFail($data['leave_type_id']);
+        if ($request->input('intent') === 'submit'
+            && ! in_array($leaveType->code, ['MONETIZATION', 'TERMINAL'], true)
+            && (float) $workingDays < 1) {
+            throw ValidationException::withMessages([
+                'start_date' => 'The selected dates contain no working days in the configured work calendar.',
+            ]);
+        }
+
         $application->fill([
             'employee_id' => $employee->id,
             'leave_type_id' => $data['leave_type_id'],
-            'office_snapshot' => $employee->department->name,
+            'office_snapshot' => $employee->department?->name ?? 'Department not assigned',
             'position_snapshot' => $employee->position?->title,
             'salary_snapshot' => $employee->monthly_salary,
             'last_name_snapshot' => $employee->last_name,
@@ -326,14 +360,144 @@ class LeaveApplicationController extends Controller
             'leave_detail' => $data['leave_detail'] ?? null,
             'destination' => $data['destination'] ?? null,
             'additional_details' => $data['additional_details'] ?? null,
-            'working_days' => isset($data['start_date'], $data['end_date'])
-                ? $calculator->count($data['start_date'], $data['end_date'])
-                : ($data['working_days'] ?? null),
+            'policy_details' => $data['policy_details'] ?? [],
+            'working_days' => $workingDays,
             'start_date' => $data['start_date'] ?? null,
             'end_date' => $data['end_date'] ?? null,
             'commutation_requested' => isset($data['commutation_requested']) ? (bool) $data['commutation_requested'] : null,
             'applicant_acknowledgment' => $data['applicant_acknowledgment'] ?? null,
         ]);
+    }
+
+    private function assertCreditAvailable(LeaveApplication $application): void
+    {
+        $type = $application->leaveType;
+        if (! $type->requires_credit) {
+            return;
+        }
+
+        $credit = $application->employee->leaveCredits()
+            ->where('leave_type_id', $type->id)
+            ->lockForUpdate()
+            ->first();
+        $pendingDays = LeaveApplication::query()
+            ->where('employee_id', $application->employee_id)
+            ->where('leave_type_id', $type->id)
+            ->where('id', '!=', $application->id)
+            ->whereNotIn('status', ['Draft', 'Cancelled', 'Disapproved', 'Approved'])
+            ->selectRaw('COALESCE(SUM(COALESCE(approved_days_with_pay, verified_working_days, working_days)), 0) as reserved_days')
+            ->value('reserved_days');
+        if (! $credit || $credit->balance - (float) $pendingDays < (float) $application->working_days) {
+            throw ValidationException::withMessages([
+                'working_days' => 'The available '.$type->name.' balance, after other pending applications, is insufficient for the requested working days.',
+            ]);
+        }
+    }
+
+    private function assertPolicyEntitlementAvailable(LeaveApplication $application): void
+    {
+        $type = $application->leaveType;
+        $rules = $type->rules ?? [];
+        $details = $application->policy_details ?? [];
+        $start = $application->start_date;
+        $end = $application->end_date;
+        $days = ($rules['entitlement_unit'] ?? 'working_days') === 'calendar_days'
+            ? $start->diffInDays($end) + 1
+            : (float) $application->working_days;
+
+        if (($rules['entitlement_period'] ?? null) === 'annual' && $start->year !== $end->year) {
+            throw ValidationException::withMessages([
+                'end_date' => 'An annual leave entitlement request cannot span two calendar years.',
+            ]);
+        }
+
+        if ($type->code === 'SICK' && $end->gt(today())) {
+            throw ValidationException::withMessages([
+                'end_date' => 'Sick Leave is filed upon return from the absence and cannot be submitted for future dates.',
+            ]);
+        }
+
+        $advanceDays = $rules['filing_advance_days'] ?? null;
+        if ($type->code === 'SPECIAL_PRIVILEGE' && $advanceDays !== null
+            && $start->lt(today()->addDays((int) $advanceDays))
+            && ($details['emergency_case'] ?? null) !== 'yes') {
+            throw ValidationException::withMessages([
+                'policy_details.emergency_case' => 'Special Privilege Leave must be filed at least '.$advanceDays.' days in advance, unless HRMO reviews an emergency exception.',
+            ]);
+        }
+
+        if (isset($rules['max_entitlement_months'])
+            && $end->gt($start->copy()->addMonthsNoOverflow((int) $rules['max_entitlement_months'])->subDay())) {
+            throw ValidationException::withMessages([
+                'end_date' => 'The requested period exceeds the configured maximum of '.$rules['max_entitlement_months'].' months for '.$type->name.'.',
+            ]);
+        }
+
+        $occurrenceWindow = $rules['use_within_occurrence_days'] ?? null;
+        if ($occurrenceWindow !== null) {
+            $occurrenceDate = $details['calamity_occurrence_date'] ?? null;
+            if (! $occurrenceDate || ! strtotime($occurrenceDate)) {
+                throw ValidationException::withMessages(['policy_details.calamity_occurrence_date' => 'Enter the actual calamity occurrence date.']);
+            }
+            $occurrence = Carbon::parse($occurrenceDate)->startOfDay();
+            if ($start->lt($occurrence) || $start->gt($occurrence->copy()->addDays((int) $occurrenceWindow))) {
+                throw ValidationException::withMessages([
+                    'start_date' => 'Special Emergency Leave must begin within '.$occurrenceWindow.' days of the actual calamity.',
+                ]);
+            }
+        }
+
+        $annualLimit = $rules['annual_entitlement_days'] ?? null;
+        if (($rules['entitlement_period'] ?? null) === 'annual') {
+            $annualLimit ??= $rules['entitlement_days'] ?? null;
+        }
+
+        if ($annualLimit !== null || isset($rules['maximum_uses_per_year'])) {
+            $yearStart = $start->copy()->startOfYear()->toDateString();
+            $yearEnd = $start->copy()->endOfYear()->toDateString();
+            $priorApplications = LeaveApplication::query()
+                ->where('employee_id', $application->employee_id)
+                ->where('leave_type_id', $type->id)
+                ->where('id', '!=', $application->id)
+                ->whereNotIn('status', ['Draft', 'Cancelled', 'Disapproved'])
+                ->whereBetween('start_date', [$yearStart, $yearEnd]);
+
+            if (isset($rules['maximum_uses_per_year'])
+                && (clone $priorApplications)->count() >= (int) $rules['maximum_uses_per_year']) {
+                throw ValidationException::withMessages([
+                    'leave_type_id' => 'The annual maximum number of '.$type->name.' applications has already been reached.',
+                ]);
+            }
+
+            if ($annualLimit !== null) {
+                $usedDays = (float) (clone $priorApplications)
+                    ->selectRaw('COALESCE(SUM(COALESCE(verified_working_days, working_days)), 0) as used_days')
+                    ->value('used_days');
+                if ($usedDays + $days > (float) $annualLimit) {
+                    throw ValidationException::withMessages([
+                        'working_days' => 'This request would exceed the annual '.$type->name.' entitlement of '.$annualLimit.' days.',
+                    ]);
+                }
+            }
+        } elseif (isset($rules['entitlement_days']) && $days > (float) $rules['entitlement_days']) {
+            throw ValidationException::withMessages([
+                'working_days' => 'This request exceeds the configured '.$type->name.' entitlement of '.$rules['entitlement_days'].' days.',
+            ]);
+        }
+
+        if ($type->code === 'MONETIZATION') {
+            $requested = (float) ($details['requested_credit_days'] ?? 0);
+            $accumulated = (float) $application->employee->leaveCredits()
+                ->whereHas('leaveType', fn ($query) => $query->whereIn('code', ['VACATION', 'SICK']))
+                ->get()
+                ->sum(fn ($credit) => $credit->balance);
+            $minimum = $accumulated * (float) ($rules['minimum_credit_fraction'] ?? 0.5);
+            if ($accumulated <= 0 || $requested < $minimum || $requested > $accumulated) {
+                throw ValidationException::withMessages([
+                    'policy_details.requested_credit_days' => 'The requested amount must be at least the configured minimum and no more than the employee’s accumulated regular leave credits.',
+                ]);
+            }
+        }
     }
 
     private function assertNoOverlap(LeaveApplication $application): void
@@ -348,7 +512,95 @@ class LeaveApplicationController extends Controller
         abort_unless(! $overlap, 422, 'An active application already overlaps these dates.');
     }
 
-    private function resolveOfficeHeadRoute($employee, LeaveApplication $application): array
+    private function resolveSubmissionRoute(User $applicant, Employee $employee, LeaveApplication $application): array
+    {
+        if ((int) $employee->user_id === (int) $applicant->id) {
+            if ($applicant->isAdministrator()) {
+                $reviewerId = SystemSetting::find('leave_alternate_hr_reviewer_id')?->value;
+                $reviewer = $reviewerId
+                    ? User::query()->whereKey($reviewerId)->where('is_active', true)->where('role', 'admin')->first()
+                    : null;
+                $reviewer = $reviewer?->id !== $applicant->id ? $reviewer : null;
+
+                return [
+                    'reviewer_id' => null,
+                    'hr_reviewer_id' => $reviewer?->id,
+                    'final_approver_id' => null,
+                    'status' => $reviewer ? 'Under HRMO Verification' : 'Awaiting Alternate HR Reviewer Assignment',
+                    'reason' => 'Admin personal leave requires a separately assigned Admin reviewer.',
+                    'action' => $reviewer ? 'queued_for_alternate_hr_review' : 'awaiting_alternate_hr_assignment',
+                ];
+            }
+
+            if ($applicant->isMayor()) {
+                $approverId = SystemSetting::find('mayor_leave_approver_id')?->value;
+                $approver = $approverId
+                    ? User::query()->whereKey($approverId)->where('is_active', true)->where('role', 'admin')
+                        ->where('can_final_approve', true)->first()
+                    : null;
+                $approver = $approver?->id !== $applicant->id ? $approver : null;
+
+                return [
+                    'reviewer_id' => null,
+                    'hr_reviewer_id' => null,
+                    'final_approver_id' => $approver?->id,
+                    'status' => $approver ? 'Pending Authorized Final Approval' : 'Awaiting Authorized Final Approver Assignment',
+                    'reason' => 'Mayor personal leave requires a separately designated authorized final approver.',
+                    'action' => $approver ? 'queued_for_authorized_final_approval' : 'awaiting_final_approver_assignment',
+                ];
+            }
+
+            if ($applicant->isOfficeHead()) {
+                return [
+                    'reviewer_id' => null,
+                    'hr_reviewer_id' => null,
+                    'final_approver_id' => null,
+                    'status' => 'Under HRMO Verification',
+                    'reason' => 'Office Head personal leave bypasses self-endorsement and goes directly to HR Office verification.',
+                    'action' => 'queued_for_hrmo_verification',
+                ];
+            }
+        }
+
+        $route = $this->resolveOfficeHeadRoute($employee, $application);
+
+        return [
+            ...$route,
+            'hr_reviewer_id' => null,
+            'final_approver_id' => null,
+        ];
+    }
+
+    private function notifySubmissionReviewer(LeaveApplication $application): void
+    {
+        $application->load('employee', 'officeHeadReviewer', 'assignedHrReviewer', 'assignedFinalApprover');
+        $reviewer = $application->officeHeadReviewer
+            ?? $application->assignedHrReviewer
+            ?? $application->assignedFinalApprover;
+
+        if ($reviewer) {
+            $reviewer->notify(new LeaveApplicationUpdated(
+                $application,
+                'A leave application from '.$application->employee->full_name.' is awaiting your review.'
+            ));
+
+            return;
+        }
+
+        if ($application->status === 'Under HRMO Verification'
+            || str_starts_with($application->status, 'Awaiting')) {
+            User::query()->where('role', 'admin')->where('is_active', true)->get()->each(
+                fn (User $admin) => $admin->notify(new LeaveApplicationUpdated(
+                    $application,
+                    $application->status === 'Under HRMO Verification'
+                        ? 'A leave application is awaiting HR Office verification.'
+                        : 'A leave application needs an authorized reviewer assignment.'
+                ))
+            );
+        }
+    }
+
+    private function resolveOfficeHeadRoute(Employee $employee, LeaveApplication $application): array
     {
         $department = $employee->department()->with('head')->firstOrFail();
         $head = $department->head;
@@ -364,7 +616,7 @@ class LeaveApplicationController extends Controller
                 ->first()
             : null;
 
-        if ($head?->is_active && $head->isOfficeHead()
+        if ($head?->id !== $employee->user_id && $head?->is_active && $head->isOfficeHead()
             && (! $availability || $availability->availability_status === 'available')) {
             return [
                 'reviewer_id' => $head->id,
@@ -375,21 +627,20 @@ class LeaveApplicationController extends Controller
         }
 
         $alternate = $availability?->alternate;
-        if (! $alternate?->is_active || (! $alternate->isOfficeHead() && ! $alternate->canFinalApprove())) {
+        if (! $alternate?->is_active || (! $alternate->isOfficeHead() && ! $alternate->isMayor())) {
             $finalApprovers = User::query()->where('is_active', true)
-                ->where(fn ($users) => $users
-                    ->where('role', 'mayor')
-                    ->orWhere(fn ($legacy) => $legacy->where('role', 'admin')->where('can_final_approve', true)))
+                ->where('role', 'mayor')
                 ->orderBy('id')
                 ->limit(2)
                 ->get();
             if ($finalApprovers->count() !== 1) {
                 throw ValidationException::withMessages([
-                    'availability' => 'The Office Head is unavailable and there is no single designated final approver. HRMO or an administrator must assign an authorized alternate before this application can be submitted.',
+                    'availability' => 'The Office Head is unavailable and no unique Mayor is configured as the alternate reviewer. HR Office must assign an active Office Head or Mayor alternate.',
                 ]);
             }
             $alternate = $finalApprovers->first();
         }
+        abort_if($alternate->id === $employee->user_id, 422, 'The applicant cannot review their own leave application.');
 
         $reason = $availability
             ? ucfirst(str_replace('_', ' ', $availability->availability_status)).': '.$availability->reason

@@ -18,81 +18,91 @@ class LeaveWorkflowService
     public function act(LeaveApplication $application, User $user, array $data): void
     {
         DB::transaction(function () use ($application, $user, $data) {
-            $application = LeaveApplication::query()->lockForUpdate()->findOrFail($application->id);
+            $application = LeaveApplication::query()
+                ->with(['employee.user', 'employee.department', 'leaveType'])
+                ->lockForUpdate()
+                ->findOrFail($application->id);
+            abort_if(
+                (int) $application->employee->user_id === (int) $user->id,
+                403,
+                'You cannot review, certify, or decide your own leave application.'
+            );
             $from = $application->status;
             $action = $data['action'];
 
-            if ($user->isOfficeHead()) {
+            if ($action === 'assign_hr_reviewer') {
+                abort_unless($user->isAdministrator() && $from === 'Awaiting Alternate HR Reviewer Assignment', 409);
+                $reviewer = User::query()->lockForUpdate()->findOrFail($data['assigned_hr_reviewer_id']);
+                abort_unless($reviewer->is_active && $reviewer->isAdministrator(), 422, 'Choose an active Admin (HR Office) reviewer.');
+                abort_if($reviewer->id === $application->employee->user_id, 422, 'The applicant cannot be assigned as their own HR reviewer.');
+                $application->assigned_hr_reviewer_id = $reviewer->id;
+                $application->status = 'Under HRMO Verification';
+                $this->recordHistory($application, $user, 'alternate_hr_reviewer_assigned', $from, $application->status, $data['remarks'] ?? null);
+            } elseif ($action === 'assign_final_approver') {
+                abort_unless($user->isAdministrator() && $from === 'Awaiting Authorized Final Approver Assignment', 409);
+                $approver = User::query()->lockForUpdate()->findOrFail($data['assigned_final_approver_id']);
+                abort_unless($approver->canApproveMayorLeave(), 422, 'Choose an active Admin explicitly designated to decide a Mayor’s personal leave.');
+                abort_unless($application->employee->user?->isMayor(), 422, 'Only a Mayor’s personal application can use the separate authorized final approver route.');
+                $application->assigned_final_approver_id = $approver->id;
+                $application->status = 'Pending Authorized Final Approval';
+                $this->recordHistory($application, $user, 'mayor_leave_approver_assigned', $from, $application->status, $data['remarks'] ?? null);
+            } elseif ($user->isOfficeHead()
+                || ($user->isMayor() && $from === 'Under Alternate Office Head Review')) {
                 abort_unless(
                     in_array($from, ['Under Office Head Review', 'Under Alternate Office Head Review'], true)
-                        && ($application->office_head_reviewer_id
-                            ? $application->office_head_reviewer_id === $user->id
-                            : $application->employee->department->head_user_id === $user->id),
+                        && $application->office_head_reviewer_id === $user->id
+                        && in_array($action, ['endorse', 'return'], true),
                     409,
                     'This application is no longer awaiting your authorized department review.'
                 );
-                $nextStatus = $data['action'] === 'return' ? 'Returned for Correction' : 'Under HRMO Verification';
-                $historyStatus = $data['action'] === 'return' ? 'Returned for Correction' : 'Endorsed';
-                $this->recordHistory($application, $user, 'recommendation', $from, $historyStatus, $data['remarks'] ?? null);
-                $application->recommendation = $data['recommendation'];
+                $application->status = $action === 'return' ? 'Returned for Correction' : 'Under HRMO Verification';
+                $application->recommendation = $action === 'return' ? 'Returned for correction' : $data['recommendation'];
                 $application->recommendation_remarks = $data['remarks'] ?? null;
                 $application->recommended_by = $user->id;
                 $application->recommended_at = now();
-                $application->status = $nextStatus;
-            } elseif ($user->canFinalApprove()
-                && $from === 'Under Alternate Office Head Review'
-                && $application->office_head_reviewer_id === $user->id) {
-                if ($action === 'return') {
-                    $application->status = 'Returned for Correction';
-                    $this->recordHistory($application, $user, 'alternate_review_returned', $from, $application->status, $data['remarks']);
-                } elseif (in_array($action, ['approve', 'disapprove'], true)) {
-                    if ($action === 'approve') {
-                        $withPay = (float) $data['days_with_pay'];
-                        $withoutPay = (float) ($data['days_without_pay'] ?? 0);
-                        if (abs(($withPay + $withoutPay) - (float) $application->working_days) > 0.001) {
-                            throw ValidationException::withMessages([
-                                'days_with_pay' => 'Paid and unpaid days must equal the requested working days. HRMO must verify the same total before this alternate decision can be finalized.',
-                            ]);
-                        }
-                        $application->alternate_decision_days_with_pay = $withPay;
-                        $application->alternate_decision_days_without_pay = $withoutPay;
-                        $application->alternate_decision_others = $data['approval_others'] ?? null;
-                    } else {
-                        $application->alternate_decision_reason = $data['reason'];
-                    }
-                    $application->alternate_decision_by = $user->id;
-                    $application->alternate_decision_action = $action;
-                    $application->alternate_decision_remarks = $data['remarks'] ?? null;
-                    $application->alternate_decision_at = now();
-                    $application->status = 'Under HRMO Verification';
-                    $this->recordHistory(
-                        $application,
-                        $user,
-                        'alternate_final_'.$action.'_recorded',
-                        $from,
-                        $application->status,
-                        $data['remarks'] ?? $data['reason'] ?? null
-                    );
-                } else {
-                    abort(422, 'Invalid alternate decision.');
-                }
-            } elseif ($user->isHrmo()) {
-                abort_unless(
-                    $from === 'Under HRMO Verification' && in_array($action, ['verify', 'return'], true),
-                    409,
-                    'This application is not awaiting HRMO verification.'
+                $this->recordHistory(
+                    $application,
+                    $user,
+                    $user->isMayor() ? 'mayor_alternate_endorsement' : 'recommendation',
+                    $from,
+                    $application->status,
+                    $data['remarks'] ?? null
                 );
+            } elseif ($user->isHrmo()
+                && ! ($user->canApproveMayorLeave() && $from === 'Pending Authorized Final Approval')) {
+                abort_unless($from === 'Under HRMO Verification' && in_array($action, ['verify', 'return'], true),
+                    409,
+                    'This application is not awaiting HR Office verification.'
+                );
+                abort_unless(
+                    ! $application->assigned_hr_reviewer_id || $application->assigned_hr_reviewer_id === $user->id,
+                    403,
+                    'This application is assigned to another authorized HR reviewer.'
+                );
+                if ($application->employee->user?->isAdministrator()) {
+                    abort_unless($application->assigned_hr_reviewer_id === $user->id, 403,
+                        'An Admin applicant’s leave must be certified by the separately assigned alternate HR reviewer.');
+                }
                 if ($action === 'return') {
                     $application->status = 'Returned for Correction';
                     $this->recordHistory($application, $user, 'hrmo_returned_for_correction', $from, $application->status, $data['remarks']);
                 } else {
                     $this->assertRequiredDocumentsSatisfied($application, $data);
+                    $requiresEligibilityReview = (bool) ($application->leaveType->rules['eligibility_review_required'] ?? false);
+                    if ($requiresEligibilityReview && empty($data['eligibility_verified'])) {
+                        throw ValidationException::withMessages([
+                            'eligibility_verified' => 'Confirm the employee’s eligibility before HRMO verification.',
+                        ]);
+                    }
                     $application->verified_working_days = $data['verified_working_days'];
                     $application->credit_certification = $this->creditSnapshot($application);
                     $application->certified_by = $user->id;
                     $application->certified_at = now();
                     $application->certifier_position = $data['certifier_position'];
                     $application->certifier_signature = $data['certifier_signature'];
+                    $application->eligibility_verified_at = $requiresEligibilityReview ? now() : null;
+                    $application->eligibility_verified_by = $requiresEligibilityReview ? $user->id : null;
+                    $application->eligibility_remarks = $requiresEligibilityReview ? ($data['eligibility_remarks'] ?? null) : null;
                     $application->hr_remarks = $data['remarks'] ?? null;
                     if (! empty($data['waived_documents'])) {
                         $application->document_waivers = [
@@ -106,41 +116,26 @@ class LeaveWorkflowService
                     if (! empty($data['waived_documents'])) {
                         $remarks = trim(($remarks ? $remarks."\n" : '').'Document waiver: '.$data['waiver_justification']);
                     }
-                    if ($application->alternate_decision_by) {
-                        $alternate = $application->alternateDecisionMaker;
-                        abort_unless($alternate?->canFinalApprove(), 409, 'The recorded alternate final approver is no longer authorized.');
-                        if ($application->alternate_decision_action === 'approve') {
-                            $withPay = (float) $application->alternate_decision_days_with_pay;
-                            $withoutPay = (float) $application->alternate_decision_days_without_pay;
-                            if (abs(($withPay + $withoutPay) - (float) $application->verified_working_days) > 0.001) {
-                                throw ValidationException::withMessages([
-                                    'verified_working_days' => 'The verified days differ from the alternate approver’s decision. The decision cannot be finalized; return the application for correction and a new authorized review.',
-                                ]);
-                            }
-                            $this->approve($application, $alternate, [
-                                'days_with_pay' => $withPay,
-                                'days_without_pay' => $withoutPay,
-                                'approval_others' => $application->alternate_decision_others,
-                                'remarks' => $application->alternate_decision_remarks,
-                            ]);
-                            $application->status = 'Approved';
-                        } else {
-                            abort_unless($application->alternate_decision_action === 'disapprove', 409, 'The stored alternate decision is invalid.');
-                            $application->status = 'Disapproved';
-                            $application->disapproval_reason = $application->alternate_decision_reason;
-                            $application->decision_remarks = $application->alternate_decision_remarks;
-                        }
-                        $application->decided_by = $alternate->id;
-                        $application->decided_at = $application->alternate_decision_at;
-                        $this->recordHistory($application, $user, 'verified_and_finalized_alternate_decision', $from, $application->status, $remarks);
-                    } else {
-                        $application->status = 'Pending Final Approval';
-                        $this->recordHistory($application, $user, 'verified', $from, $application->status, $remarks);
-                    }
+                    $application->status = 'Pending Final Approval';
+                    $this->recordHistory($application, $user, 'verified', $from, $application->status, $remarks);
                 }
-            } elseif ($user->canFinalApprove()) {
-                abort_unless($from === 'Pending Final Approval', 409, 'This application is not awaiting final approval.');
+            } elseif ($user->isMayor() || $user->canApproveMayorLeave()) {
+                $isMayorPersonalLeave = $from === 'Pending Authorized Final Approval'
+                    && $application->assigned_final_approver_id === $user->id
+                    && $user->canApproveMayorLeave();
+                abort_unless(
+                    ($isMayorPersonalLeave || ($user->isMayor() && $from === 'Pending Final Approval'))
+                        && in_array($action, ['approve', 'disapprove', 'return'], true),
+                    409,
+                    'This application is not assigned to you for an authorized final decision.'
+                );
                 if ($action === 'approve') {
+                    if (($application->leaveType->rules['eligibility_review_required'] ?? false)
+                        && ! $application->eligibility_verified_at) {
+                        throw ValidationException::withMessages([
+                            'eligibility_verified' => 'HRMO must confirm this employee’s eligibility before final approval.',
+                        ]);
+                    }
                     $this->approve($application, $user, $data);
                     $application->status = 'Approved';
                 } elseif ($action === 'disapprove') {
@@ -148,7 +143,8 @@ class LeaveWorkflowService
                     $application->disapproval_reason = $data['reason'];
                     $application->decision_remarks = $data['remarks'] ?? null;
                 } else {
-                    abort(422, 'Invalid final decision.');
+                    $application->status = 'Returned for Correction';
+                    $application->decision_remarks = $data['remarks'];
                 }
                 $application->decided_by = $user->id;
                 $application->decided_at = now();
@@ -188,6 +184,7 @@ class LeaveWorkflowService
                 ]);
             }
 
+            $previousBalance = $credit->balance;
             $credit->used_credits = (float) $credit->used_credits + $withPay;
             $credit->save();
             LeaveCreditTransaction::create([
@@ -195,7 +192,8 @@ class LeaveWorkflowService
                 'leave_application_id' => $application->id,
                 'created_by' => $user->id,
                 'type' => 'used',
-                'amount' => $withPay,
+                'amount' => -$withPay,
+                'previous_balance' => $previousBalance,
                 'balance_after' => $credit->balance,
                 'effective_date' => now()->toDateString(),
                 'remarks' => 'Approved leave application #'.$application->id,
@@ -208,9 +206,32 @@ class LeaveWorkflowService
         $application->decision_remarks = $data['remarks'] ?? null;
     }
 
-    private function assertRequiredDocumentsSatisfied(LeaveApplication $application, array $data): void
+    public function requiredDocumentsFor(LeaveApplication $application): array
     {
         $required = $application->leaveType->required_documents ?? [];
+        foreach ($application->leaveType->rules['conditional_required_documents'] ?? [] as $condition) {
+            $matches = match ($condition['condition'] ?? null) {
+                'minimum_working_days' => (int) $application->working_days >= (int) ($condition['value'] ?? PHP_INT_MAX),
+                'minimum_calendar_days' => $application->start_date && $application->end_date
+                    && $application->start_date->diffInDays($application->end_date) + 1 >= (int) ($condition['value'] ?? PHP_INT_MAX),
+                'policy_detail_equals' => ($application->policy_details[$condition['field'] ?? ''] ?? null) === ($condition['value'] ?? null),
+                'policy_detail_in' => in_array(
+                    $application->policy_details[$condition['field'] ?? ''] ?? null,
+                    $condition['value'] ?? [],
+                    true
+                ),
+                default => false,
+            };
+            if ($matches && isset($condition['document'])) {
+                $required[] = $condition['document'];
+            }
+        }
+        return array_values(array_unique($required));
+    }
+
+    private function assertRequiredDocumentsSatisfied(LeaveApplication $application, array $data): void
+    {
+        $required = $this->requiredDocumentsFor($application);
         if ($required === []) {
             return;
         }
@@ -277,6 +298,13 @@ class LeaveWorkflowService
                 $application,
                 'Your leave application #'.$application->id.' was '.$application->status.'.'
             ));
+            $reviewerIds = array_filter([
+                $application->office_head_reviewer_id,
+                $application->certified_by,
+            ]);
+            User::query()->whereIn('id', $reviewerIds)->whereKeyNot($actor->id)->get()->each(fn (User $reviewer) => $reviewer->notify(
+                new LeaveApplicationUpdated($application, 'Leave application #'.$application->id.' is now '.$application->status.'.')
+            ));
 
             return;
         }
@@ -286,7 +314,10 @@ class LeaveWorkflowService
                 $application,
                 'Your leave application #'.$application->id.' was endorsed for HRMO verification.'
             ));
-            User::where('role', 'hrmo')->get()->each(fn (User $user) => $user->notify(
+            $reviewers = $application->assigned_hr_reviewer_id
+                ? User::whereKey($application->assigned_hr_reviewer_id)->get()
+                : User::where('role', 'admin')->where('is_active', true)->get();
+            $reviewers->each(fn (User $user) => $user->notify(
                 new LeaveApplicationUpdated($application, 'Leave application #'.$application->id.' is ready for HRMO verification.')
             ));
 
@@ -294,12 +325,27 @@ class LeaveWorkflowService
         }
 
         if ($application->status === 'Pending Final Approval') {
-            User::where(fn ($users) => $users
-                ->where('role', 'mayor')
-                ->orWhere(fn ($legacy) => $legacy->where('role', 'admin')->where('can_final_approve', true)))
+            User::where('role', 'mayor')->where('is_active', true)
                 ->get()
                 ->each(fn (User $user) => $user->notify(
                 new LeaveApplicationUpdated($application, 'Leave application #'.$application->id.' is pending final approval.')
+            ));
+            return;
+        }
+
+        if ($application->status === 'Pending Authorized Final Approval' && $application->assigned_final_approver_id) {
+            User::whereKey($application->assigned_final_approver_id)->get()->each(fn (User $user) => $user->notify(
+                new LeaveApplicationUpdated($application, 'Mayor leave application #'.$application->id.' is assigned for your authorized final decision.')
+            ));
+            return;
+        }
+
+        if (in_array($application->status, [
+            'Awaiting Alternate HR Reviewer Assignment',
+            'Awaiting Authorized Final Approver Assignment',
+        ], true)) {
+            User::where('role', 'admin')->where('is_active', true)->get()->each(fn (User $user) => $user->notify(
+                new LeaveApplicationUpdated($application, 'Leave application #'.$application->id.' needs an authorized reviewer assignment.')
             ));
         }
     }

@@ -13,11 +13,9 @@ use Illuminate\Notifications\Notifiable;
 class User extends Authenticatable
 {
     public const VALID_ROLES = [
-        'super_admin',
         'admin',
-        'hrmo',
-        'office_head',
         'mayor',
+        'office_head',
         'employee',
     ];
 
@@ -90,17 +88,12 @@ class User extends Authenticatable
 
     public function isAdministrator(): bool
     {
-        return in_array($this->role, ['admin', 'super_admin'], true);
-    }
-
-    public function isSuperAdmin(): bool
-    {
-        return $this->role === 'super_admin';
+        return $this->role === 'admin';
     }
 
     public function isMayor(): bool
     {
-        return $this->role === 'mayor' || ($this->role === 'admin' && $this->can_final_approve);
+        return $this->role === 'mayor';
     }
 
     public function isOfficeHead(): bool
@@ -110,7 +103,7 @@ class User extends Authenticatable
 
     public function isHrmo(): bool
     {
-        return $this->role === 'hrmo';
+        return $this->isAdministrator();
     }
 
     public function isEmployee(): bool
@@ -126,5 +119,10 @@ class User extends Authenticatable
     public function canFinalApprove(): bool
     {
         return $this->isMayor();
+    }
+
+    public function canApproveMayorLeave(): bool
+    {
+        return $this->is_active && $this->isAdministrator() && $this->can_final_approve;
     }
 }

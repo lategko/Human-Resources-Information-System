@@ -12,15 +12,13 @@
 @php
     $currentUser = auth()->user();
     $unreadCount = $currentUser->unreadNotifications()->count();
-    $roleTheme = $currentUser->isSuperAdmin() ? 'super_admin' : ($currentUser->canFinalApprove() ? 'mayor' : ($currentUser->isAdministrator() ? 'administrator' : $currentUser->role));
+    $roleTheme = $currentUser->canFinalApprove() ? 'mayor' : ($currentUser->isAdministrator() ? 'administrator' : $currentUser->role);
     $roleLabel = match ($roleTheme) {
-        'super_admin' => 'SUPER ADMIN',
-        'administrator' => $currentUser->canFinalApprove() ? 'ADMIN · FINAL APPROVER' : 'ADMIN',
-        'mayor' => $currentUser->role === 'admin' ? 'ADMIN · FINAL APPROVER' : 'Mayor / Final Approver',
-        'hrmo' => 'HRMO',
+        'administrator' => 'ADMIN · HR OFFICE',
+        'mayor' => 'MAYOR · FINAL APPROVER',
         'office_head' => 'Office Head',
         'employee' => 'Employee / Staff',
-        default => 'Administrator',
+        default => 'Municipal HRIS',
     };
 @endphp
 <body data-role-theme="{{ $roleTheme }}" x-data="{ sidebarOpen: false, profileOpen: false }">
@@ -34,37 +32,42 @@
                 <span class="nav-caption">{{ $currentUser->isEmployee() ? 'MY WORKSPACE' : ($currentUser->isOfficeHead() ? 'DEPARTMENT' : ($roleTheme === 'mayor' ? 'EXECUTIVE' : 'WORKSPACE')) }}</span>
                 <a href="{{ route('dashboard') }}" class="{{ request()->routeIs('dashboard') ? 'active' : '' }}" @click="sidebarOpen=false" @if(request()->routeIs('dashboard')) aria-current="page" @endif><i data-lucide="layout-dashboard" aria-hidden="true"></i><span>{{ $roleTheme === 'mayor' ? 'Municipal overview' : 'Dashboard' }}</span></a>
 
-                @if($currentUser->isSuperAdmin())
-                    <span class="nav-caption">SUPER ADMINISTRATION</span>
-                    <a href="{{ route('super-admin.users.index') }}" class="{{ request()->routeIs('super-admin.users.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="shield-user" aria-hidden="true"></i><span>Configured accounts</span></a>
-                    <a href="{{ route('audit.index') }}" class="{{ request()->routeIs('audit.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="history" aria-hidden="true"></i><span>Audit logs</span></a>
+                @if($currentUser->isAdministrator())
                     <span class="nav-caption">HR OPERATIONS</span>
                     <a href="{{ route('employees.index') }}" class="{{ request()->routeIs('employees.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="users-round" aria-hidden="true"></i><span>Employees</span></a>
+                    <a href="{{ route('employee-imports.index') }}" class="{{ request()->routeIs('employee-imports.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="file-spreadsheet" aria-hidden="true"></i><span>Employee import</span></a>
                     <a href="{{ route('departments.index') }}" class="{{ request()->routeIs('departments.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="building-2" aria-hidden="true"></i><span>Departments</span></a>
                     <a href="{{ route('positions.index') }}" class="{{ request()->routeIs('positions.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="briefcase-business" aria-hidden="true"></i><span>Positions</span></a>
-                    <a href="{{ route('employee-imports.index') }}" class="{{ request()->routeIs('employee-imports.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="file-spreadsheet" aria-hidden="true"></i><span>Employee import</span></a>
                     <a href="{{ route('leave.index') }}" class="{{ request()->routeIs('leave.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="files" aria-hidden="true"></i><span>Leave management</span></a>
+                    @if($currentUser->canApproveMayorLeave())
+                        <a href="{{ route('leave.index', ['status' => 'Pending Authorized Final Approval']) }}" class="{{ request()->routeIs('leave.*') && request('status') === 'Pending Authorized Final Approval' ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="stamp" aria-hidden="true"></i><span>Mayor leave decisions</span></a>
+                    @endif
                     <a href="{{ route('attendance.index') }}" class="{{ request()->routeIs('attendance.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="clock-3" aria-hidden="true"></i><span>Attendance</span></a>
                     <a href="{{ route('reports.index') }}" class="{{ request()->routeIs('reports.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="chart-no-axes-column-increasing" aria-hidden="true"></i><span>Reports</span></a>
                     <a href="{{ route('leave-credits.index') }}" class="{{ request()->routeIs('leave-credits.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="wallet" aria-hidden="true"></i><span>Leave credits</span></a>
+                    <a href="{{ route('settings.leave-types') }}" class="{{ request()->routeIs('settings.leave-types*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="list-checks" aria-hidden="true"></i><span>Leave requirements</span></a>
+                    <a href="{{ route('office-head-availability.index') }}" class="{{ request()->routeIs('office-head-availability.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="calendar-clock" aria-hidden="true"></i><span>Office Head availability</span></a>
+                    <a href="{{ route('settings.holidays') }}" class="{{ request()->routeIs('settings.holidays*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="calendar-days" aria-hidden="true"></i><span>Holiday calendar</span></a>
+                    <span class="nav-caption">SYSTEM ADMINISTRATION</span>
+                    <a href="{{ route('users.index') }}" class="{{ request()->routeIs('users.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="contact-round" aria-hidden="true"></i><span>User & permissions</span></a>
+                    <a href="{{ route('audit.index') }}" class="{{ request()->routeIs('audit.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="history" aria-hidden="true"></i><span>Audit logs</span></a>
                     <a href="{{ route('settings.system') }}" class="{{ request()->routeIs('settings.system*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="settings-2" aria-hidden="true"></i><span>System settings</span></a>
                 @elseif($currentUser->isEmployee())
                     <span class="nav-caption">MY RECORDS</span>
                     @if($currentUser->employee)
                         <a href="{{ route('employees.show', $currentUser->employee) }}" class="{{ request()->routeIs('employees.show') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="user-round" aria-hidden="true"></i><span>My employee record</span></a>
                     @endif
-                    <a href="{{ route('leave.create') }}" class="{{ request()->routeIs('leave.create') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="file-plus-2" aria-hidden="true"></i><span>File leave application</span></a>
-                    <a href="{{ route('leave.index') }}" class="{{ request()->routeIs('leave.index', 'leave.show', 'leave.edit') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="files" aria-hidden="true"></i><span>My leave applications</span></a>
                     <span class="nav-caption">ATTENDANCE & CREDITS</span>
-                    <a href="{{ route('leave-credits.index') }}" class="{{ request()->routeIs('leave-credits.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="wallet" aria-hidden="true"></i><span>Leave credits</span></a>
                     <a href="{{ route('attendance.index') }}" class="{{ request()->routeIs('attendance.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="clock-3" aria-hidden="true"></i><span>My attendance</span></a>
-                    <a href="{{ route('account.profile.edit') }}" class="{{ request()->routeIs('account.profile.edit') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="settings-2" aria-hidden="true"></i><span>Profile settings</span></a>
+                    <a href="{{ route('my-profile.edit') }}" class="{{ request()->routeIs('my-profile.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="settings-2" aria-hidden="true"></i><span>Profile settings</span></a>
                 @elseif($currentUser->isOfficeHead())
                     <span class="nav-caption">TEAM & LEAVE</span>
                     <a href="{{ route('employees.index') }}" class="{{ request()->routeIs('employees.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="users-round" aria-hidden="true"></i><span>My employees</span></a>
                     <a href="{{ route('leave.index') }}" class="{{ request()->routeIs('leave.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="files" aria-hidden="true"></i><span>Leave requests</span></a>
                     <span class="nav-caption">OPERATIONS</span>
                     <a href="{{ route('attendance.index') }}" class="{{ request()->routeIs('attendance.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="clock-3" aria-hidden="true"></i><span>Attendance</span></a>
+                    <a href="{{ route('reports.index') }}" class="{{ request()->routeIs('reports.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="chart-no-axes-column-increasing" aria-hidden="true"></i><span>Department reports</span></a>
+                    <a href="{{ route('office-head-availability.index') }}" class="{{ request()->routeIs('office-head-availability.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="calendar-clock" aria-hidden="true"></i><span>Office Head availability</span></a>
                     <a href="{{ route('dashboard') }}#approval-history" @click="sidebarOpen=false"><i data-lucide="history" aria-hidden="true"></i><span>Approval history</span></a>
                 @elseif($roleTheme === 'mayor')
                     <span class="nav-caption">DECISIONS</span>
@@ -109,6 +112,11 @@
                     <a href="{{ route('audit.index') }}" class="{{ request()->routeIs('audit.*') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="history" aria-hidden="true"></i><span>Audit logs</span></a>
                 @endif
                 <span class="nav-caption">ACCOUNT</span>
+                @if($currentUser->employee)
+                    <a href="{{ route('leave.create') }}" class="{{ request()->routeIs('leave.create') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="file-plus-2" aria-hidden="true"></i><span>Apply for leave</span></a>
+                    <a href="{{ route('leave.index', ['mine' => 1]) }}" class="{{ request()->routeIs('leave.index', 'leave.show', 'leave.edit') && request()->boolean('mine') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="files" aria-hidden="true"></i><span>My leave applications</span></a>
+                    <a href="{{ route('leave-credits.index', ['mine' => 1]) }}" class="{{ request()->routeIs('leave-credits.*') && request()->boolean('mine') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="wallet" aria-hidden="true"></i><span>My leave credits</span></a>
+                @endif
                 <a href="{{ route('account.profile') }}" class="{{ request()->routeIs('account.profile') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="user-round" aria-hidden="true"></i><span>My profile</span></a>
                 <a href="{{ route('notifications.index') }}" class="{{ request()->routeIs('notifications.*') ? 'active' : '' }}" @click="sidebarOpen=false">
                     <i data-lucide="bell" aria-hidden="true"></i><span>Notifications</span>

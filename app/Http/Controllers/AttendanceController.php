@@ -50,7 +50,9 @@ class AttendanceController extends Controller
 
         return view('attendance.index', [
             'records' => $query->latest('work_date')->paginate(25)->withQueryString(),
-            'departments' => Department::where('is_active', true)->orderBy('name')->get(),
+            'departments' => Department::where('is_active', true)
+                ->when($user->isOfficeHead(), fn ($departments) => $departments->where('head_user_id', $user->id))
+                ->orderBy('name')->get(),
             'employees' => $user->canManageHr() || $user->isAdministrator()
                 ? Employee::whereNull('archived_at')->orderBy('last_name')->get()
                 : collect(),

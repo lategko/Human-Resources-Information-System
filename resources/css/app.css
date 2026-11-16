@@ -74,10 +74,6 @@ body[data-role-theme="administrator"] {
     --role-primary: #0676ad;
     --role-gradient: linear-gradient(135deg, #36c5d9, #087ebb, #1554a5);
 }
-body[data-role-theme="super_admin"] {
-    --role-primary: #1554a5;
-    --role-gradient: linear-gradient(135deg, #36c5d9, #087ebb, #142b45);
-}
 body[data-role-theme] .button-primary {
     background: var(--role-primary);
     color: #fff;

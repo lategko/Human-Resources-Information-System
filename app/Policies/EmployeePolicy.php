@@ -42,6 +42,6 @@ class EmployeePolicy
 
     public function updatePersonal(User $user, Employee $employee): bool
     {
-        return $user->isEmployee() && $user->employee?->is($employee);
+        return $user->employee?->is($employee) ?? false;
     }
 }

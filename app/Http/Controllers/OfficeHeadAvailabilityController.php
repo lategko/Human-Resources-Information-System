@@ -15,18 +15,24 @@ use Illuminate\View\View;
 
 class OfficeHeadAvailabilityController extends Controller
 {
-    public function index(): View
+    public function index(Request $request): View
     {
+        $user = $request->user();
+        $departments = Department::with('head')->whereNotNull('head_user_id')->orderBy('name');
+        $records = OfficeHeadAvailability::with(['department', 'officeHead', 'alternate', 'updater'])
+            ->latest('start_date');
+        if ($user->isOfficeHead()) {
+            $departments->where('head_user_id', $user->id);
+            $records->where('office_head_user_id', $user->id);
+        }
+
         return view('office-head-availability.index', [
-            'departments' => Department::with('head')->whereNotNull('head_user_id')->orderBy('name')->get(),
-            'availabilityRecords' => OfficeHeadAvailability::with(['department', 'officeHead', 'alternate', 'updater'])
-                ->latest('start_date')
-                ->paginate(20),
+            'departments' => $departments->get(),
+            'availabilityRecords' => $records->paginate(20),
             'alternates' => User::query()->where('is_active', true)
                 ->where(function ($query) {
                     $query->where('role', 'office_head')
-                        ->orWhere('role', 'mayor')
-                        ->orWhere(fn ($approvers) => $approvers->where('role', 'admin')->where('can_final_approve', true));
+                            ->orWhere('role', 'mayor');
                 })
                 ->orderBy('name')
                 ->get(),
@@ -35,8 +41,14 @@ class OfficeHeadAvailabilityController extends Controller
 
     public function store(Request $request, AuditLogger $auditLogger): RedirectResponse
     {
+        abort_unless($request->user()->isAdministrator() || $request->user()->isOfficeHead(), 403);
         $data = $request->validate([
-            'department_id' => ['required', 'integer', Rule::exists('departments', 'id')->whereNotNull('head_user_id')],
+            'department_id' => [
+                'required',
+                'integer',
+                Rule::exists('departments', 'id')->whereNotNull('head_user_id'),
+                Rule::when($request->user()->isOfficeHead(), Rule::exists('departments', 'id')->where('head_user_id', $request->user()->id)),
+            ],
             'availability_status' => ['required', Rule::in(['available', 'temporarily_unavailable', 'on_leave', 'official_business', 'unable_to_approve'])],
             'start_date' => ['required', 'date'],
             'end_date' => ['required', 'date', 'after_or_equal:start_date'],
@@ -48,9 +60,9 @@ class OfficeHeadAvailabilityController extends Controller
         if (! empty($data['alternate_user_id'])) {
             $alternate = User::findOrFail($data['alternate_user_id']);
             abort_unless(
-                $alternate->is_active && ($alternate->isOfficeHead() || $alternate->canFinalApprove()),
+                $alternate->is_active && ($alternate->isOfficeHead() || $alternate->isMayor()),
                 422,
-                'Choose an active Office Head or designated final approver as the alternate.'
+                'Choose an active Office Head or the Mayor as the alternate.'
             );
         }
 
@@ -62,7 +74,12 @@ class OfficeHeadAvailabilityController extends Controller
 
         $record = DB::transaction(function () use ($data, $request, $alternate) {
             $department = Department::query()->lockForUpdate()->with('head')->findOrFail($data['department_id']);
-            abort_unless($department->head?->isOfficeHead(), 422, 'The department must have a valid assigned Office Head.');
+            abort_unless(
+                $department->head?->isOfficeHead()
+                    && ($request->user()->isAdministrator() || $department->head_user_id === $request->user()->id),
+                422,
+                'The department must have a valid Office Head, and Office Heads may record availability only for their own department.'
+            );
             abort_if(
                 $alternate && $alternate->id === $department->head_user_id,
                 422,

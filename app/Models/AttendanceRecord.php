@@ -4,7 +4,6 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class AttendanceRecord extends Model
 {
@@ -41,11 +40,7 @@ class AttendanceRecord extends Model
 
     public function employee(): BelongsTo
     {
-        return $this->belongsTo(Employee::class);
+        return $this->belongsTo(Employee::class)->withTrashed();
     }
 
-    public function deductionRecord(): HasOne
-    {
-        return $this->hasOne(DeductionRecord::class);
-    }
 }

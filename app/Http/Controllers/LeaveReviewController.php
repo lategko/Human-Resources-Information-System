@@ -14,11 +14,34 @@ class LeaveReviewController extends Controller
     {
         $this->authorize('review', $application);
         $user = $request->user();
-        $isAssignedAlternateFinalApprover = $user->canFinalApprove()
-            && $application->status === 'Under Alternate Office Head Review'
-            && $application->office_head_reviewer_id === $user->id;
+        $isPendingMayorLeaveDecision = $application->status === 'Pending Authorized Final Approval'
+            && $application->assigned_final_approver_id === $user->id
+            && $user->canApproveMayorLeave();
+        $isAlternateOfficeHeadReview = $application->status === 'Under Alternate Office Head Review'
+            && $application->office_head_reviewer_id === $user->id
+            && ($user->isOfficeHead() || $user->isMayor());
+        $waivableDocuments = array_values(array_unique(array_merge(
+            $application->leaveType->required_documents ?? [],
+            collect($application->leaveType->rules['conditional_required_documents'] ?? [])
+                ->pluck('document')->filter()->all()
+        )));
         $rules = match (true) {
-            $isAssignedAlternateFinalApprover => [
+            $user->isAdministrator() && $application->status === 'Awaiting Alternate HR Reviewer Assignment' => [
+                'action' => ['required', Rule::in(['assign_hr_reviewer'])],
+                'assigned_hr_reviewer_id' => ['required', 'integer', Rule::exists('users', 'id')->where('role', 'admin')->where('is_active', true)],
+                'remarks' => ['nullable', 'string', 'max:2000'],
+            ],
+            $user->isAdministrator() && $application->status === 'Awaiting Authorized Final Approver Assignment' => [
+                'action' => ['required', Rule::in(['assign_final_approver'])],
+                'assigned_final_approver_id' => ['required', 'integer', Rule::exists('users', 'id')->where('role', 'admin')->where('can_final_approve', true)->where('is_active', true)],
+                'remarks' => ['nullable', 'string', 'max:2000'],
+            ],
+            $isAlternateOfficeHeadReview || $user->isOfficeHead() => [
+                'action' => ['required', 'in:endorse,return'],
+                'recommendation' => ['required_if:action,endorse', 'nullable', 'in:For approval,For disapproval'],
+                'remarks' => ['required_if:action,return', 'required_if:recommendation,For disapproval', 'nullable', 'string', 'max:2000'],
+            ],
+            $user->isMayor() || $isPendingMayorLeaveDecision => [
                 'action' => ['required', 'in:approve,disapprove,return'],
                 'days_with_pay' => ['required_if:action,approve', 'numeric', 'min:0', 'max:365'],
                 'days_without_pay' => ['nullable', 'numeric', 'min:0', 'max:365'],
@@ -26,28 +49,21 @@ class LeaveReviewController extends Controller
                 'reason' => ['required_if:action,disapprove', 'nullable', 'string', 'max:2000'],
                 'remarks' => ['required_if:action,return', 'nullable', 'string', 'max:2000'],
             ],
-            $user->isOfficeHead() => [
-                'action' => ['required', 'in:endorse,return'],
-                'recommendation' => ['required', 'in:For approval,For disapproval'],
-                'remarks' => ['required_if:action,return', 'required_if:recommendation,For disapproval', 'nullable', 'string', 'max:2000'],
-            ],
             $user->isHrmo() => [
                 'action' => ['required', 'in:verify,return'],
                 'verified_working_days' => ['required_if:action,verify', 'nullable', 'integer', 'min:1', 'max:365'],
                 'certifier_position' => ['required_if:action,verify', 'nullable', 'string', 'max:120'],
                 'certifier_signature' => ['required_if:action,verify', 'nullable', 'string', 'max:120'],
                 'remarks' => ['required_if:action,return', 'nullable', 'string', 'max:2000'],
+                'eligibility_verified' => [
+                    Rule::requiredIf(fn () => $request->input('action') === 'verify'
+                        && (bool) ($application->leaveType->rules['eligibility_review_required'] ?? false)),
+                    'boolean',
+                ],
+                'eligibility_remarks' => ['nullable', 'string', 'max:2000'],
                 'waived_documents' => ['nullable', 'array', 'max:20'],
-                'waived_documents.*' => ['string', 'max:200', Rule::in($application->leaveType->required_documents ?? [])],
+                'waived_documents.*' => ['string', 'max:200', Rule::in($waivableDocuments)],
                 'waiver_justification' => ['required_with:waived_documents', 'nullable', 'string', 'max:2000'],
-            ],
-            $user->canFinalApprove() => [
-                'action' => ['required', 'in:approve,disapprove'],
-                'days_with_pay' => ['required_if:action,approve', 'numeric', 'min:0', 'max:365'],
-                'days_without_pay' => ['nullable', 'numeric', 'min:0', 'max:365'],
-                'approval_others' => ['nullable', 'string', 'max:500'],
-                'reason' => ['required_if:action,disapprove', 'nullable', 'string', 'max:2000'],
-                'remarks' => ['nullable', 'string', 'max:2000'],
             ],
             default => [],
         };

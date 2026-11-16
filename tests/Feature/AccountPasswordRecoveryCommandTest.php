@@ -25,9 +25,9 @@ class AccountPasswordRecoveryCommandTest extends TestCase
     public function test_command_resets_an_existing_account_password_invalidates_sessions_and_writes_an_audit_event(): void
     {
         $user = User::factory()->create([
-            'name' => 'Authorized Super Admin',
-            'email' => 'super-admin@example.test',
-            'role' => 'super_admin',
+            'name' => 'Authorized Admin',
+            'email' => 'admin@example.test',
+            'role' => 'admin',
             'password' => 'OriginalPassword123!',
             'is_active' => true,
         ]);
@@ -64,9 +64,9 @@ class AccountPasswordRecoveryCommandTest extends TestCase
             ->assertSuccessful();
 
         $user = $user->fresh();
-        $this->assertSame('Authorized Super Admin', $user->name);
-        $this->assertSame('super-admin@example.test', $user->email);
-        $this->assertSame('super_admin', $user->role);
+        $this->assertSame('Authorized Admin', $user->name);
+        $this->assertSame('admin@example.test', $user->email);
+        $this->assertSame('admin', $user->role);
         $this->assertTrue($user->is_active);
         $this->assertTrue(Hash::check($newPassword, $user->password));
         $this->assertNotSame($rememberToken, $user->remember_token);

@@ -47,7 +47,9 @@ class EmployeeController extends Controller
 
         return view('employees.index', [
             'employees' => $query->orderBy($sortable[$sort], $direction)->orderBy('id')->paginate(15)->withQueryString(),
-            'departments' => Department::where('is_active', true)->orderBy('name')->get(),
+            'departments' => Department::where('is_active', true)
+                ->when($request->user()->isOfficeHead(), fn ($departments) => $departments->where('head_user_id', $request->user()->id))
+                ->orderBy('name')->get(),
         ]);
     }
 

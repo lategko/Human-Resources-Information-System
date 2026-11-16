@@ -47,11 +47,11 @@ class UserController extends Controller
                 'last_name' => $data['role'] === 'employee' ? null : ($data['last_name'] ?? null),
                 'suffix' => $data['role'] === 'employee' ? null : ($data['suffix'] ?? null),
                 'is_active' => $data['is_active'] ?? true,
-                'can_final_approve' => $data['role'] === 'admin' && $request->user()->isSuperAdmin() && ($data['can_final_approve'] ?? false),
+                'can_final_approve' => $data['role'] === 'admin' && ($data['can_final_approve'] ?? false),
                 'password' => $data['password'],
             ]);
-            if ($data['role'] === 'employee') {
-                $this->assignEmployee($user, $data['employee_id']);
+            if (array_key_exists('employee_id', $data)) {
+                $this->assignEmployee($user, $data['employee_id'] ?? null);
             }
             $this->assignOfficeHeadDepartment($user, $data['role'] === 'office_head' ? $data['department_id'] : null);
 
@@ -108,7 +108,7 @@ class UserController extends Controller
                 'last_name' => $data['role'] === 'employee' ? null : ($data['last_name'] ?? $user->last_name),
                 'suffix' => $data['role'] === 'employee' ? null : ($data['suffix'] ?? null),
                 'is_active' => $data['is_active'] ?? true,
-                'can_final_approve' => $data['role'] === 'admin' && $request->user()->isSuperAdmin() && ($data['can_final_approve'] ?? false),
+                'can_final_approve' => $data['role'] === 'admin' && ($data['can_final_approve'] ?? false),
             ]);
             if (! empty($data['password'])) {
                 $user->password = $data['password'];
@@ -121,8 +121,8 @@ class UserController extends Controller
             if (($passwordReset || ($previousStatus && ! $user->is_active)) && Schema::hasTable('sessions')) {
                 DB::table('sessions')->where('user_id', $user->id)->delete();
             }
-            if ($data['role'] === 'employee') {
-                $this->assignEmployee($user, $data['employee_id']);
+            if (array_key_exists('employee_id', $data)) {
+                $this->assignEmployee($user, $data['employee_id'] ?? null);
             }
             $this->assignOfficeHeadDepartment($user, $data['role'] === 'office_head' ? $data['department_id'] : null);
         });
@@ -164,7 +164,7 @@ class UserController extends Controller
             'can_final_approve' => [
                 'nullable',
                 'boolean',
-                Rule::prohibitedIf(! $request->user()->isSuperAdmin()),
+                Rule::prohibitedIf($request->input('role') !== 'admin'),
             ],
             'employee_id' => [
                 Rule::requiredIf($employeeRole),
@@ -205,25 +205,12 @@ class UserController extends Controller
 
     private function allowedRoles(User $actor, ?User $target = null): array
     {
-        if ($actor->isSuperAdmin()) {
-            return ['admin', 'hrmo', 'office_head', 'mayor', 'employee'];
-        }
-
-        $staffRoles = ['office_head', 'employee'];
-
-        return $target && ! in_array($target->role, $staffRoles, true)
-            ? [$target->role]
-            : $staffRoles;
+        return User::VALID_ROLES;
     }
 
     private function authorizeAccountManagement(User $actor, User $target): void
     {
-        abort_if($target->isSuperAdmin(), 403, 'Super Admin accounts are managed through protected account controls.');
-        abort_unless(
-            $actor->isSuperAdmin() || (! $target->isAdministrator() && ! $target->isMayor()),
-            403,
-            'Only a Super Admin can manage ADMIN or Mayor accounts.'
-        );
+        abort_unless($actor->isAdministrator(), 403);
     }
 
     private function accountName(array $data): string

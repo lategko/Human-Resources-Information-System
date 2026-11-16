@@ -1,6 +1,6 @@
 # Municipality of Camalaniugan HRIS prototype
 
-A Laravel 12, Blade, Tailwind CSS, Alpine.js, and MySQL-ready HRIS prototype for employee records, digital leave applications, attendance imports, and review workflows. It is an operational starting point, not a certified payroll or legal-entitlement system.
+A Laravel 12, Blade, Tailwind CSS, Alpine.js, and MySQL-ready HRIS prototype for employee records, digital leave applications, attendance imports, and review workflows. Payroll processing and salary deductions are outside this system's scope.
 
 ## Requirements
 
@@ -27,32 +27,40 @@ A Laravel 12, Blade, Tailwind CSS, Alpine.js, and MySQL-ready HRIS prototype for
 
 5. Open the URL printed by `php artisan serve`.
 
-`php artisan migrate --seed` applies pending migrations, synchronizes configured accounts, and adds missing leave-type reference data. It never creates employee, department, or position records.
+`php artisan migrate --seed` applies pending migrations, synchronizes configured accounts, creates or updates linked employee records, and adds missing leave-type reference data. It never creates departments or positions.
 
-Predefined accounts are optional and configured in the protected active environment file. Existing `HRIS_INITIAL_*` names are supported, as are the shorter `INITIAL_*` aliases. The supported slots are Super Admin, Admin, HRMO, Mayor, and Office Head. For example:
+Predefined accounts are optional and configured only with the `HRIS_INITIAL_*` variables below in the protected active `.env`. The four operational roles are Admin (HRMO), Mayor, Office Head, and Employee. Super Admin and separate HRMO slots are not configured or created. Each new account must have an existing department and employee number so the seeder can create its linked employee record; for Office Head, the employee department is the configured Office Head department.
 
 ```dotenv
-HRIS_INITIAL_SUPER_ADMIN_NAME="Super Administrator"
-HRIS_INITIAL_SUPER_ADMIN_EMAIL=superadmin@example.com
-HRIS_INITIAL_SUPER_ADMIN_PASSWORD=replace-with-a-strong-secret
 HRIS_INITIAL_ADMIN_NAME="System Administrator"
 HRIS_INITIAL_ADMIN_EMAIL=admin@example.com
 HRIS_INITIAL_ADMIN_PASSWORD=replace-with-a-strong-secret
-HRIS_INITIAL_HRMO_NAME="HRMO"
-HRIS_INITIAL_HRMO_EMAIL=hrmo@example.com
-HRIS_INITIAL_HRMO_PASSWORD=replace-with-a-strong-secret
+HRIS_INITIAL_ADMIN_EMPLOYEE_NO=ADMIN-001
+HRIS_INITIAL_ADMIN_DEPARTMENT_ID=1
 HRIS_INITIAL_MAYOR_NAME="Mayor"
 HRIS_INITIAL_MAYOR_EMAIL=mayor@example.com
 HRIS_INITIAL_MAYOR_PASSWORD=replace-with-a-strong-secret
+HRIS_INITIAL_MAYOR_EMPLOYEE_NO=MAYOR-001
+HRIS_INITIAL_MAYOR_DEPARTMENT_ID=1
 HRIS_INITIAL_OFFICE_HEAD_NAME="Office Head"
 HRIS_INITIAL_OFFICE_HEAD_EMAIL=officehead@example.com
 HRIS_INITIAL_OFFICE_HEAD_PASSWORD=replace-with-a-strong-secret
+HRIS_INITIAL_OFFICE_HEAD_EMPLOYEE_NO=HEAD-001
 HRIS_INITIAL_OFFICE_HEAD_DEPARTMENT_ID=1
+HRIS_INITIAL_EMPLOYEE_NAME="Municipal Employee"
+HRIS_INITIAL_EMPLOYEE_EMAIL=employee@example.com
+HRIS_INITIAL_EMPLOYEE_PASSWORD=replace-with-a-strong-secret
+HRIS_INITIAL_EMPLOYEE_EMPLOYEE_NO=EMP-001
+HRIS_INITIAL_EMPLOYEE_DEPARTMENT_ID=1
 ```
 
-Each configured slot has a stable `seed_key` in the users table, independent of its email. The default stored roles are `super_admin`, `admin`, `hrmo`, `mayor`, and `office_head`; optional `HRIS_INITIAL_<SLOT>_ROLE` values can change a slot's role to another supported role. Optional `HRIS_INITIAL_<SLOT>_IS_ACTIVE` values synchronize status, and `HRIS_INITIAL_ADMIN_FINAL_APPROVER` controls the Admin final-approver flag. Office Heads require an existing department ID (find it in the Departments screen/database); the seeder does not create departments. Changing their configured department moves the assignment. Empty optional values are ignored; removing a slot's name/email/password configuration skips that slot without deleting its account or HR records. Passwords are hashed, and an unchanged configured password is not rewritten.
+Use real municipal employee numbers and existing department IDs; the example values above are placeholders. For compatibility, the Employee number also accepts the existing `HRIS_INITIAL_EMPLOYEE_NO` spelling. The Admin, Mayor, and Employee department IDs set their linked employee's department. For Office Head, `HRIS_INITIAL_OFFICE_HEAD_DEPARTMENT_ID` also assigns the Office Head in the selected department. The seeder does not create departments. Each role is fixed by its slot; there are no role-override environment variables.
 
-After changing `.env`, run `php artisan config:clear` followed by `php artisan db:seed`. The first deployment of the `seed_key` migration must run `php artisan migrate` before seeding. To safely associate existing untagged bootstrap accounts, run the seeder once while their currently configured emails still match; after the stable keys are stored, future email changes are synchronized automatically. Legacy matching never claims an account with the Employee role or an employee record, and a conflicting unrelated email causes a clear error instead of overwriting that user. A configured account is updated by its stable key, including its name, email, role, active status, supported permissions, and password when supplied. Super Admin defaults to `super_admin`; it is never implicitly made an Admin.
+Remove `HRIS_INITIAL_SUPER_ADMIN_*` and `HRIS_INITIAL_HRMO_*` values from `.env`; they are ignored and cannot create extra accounts. `HRIS_INITIAL_ADMIN_*` is the only Admin bootstrap slot. Existing database roles `super_admin` and `hrmo` are normalized to `admin` by `db:seed`, without deleting accounts or changing their passwords. All four canonical roles have a stable `seed_key`. A configured slot with no name/email/password is skipped. For a configured account, seeding synchronizes its name, email, role, and linked employee's employee number, name, email, and department. Passwords are hashed and updated only when the configured password differs. Historical employee IDs and related leave, attendance, and audit records are retained. Email conflicts and employee-number conflicts stop safely with a clear error and transaction rollback.
+
+Department IDs are looked up in the database; no ID is assumed or fabricated. A missing or invalid ID produces a warning and leaves that employee's department unassigned. For an Office Head, the prior department-head assignment is cleared so there is no stale department access; configure a valid department before expecting department-specific permissions to work. The `2026_11_16_000003_allow_unassigned_employee_departments` migration makes the employee department relationship nullable for this case. Run `php artisan migrate` before `php artisan db:seed` when that migration is pending; do not apply production migrations without an approved backup and authorization. The seeder does not create or assign unrelated departments.
+
+After securely configuring `.env`, run `php artisan config:clear`, verify migration status, apply approved pending migrations, and then run `php artisan db:seed`. Seeding is transactional and repeatable: it does not create duplicate users or employee records or delete HR history. An unchanged configured password is not rewritten. A duplicate email assigned to a different account or an employee number already in use causes a clear error and rolls back the account seeding transaction.
 
 When configuration is cached in production, deploy the updated environment and rebuild Laravel's config cache before running seeders, for example `php artisan config:cache` followed by `php artisan db:seed`. Protect `.env` and never commit real passwords. Seeding does not delete users, departments, or HR data.
 
@@ -64,7 +72,17 @@ Supporting leave documents are written to Laravel's private `local` disk (`stora
 
 HRMO or an administrator can record a dated Office Head availability period from **Office Head availability**. Records include the reason and, when authorized, a temporary alternate approver. Office Heads cannot create their own unavailability records. Periods for the same department cannot overlap.
 
-Leave applications are routed to the assigned Office Head when available. If an unavailable period overlaps the requested leave dates, the application is routed to its assigned alternate or, when no alternate is assigned, to the single active designated final approver. If the route is ambiguous, submission is blocked until an authorized alternate is configured. A final approver who acts as the substitute records one decision; HRMO verifies it, and that same decision is finalized without a duplicate final-approval step. Leave credits are deducted only at finalization.
+Standard employee applications are routed to the assigned Office Head. If that Office Head is unavailable, the configured alternate or Mayor acting as the authorized department-level alternate performs a separately recorded review; HRMO verification remains mandatory, followed by the Mayor's separate final decision. Office Head personal applications go directly to HRMO. Admin personal applications require an assigned alternate HR reviewer. Mayor personal applications require a separately designated final authority and remain awaiting assignment until one is configured. Missing reviewers never bypass verification or create automatic approval. Leave credits are deducted only at final approval.
+
+## Leave credits and monthly accrual
+
+Each employee has separate Vacation Leave and Sick Leave accounts. New employee records receive zero-balance VL and SL accounts; existing accounts and balances are preserved. The initial reference policy sets each type to accrue 1.25 leave days for an eligible completed month (15 days over 12 eligible months). Accrual eligibility, monthly amount, effective dates, entitlements, required documents, and application fields are controlled in **Leave rules & requirements** and must be confirmed by HRMO against current CSC and municipal policy.
+
+The `leave:accrue-monthly` command accrues the previous completed month by default. It may also be run for a specific completed month, for example `php artisan leave:accrue-monthly --month=2026-10`. A unique employee-account/month ledger constraint makes reruns safe; every accrual records the month, date, amount, and before/after balance. The default eligibility policy includes active employees with a recorded hire date who completed the accrual month. HRMO can review individual ledgers and download balance, ledger, monthly accrual, application, utilization, special leave, Wellness, terminal leave-credit, and monetization-application CSV reports.
+
+Categories configured for individual eligibility review require an HRMO confirmation before final approval; the verifier, date, and remarks are retained on the application. Special annual entitlement summaries are shown only when HRMO has configured an individual employee credit account, and the displayed entitlement is capped by both the category policy and that account. Wellness Leave is not automatically granted and does not debit regular VL or SL.
+
+Enable Laravel's scheduler in production so the first-of-month accrual is invoked. On Linux, configure the standard once-per-minute `schedule:run` cron entry for the deployed application. On Windows, create a Task Scheduler job that runs `php artisan schedule:run` each minute from the application directory. For an operational rerun, use the command above; it will not duplicate credits. These are leave-day records only: this HRIS does not calculate leave monetization payouts or process salary deductions.
 
 ## Database backup and deployment
 
@@ -83,14 +101,14 @@ Before deploying schema changes or importing authorized personnel data:
    mysql --user=<database-user> --password <isolated-database-name> < "C:\secure-backups\hris-before-deploy.sql"
    ```
 
-4. Deploy code, review pending migrations, and only then apply approved additive migrations with `php artisan migrate --force`. Never use `migrate:fresh` or truncate tables on a database containing records.
+4. Deploy code, review pending migrations with `php artisan migrate:status` and `php artisan migrate --pretend`, and only apply them after an approved backup. This update includes `2026_11_16_000001_add_leave_accrual_and_policy_tracking.php` and `2026_11_16_000002_consolidate_hris_roles_and_leave_routes.php`. After their effects and the account-role mapping are reviewed and deployment is authorized, run `php artisan migrate --force` to apply pending migrations in timestamp order. Do not apply production migrations without explicit authorization. Never use `migrate:fresh` or truncate tables on a database containing records.
 5. Keep backups encrypted or otherwise access-controlled, retain them under municipal policy, and include `storage/app/private` in the protected backup plan.
 
 The supplied November 2026 workbook was inspected locally: it has 100 data rows and 27 columns. Columns H and S both have the header `OFFICE` but contain different values; column X has no header and contains one date-formatted value. HRMO directed that all three remain separate source fields, with the unnamed date source-only unless HRMO explicitly approves a mapping. The workbook has not been imported; complete the HRMO review, create only verified department/position reference records, and take a verified backup before applying the pending import migrations.
 
 ## Account setup and management
 
-The application does not include hardcoded municipal account names or email addresses. A Super Admin can manage all user roles, create ADMIN accounts, promote HRMO accounts, and demote ADMIN accounts; regular ADMIN accounts can manage only HRMO, Office Head, and Employee accounts. HRMO access to the account directory remains read-only. Employee accounts must link to an existing verified employee record; Office Head accounts must be assigned to an existing department. New Mayor accounts have a distinct `mayor` role; existing `admin` accounts with final-approver permission are preserved and continue to act as Mayor without changing their stored role. Users manage their own permitted details, profile photo, and password through **My profile**.
+The application does not include hardcoded municipal account names, email addresses, or passwords. Admin manages user accounts, roles, system settings, and HR operations. Mayor has executive oversight and final approval authority, but cannot administer user accounts, roles, leave credits, or system settings. Office Head access is limited to the assigned department, and employees access their own records. All four roles can apply for personal leave through their linked employee record. Users manage their own permitted details, profile photo, and password through **My profile**.
 
 The optional `HRIS_INITIAL_*` environment values are for first-install account bootstrapping only. Choose the actual account information and credentials through the municipality's authorized process; the project does not supply or presume personal details.
 
@@ -100,23 +118,23 @@ The optional `HRIS_INITIAL_*` environment values are for first-install account b
 - Role-aware dashboards, employee profiles, employee CRUD/archive, departments, positions, and user accounts
 - Private XLSX employee-import staging and review, pre-import validation preview, duplicate detection, explicit department/position/name/status/date mapping approval, row-level HRMO name correction, import history, audit records, and retained position/appointment history
 - Digital Application for Leave with profile snapshots, conditional leave details, private supporting files, working-day calculations, draft/submit, cancellation, approval history, and notification inbox
-- Office Head recommendation, HRMO credit/day certification and document waiver with justification, and designated Administrator final decision
-- Leave credit balances, adjustments, transaction ledger, and approval-time deductions for credit-tracked leave types
+- Office Head review, HRMO eligibility/credit/document certification, and separate Mayor final decision
+- Leave credit balances, adjustments, transaction ledger, and approval-time leave-credit debits for credit-tracked leave types
 - Municipal holidays and configurable workweek used by the leave working-day calculator
 - Attendance monitoring, authorized correction with remarks, and biometric CSV import with row-level duplicate/error reporting
-- Attendance-related deduction review records that keep estimates separate from payroll; the app does not calculate an unsupported payroll formula or deduct salary
 - Filtered employee, attendance, and leave reports with CSV downloads (Excel-compatible) and browser print
 - Two-page A4 print view for the leave application and configurable instructions/checklists
 
 ## Workflow and configuration
 
-- The configured chain is Employee → the Office Head assigned to the employee's department → HRMO → an Administrator account explicitly marked as a final approver.
-- Assign Office Heads on the Departments page. Designate final approvers on User accounts.
+- The standard chain is Employee → assigned Office Head → Admin / HRMO verification and certification → Mayor final approval.
+- All four roles can submit personal leave applications when linked to an employee record. An Office Head applicant skips self-endorsement and goes to HRMO. An Admin applicant requires an assigned alternate HR reviewer. A Mayor applicant requires a separately designated authorized final approver; otherwise it stays awaiting assignment.
+- Assign Office Heads on the Departments page, configure alternate reviewers and the Mayor personal-leave authority in System settings, and record availability periods for Office Heads. When the Mayor acts as an alternate department reviewer, that review is separate from the Mayor's later final approval.
 - Set the municipal workweek in System settings and maintain active holiday dates in Holiday calendar.
 - HRMO / Administrator can edit leave guidance, document checklists, sensitivity flags, and credit requirements on Leave requirements.
 - Requirements are examples based on the provided Civil Service Form No. 6 (Revised 2020) field description. Confirm current CSC rules and approved municipal policies before setting filing deadlines, entitlements, document requirements, or waivers.
 - The transparent municipal seal/logo used by the interface is `public/image/hrislogo.webp`.
-- Employee XLSX import is restricted to HRMO and administrators. It retains the original workbook and per-cell source values in private storage/staging; duplicate or existing employee reference numbers are skipped, departments/positions must map to existing records, and no login accounts are created. Both `OFFICE` source columns remain distinct. The unnamed date remains unmapped by default. HRMO must review the name format, verified employment status, source-to-department/position mappings, pre-import row issues, and import preview, then explicitly confirm valid rows. Rows needing review stay staged and can be corrected without changing their original source values.
+- Employee XLSX import is restricted to Admin. It retains the original workbook and per-cell source values in private storage/staging; duplicate or existing employee reference numbers are skipped, departments/positions must map to existing records, and no login accounts are created. Both `OFFICE` source columns remain distinct. The unnamed date remains unmapped by default. HRMO must review the name format, verified employment status, source-to-department/position mappings, pre-import row issues, and import preview, then explicitly confirm valid rows. Rows needing review stay staged and can be corrected without changing their original source values.
 - Only the employee, HRMO, and authorized Administrator can access documents marked sensitive. Office Heads are denied access to those downloads and do not see restricted application details.
 
 ## Leave form printing
@@ -143,4 +161,4 @@ npm run build
 
 ## Before municipal use
 
-Review current law and municipal policy with HR/legal/payroll, configure MySQL backups and private-file retention, set production session/cookie settings and HTTPS, establish an approved attendance schedule and deduction methodology, and perform a privacy/security review. Confirm the supplied form's current wording and required fields with HRMO before official use.
+Review current law and municipal policy with HR/legal, configure MySQL backups and private-file retention, set production session/cookie settings and HTTPS, establish an approved attendance schedule, and perform a privacy/security review. Confirm the supplied form's current wording and required fields with HRMO before official use.

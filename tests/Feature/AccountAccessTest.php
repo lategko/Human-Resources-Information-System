@@ -15,7 +15,7 @@ class AccountAccessTest extends TestCase
     public function test_each_role_logs_in_to_its_assigned_dashboard_and_logout_invalidates_the_session(): void
     {
         $department = Department::create(['name' => 'Administration']);
-        $accounts = collect(['super_admin', 'admin', 'hrmo', 'office_head', 'employee'])
+        $accounts = collect(['admin', 'mayor', 'office_head', 'employee'])
             ->mapWithKeys(fn (string $role) => [
                 $role => User::factory()->create([
                     'name' => ucfirst($role).' User',
@@ -35,9 +35,8 @@ class AccountAccessTest extends TestCase
         $department->update(['head_user_id' => $accounts['office_head']->id]);
 
         foreach ([
-            'super_admin' => 'Super Admin overview',
             'admin' => 'Administration overview',
-            'hrmo' => 'HR operations',
+            'mayor' => 'Municipal executive overview',
             'office_head' => 'Department overview',
             'employee' => 'My workspace',
         ] as $role => $dashboardHeading) {
@@ -130,17 +129,18 @@ class AccountAccessTest extends TestCase
         $this->assertGuest();
 
         $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
-        $hrmo = User::factory()->create(['role' => 'hrmo', 'is_active' => true]);
+        $mayor = User::factory()->create(['role' => 'mayor', 'is_active' => true]);
         $employee = User::factory()->create(['role' => 'employee', 'is_active' => true]);
 
-        $this->actingAs($admin)->get(route('super-admin.users.index'))->assertForbidden();
-        $this->actingAs($admin)->get(route('settings.system'))->assertForbidden();
-        $this->actingAs($hrmo)->get(route('settings.system'))->assertForbidden();
-        $this->actingAs($employee)->get(route('super-admin.users.index'))->assertForbidden();
+        $this->actingAs($admin)->get(route('users.index'))->assertOk();
+        $this->get(route('settings.system'))->assertOk();
+        $this->actingAs($mayor)->get(route('settings.system'))->assertForbidden();
+        $this->get(route('users.index'))->assertForbidden();
+        $this->actingAs($employee)->get(route('users.index'))->assertForbidden();
         $this->actingAs($employee)->get(route('users.create'))->assertForbidden();
     }
 
-    public function test_admin_cannot_assign_hrmo_role_or_change_an_existing_accounts_role(): void
+    public function test_admin_cannot_assign_legacy_or_unknown_roles(): void
     {
         $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
         $employeeUser = User::factory()->create([
@@ -157,9 +157,9 @@ class AccountAccessTest extends TestCase
         ]);
 
         $this->actingAs($admin)->post(route('users.store'), [
-            'name' => 'Unauthorized HRMO',
-            'email' => 'unauthorized-hrmo@example.test',
-            'role' => 'hrmo',
+            'name' => 'Legacy Super Admin',
+            'email' => 'legacy-role@example.test',
+            'role' => 'super_admin',
             'is_active' => 1,
             'password' => 'InitialPassword123!',
             'password_confirmation' => 'InitialPassword123!',
@@ -174,10 +174,10 @@ class AccountAccessTest extends TestCase
 
         $this->assertSame('employee', $employeeUser->fresh()->role);
         $this->assertSame($employeeUser->id, $employee->fresh()->user_id);
-        $this->assertDatabaseMissing('users', ['email' => 'unauthorized-hrmo@example.test']);
+        $this->assertDatabaseMissing('users', ['email' => 'legacy-role@example.test']);
     }
 
-    public function test_admin_final_approval_permission_keeps_its_legacy_dashboard_and_shows_its_primary_role(): void
+    public function test_admin_final_approval_permission_is_limited_to_mayor_personal_leave(): void
     {
         $admin = User::factory()->create([
             'role' => 'admin',
@@ -188,15 +188,17 @@ class AccountAccessTest extends TestCase
         $this->actingAs($admin)
             ->get(route('dashboard'))
             ->assertOk()
-            ->assertSee('Mayor’s executive overview')
-            ->assertSee('data-role-theme="mayor"', false)
-            ->assertSee('ADMIN · FINAL APPROVER');
+            ->assertSee('Administration overview')
+            ->assertSee('data-role-theme="administrator"', false)
+            ->assertSee('ADMIN · HR OFFICE');
+        $this->assertTrue($admin->canApproveMayorLeave());
+        $this->assertFalse($admin->canFinalApprove());
     }
 
-    public function test_super_admin_role_changes_preserve_employee_links_and_can_demote_admin_to_employee(): void
+    public function test_admin_role_changes_preserve_employee_links_and_can_assign_employee_role(): void
     {
         $department = Department::create(['name' => 'Human Resources']);
-        $superAdmin = User::factory()->create(['role' => 'super_admin', 'is_active' => true]);
+        $adminActor = User::factory()->create(['role' => 'admin', 'is_active' => true]);
         $employeeUser = User::factory()->create(['role' => 'employee', 'is_active' => true]);
         $employee = Employee::create([
             'user_id' => $employeeUser->id,
@@ -213,16 +215,21 @@ class AccountAccessTest extends TestCase
             'last_name' => 'Employee',
         ]);
 
-        $this->actingAs($superAdmin)
-            ->patch(route('super-admin.users.role', $employeeUser), ['role' => 'hrmo'])
-            ->assertRedirect()
-            ->assertSessionHasNoErrors();
-        $this->assertSame('hrmo', $employeeUser->fresh()->role);
+        $this->actingAs($adminActor)->put(route('users.update', $employeeUser), [
+            'name' => $employeeUser->name,
+            'email' => $employeeUser->email,
+            'role' => 'admin',
+            'is_active' => 1,
+        ])->assertRedirect();
+        $this->assertSame('admin', $employeeUser->fresh()->role);
         $this->assertSame($employee->id, $employeeUser->fresh()->employee->id);
 
-        $this->patch(route('super-admin.users.role', $admin), [
+        $this->put(route('users.update', $admin), [
+            'name' => $admin->name,
+            'email' => $admin->email,
             'role' => 'employee',
             'employee_id' => $unlinkedEmployee->id,
+            'is_active' => 1,
         ])->assertRedirect();
         $this->assertSame('employee', $admin->fresh()->role);
         $this->assertSame($unlinkedEmployee->id, $admin->fresh()->employee->id);
@@ -232,9 +239,9 @@ class AccountAccessTest extends TestCase
     public function test_configured_accounts_page_filters_users_and_shows_department_and_last_login(): void
     {
         $department = Department::create(['name' => 'Public Works']);
-        $superAdmin = User::factory()->create([
-            'role' => 'super_admin',
-            'email' => 'super@example.test',
+        $admin = User::factory()->create([
+            'role' => 'admin',
+            'email' => 'admin@example.test',
             'password' => 'InitialPassword123!',
             'is_active' => true,
         ]);
@@ -258,27 +265,21 @@ class AccountAccessTest extends TestCase
         ])->assertRedirect(route('dashboard'));
         $this->post(route('logout'))->assertRedirect(route('login'));
         $this->post(route('login.store'), [
-            'email' => $superAdmin->email,
+            'email' => $admin->email,
             'password' => 'InitialPassword123!',
         ])->assertRedirect(route('dashboard'));
 
-        $this->get(route('super-admin.users.index', [
-            'search' => 'employee@example.test',
-            'role' => 'employee',
-            'status' => 'active',
-        ]))
+        $this->get(route('users.index'))
             ->assertOk()
-            ->assertSee('Configured accounts')
+            ->assertSee('User accounts')
             ->assertSee('employee@example.test')
-            ->assertSee('Public Works')
-            ->assertSee(now()->format('M j, Y'))
-            ->assertDontSee('Never');
+            ->assertSee('Public Works');
     }
 
     public function test_account_edit_updates_the_existing_user_and_preserves_its_employee_relationship(): void
     {
         $department = Department::create(['name' => 'Finance']);
-        $superAdmin = User::factory()->create(['role' => 'super_admin', 'is_active' => true]);
+        $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
         $account = User::factory()->create(['role' => 'employee', 'is_active' => true]);
         $employee = Employee::create([
             'user_id' => $account->id,
@@ -288,19 +289,19 @@ class AccountAccessTest extends TestCase
             'last_name' => 'Employee',
         ]);
 
-        $this->actingAs($superAdmin)->put(route('users.update', $account), [
-            'name' => 'Updated HRMO',
-            'email' => 'updated-hrmo@example.test',
-            'role' => 'hrmo',
+        $this->actingAs($admin)->put(route('users.update', $account), [
+            'name' => 'Updated Admin',
+            'email' => 'updated-admin@example.test',
+            'role' => 'admin',
             'is_active' => 1,
         ])->assertRedirect(route('users.index'));
 
         $this->assertDatabaseHas('users', [
             'id' => $account->id,
-            'email' => 'updated-hrmo@example.test',
-            'role' => 'hrmo',
+            'email' => 'updated-admin@example.test',
+            'role' => 'admin',
         ]);
         $this->assertSame($account->id, $employee->fresh()->user_id);
-        $this->assertSame(1, User::where('email', 'updated-hrmo@example.test')->count());
+        $this->assertSame(1, User::where('email', 'updated-admin@example.test')->count());
     }
 }

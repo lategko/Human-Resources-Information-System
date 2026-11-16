@@ -14,6 +14,9 @@
                     <div><small>Office / department</small><b>{{ $application->office_snapshot }}</b></div><div><small>Position</small><b>{{ $application->position_snapshot ?? '—' }}</b></div><div><small>Employee</small><b>{{ $application->last_name_snapshot }}, {{ $application->first_name_snapshot }} {{ $application->middle_name_snapshot }}</b></div>                    @if(!auth()->user()->isOfficeHead())<div><small>Salary snapshot</small><b>{{ $application->salary_snapshot ? '₱'.number_format((float)$application->salary_snapshot, 2) : '—' }}</b></div>@endif
                     <div><small>Leave type</small><b>{{ $application->leaveType->name }}{{ $application->other_leave_type ? ' · '.$application->other_leave_type : '' }}</b></div><div><small>Commutation</small><b>{{ $application->commutation_requested === null ? 'Not selected' : ($application->commutation_requested ? 'Requested' : 'Not Requested') }}</b></div>
                     <div><small>Inclusive dates</small><b>{{ $application->start_date?->format('M j, Y') ?? '—' }}{{ $application->end_date?->ne($application->start_date) ? ' – '.$application->end_date?->format('M j, Y') : '' }}</b></div><div><small>Working days</small><b>{{ $application->verified_working_days ?? $application->working_days ?? '—' }}</b></div>
+                    @if($application->eligibility_verified_at && !auth()->user()->isOfficeHead())
+                        <div class="field-span"><small>HRMO eligibility verification</small><b>Verified by {{ $application->eligibilityVerifier?->name ?? 'authorized HRMO' }} on {{ $application->eligibility_verified_at->format('M j, Y') }}</b>@if($application->eligibility_remarks)<small>{{ $application->eligibility_remarks }}</small>@endif</div>
+                    @endif
                     @if($application->officeHeadReviewer)
                         <div class="field-span"><small>Assigned Office Head reviewer</small><b>{{ $application->officeHeadReviewer->name }}{{ $application->status === 'Under Alternate Office Head Review' ? ' · Authorized alternate review' : '' }}</b></div>
                     @endif
@@ -70,6 +73,28 @@
                             <button class="button button-outline button-wide" name="action" value="return">Return for correction</button>
                         </form>
                     </section>
+                @elseif(auth()->user()->isAdministrator() && $application->status === 'Awaiting Alternate HR Reviewer Assignment')
+                    <section class="panel review-panel"><div class="panel-heading"><div><h2>Assign alternate HR reviewer</h2><p>The Admin applicant cannot verify their own leave request.</p></div></div>
+                        <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf
+                            <input type="hidden" name="action" value="assign_hr_reviewer">
+                            <label>Authorized alternate Admin reviewer *
+                                <select name="assigned_hr_reviewer_id" required><option value="">Select an active Admin</option>@foreach(\App\Models\User::query()->where('role', 'admin')->where('is_active', true)->whereKeyNot($application->employee->user_id)->orderBy('name')->get() as $reviewer)<option value="{{ $reviewer->id }}">{{ $reviewer->name }}</option>@endforeach</select>
+                            </label>
+                            <label>Assignment remarks<textarea name="remarks" rows="2"></textarea></label>
+                            <button class="button button-primary button-wide">Assign and forward for HR verification</button>
+                        </form>
+                    </section>
+                @elseif(auth()->user()->isAdministrator() && $application->status === 'Awaiting Authorized Final Approver Assignment')
+                    <section class="panel review-panel"><div class="panel-heading"><div><h2>Assign authorized final approver</h2><p>No authority is assumed for the Mayor’s personal leave.</p></div></div>
+                        <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf
+                            <input type="hidden" name="action" value="assign_final_approver">
+                            <label>Explicitly designated Admin approver *
+                                <select name="assigned_final_approver_id" required><option value="">Select an active designated approver</option>@foreach(\App\Models\User::query()->where('role', 'admin')->where('is_active', true)->where('can_final_approve', true)->orderBy('name')->get() as $approver)<option value="{{ $approver->id }}">{{ $approver->name }}</option>@endforeach</select>
+                            </label>
+                            <label>Assignment remarks<textarea name="remarks" rows="2"></textarea></label>
+                            <button class="button button-primary button-wide">Assign authorized approver</button>
+                        </form>
+                    </section>
                 @elseif(auth()->user()->isHrmo())
                     <section class="panel review-panel"><div class="panel-heading"><div><h2>HRMO verification</h2><p>Verify credits and working days.</p></div></div>
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf<input type="hidden" name="action" value="verify">
@@ -78,13 +103,24 @@
                             <label>Certifying position *<input name="certifier_position" maxlength="120" required></label>
                             <label>Digital signature (type your full name) *<input name="certifier_signature" maxlength="120" value="{{ auth()->user()->name }}" required></label>
                             <label>Verification remarks<textarea name="remarks" rows="3"></textarea></label>
-                            @if($application->leaveType->required_documents)
+                            @if($requiredDocuments)
                                 <div class="waiver-box"><b>Required supporting documents</b><small>Every checklist item must have an attached file or a documented HRMO waiver before verification. Waivers require an approved policy basis and justification.</small>
-                                    @foreach($application->leaveType->required_documents as $document)
+                                    @foreach($requiredDocuments as $document)
                                         @php($matchingDocument = $application->documents->firstWhere('document_type', $document))
                                         <div class="document-requirement-row"><span><b>{{ $document }}</b><small>{{ $matchingDocument ? 'Attached: '.$matchingDocument->original_name : 'Not attached' }}</small></span>@if($matchingDocument)<a class="table-link" href="{{ route('leave.documents', [$application, $matchingDocument]) }}">Open attachment</a>@else<label class="checkbox-label"><input type="checkbox" name="waived_documents[]" value="{{ $document }}" @checked(in_array($document, $application->document_waivers['documents'] ?? [], true))> HRMO waiver</label>@endif</div>
                                     @endforeach
                                     <label>Waiver justification<textarea name="waiver_justification" rows="2">{{ $application->document_waivers['justification'] ?? '' }}</textarea></label>
+                                </div>
+                            @endif
+                            @if($application->leaveType->rules['eligibility_review_required'] ?? false)
+                                <div class="waiver-box">
+                                    <b>Individual eligibility confirmation</b>
+                                    <small>Confirm that the employee meets the applicable eligibility requirements for this leave category. This decision is recorded with your HRMO account.</small>
+                                    @if($application->eligibility_verified_at)
+                                        <p>Previously confirmed by {{ $application->eligibilityVerifier?->name ?? 'authorized HRMO' }} on {{ $application->eligibility_verified_at->format('M j, Y') }}.</p>
+                                    @endif
+                                    <label class="checkbox-label"><input type="checkbox" name="eligibility_verified" value="1" required> I reviewed and confirm the employee’s eligibility</label>
+                                    <label>Eligibility review remarks<textarea name="eligibility_remarks" rows="2">{{ $application->eligibility_remarks }}</textarea></label>
                                 </div>
                             @endif
                             <button class="button button-primary button-wide" type="submit">Certify and send for approval</button>
@@ -95,26 +131,16 @@
                             <button class="button button-outline button-wide" type="submit">Return for correction</button>
                         </form>
                     </section>
-                @elseif(auth()->user()->canFinalApprove() && $application->status === 'Under Alternate Office Head Review')
-                    <section class="panel review-panel"><div class="panel-heading"><div><h2>Alternate Office Head decision</h2><p>You are acting as the authorized substitute. HRMO verification is required before this recorded decision is finalized.</p></div></div>
+                @elseif(auth()->user()->isMayor() && $application->status === 'Under Alternate Office Head Review')
+                    <section class="panel review-panel"><div class="panel-heading"><div><h2>Alternate Office Head review</h2><p>Endorsement is separate from the Mayor’s later final decision. HR Office verification remains mandatory.</p></div></div>
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf
-                            <label>Number of days with pay<input type="number" min="0" step=".5" name="days_with_pay" value="{{ $application->working_days }}" required></label>
-                            <label>Number of days without pay<input type="number" min="0" step=".5" name="days_without_pay" value="0"></label>
-                            <label>Others (specify)<input name="approval_others"></label>
-                            <label>Remarks<textarea name="remarks" rows="2"></textarea></label>
-                            <button class="button button-primary button-wide" name="action" value="approve">Record approval for HRMO verification</button>
-                        </form>
-                        <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack review-divider">@csrf
-                            <input type="hidden" name="action" value="disapprove"><label>Reason for disapproval *<textarea name="reason" rows="2" required></textarea></label>
-                            <label>Additional remarks<textarea name="remarks" rows="2"></textarea></label>
-                            <button class="button button-danger button-wide" type="submit">Record disapproval for HRMO verification</button>
-                        </form>
-                        <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack review-divider">@csrf
-                            <input type="hidden" name="action" value="return"><label>Return remarks *<textarea name="remarks" rows="2" required></textarea></label>
-                            <button class="button button-outline button-wide" type="submit">Return for correction</button>
+                            <input type="hidden" name="recommendation" value="For approval">
+                            <label>Remarks<textarea name="remarks" rows="3"></textarea></label>
+                            <button class="button button-primary button-wide" name="action" value="endorse">Endorse to HR Office</button>
+                            <button class="button button-outline button-wide" name="action" value="return">Return for correction</button>
                         </form>
                     </section>
-                @elseif(auth()->user()->canFinalApprove())
+                @elseif(auth()->user()->canFinalApprove() || (auth()->user()->canApproveMayorLeave() && $application->status === 'Pending Authorized Final Approval'))
                     <section class="panel review-panel"><div class="panel-heading"><div><h2>Final decision</h2><p>Record the authorized final action.</p></div></div>
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf
                             <label>Number of days with pay<input type="number" min="0" step=".5" name="days_with_pay" value="{{ $application->verified_working_days ?? $application->working_days }}" required></label>
@@ -127,6 +153,10 @@
                             <input type="hidden" name="action" value="disapprove"><label>Reason for disapproval *<textarea name="reason" rows="2" required></textarea></label>
                             <label>Additional remarks<textarea name="remarks" rows="2"></textarea></label>
                             <button class="button button-danger button-wide" type="submit">Disapprove application</button>
+                        </form>
+                        <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack review-divider">@csrf
+                            <input type="hidden" name="action" value="return"><label>Return for clarification *<textarea name="remarks" rows="2" required></textarea></label>
+                            <button class="button button-outline button-wide" type="submit">Return for clarification</button>
                         </form>
                     </section>
                 @endif

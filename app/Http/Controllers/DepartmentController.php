@@ -12,10 +12,15 @@ use Illuminate\View\View;
 
 class DepartmentController extends Controller
 {
-    public function index(): View
+    public function index(Request $request): View
     {
+        $departments = Department::with('head')->withCount('employees')->orderBy('name');
+        if ($request->user()->isOfficeHead()) {
+            $departments->where('head_user_id', $request->user()->id);
+        }
+
         return view('departments.index', [
-            'departments' => Department::with('head')->withCount('employees')->orderBy('name')->paginate(15),
+            'departments' => $departments->paginate(15),
             'heads' => User::where('role', 'office_head')->orderBy('name')->get(),
         ]);
     }

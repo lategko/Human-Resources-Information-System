@@ -10,6 +10,7 @@ use App\Models\EmployeeImport;
 use App\Models\LeaveApplication;
 use App\Models\LeaveApprovalHistory;
 use App\Models\LeaveCredit;
+use App\Services\EmployeeLeaveEntitlementSummary;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\View\View;
@@ -19,10 +20,6 @@ class DashboardController extends Controller
     public function __invoke(Request $request): View
     {
         $user = $request->user();
-        if ($user->isSuperAdmin()) {
-            return app(SuperAdminDashboardController::class)();
-        }
-
         $employee = $user->employee;
 
         if ($user->isEmployee()) {
@@ -40,7 +37,8 @@ class DashboardController extends Controller
                     ->selectRaw('status, count(*) as aggregate')
                     ->groupBy('status')
                     ->pluck('aggregate', 'status'),
-                'credits' => $employee->leaveCredits()->with('leaveType')->get(),
+                'credits' => $employee->leaveCredits()->with(['leaveType', 'transactions'])->get(),
+                'specialEntitlements' => app(EmployeeLeaveEntitlementSummary::class)->forYear($employee),
                 'recentAttendance' => $employee->attendanceRecords()->latest('work_date')->limit(5)->get(),
                 'recentNotifications' => $user->notifications()->latest()->limit(5)->get(),
                 'upcomingLeaves' => $employee->leaveApplications()
@@ -122,9 +120,9 @@ class DashboardController extends Controller
             ])
             ->values();
 
-        $pendingStatus = match ($user->role) {
-            'office_head' => 'Under Office Head Review',
-            'hrmo' => 'Under HRMO Verification',
+        $pendingStatus = match (true) {
+            $user->isOfficeHead() => 'Under Office Head Review',
+            $user->isHrmo() => 'Under HRMO Verification',
             default => 'Pending Final Approval',
         };
         if ($user->isAdministrator() && ! $user->canFinalApprove()) {
@@ -166,6 +164,15 @@ class DashboardController extends Controller
                 ->limit(8)
                 ->get()
             : collect();
+        $pendingAuthorizedFinalTasks = $user->canApproveMayorLeave()
+            ? LeaveApplication::query()
+                ->where('status', 'Pending Authorized Final Approval')
+                ->where('assigned_final_approver_id', $user->id)
+                ->with(['employee.department', 'leaveType'])
+                ->oldest('created_at')
+                ->limit(8)
+                ->get()
+            : collect();
         $pendingAlternateTasks = $user->canFinalApprove()
             ? (clone $leaves)
                 ->where('status', 'Under Alternate Office Head Review')
@@ -181,6 +188,33 @@ class DashboardController extends Controller
             $departmentCountQuery->where('head_user_id', $user->id);
         } elseif ($departmentId) {
             $departmentCountQuery->whereKey($departmentId);
+        }
+
+        $leaveCreditStats = null;
+        if ($user->isHrmo()) {
+            $creditScope = function ($query) use ($scopeEmployees): void {
+                $query->whereHas('employee', $scopeEmployees);
+            };
+            $regularCredits = LeaveCredit::query()->whereHas('leaveType', fn ($types) => $types->whereIn('code', ['VACATION', 'SICK']));
+            $creditScope($regularCredits);
+            $vlCredits = (clone $regularCredits)->whereHas('leaveType', fn ($types) => $types->where('code', 'VACATION'));
+            $slCredits = (clone $regularCredits)->whereHas('leaveType', fn ($types) => $types->where('code', 'SICK'));
+            $accrualMonth = now()->subMonth()->startOfMonth()->toDateString();
+            $monthlyAccrual = \App\Models\LeaveCreditTransaction::query()
+                ->where('type', 'monthly_accrual')
+                ->whereDate('accrual_month', $accrualMonth)
+                ->whereHas('leaveCredit', fn ($credits) => $creditScope($credits));
+            $leaveCreditStats = [
+                'vl_employees' => (clone $vlCredits)->whereRaw('(beginning_balance + earned_credits + adjustments - used_credits) > 0')->distinct('employee_id')->count('employee_id'),
+                'sl_employees' => (clone $slCredits)->whereRaw('(beginning_balance + earned_credits + adjustments - used_credits) > 0')->distinct('employee_id')->count('employee_id'),
+                'low_balance_employees' => (clone $regularCredits)->whereRaw('(beginning_balance + earned_credits + adjustments - used_credits) <= 3')->distinct('employee_id')->count('employee_id'),
+                'monthly_accrual' => (float) (clone $monthlyAccrual)->sum('amount'),
+                'accrual_month' => Carbon::parse($accrualMonth)->format('F Y'),
+                'pending' => (clone $leaves)->whereIn('status', ['Submitted', 'Under Office Head Review', 'Under Alternate Office Head Review', 'Under HRMO Verification', 'Pending Final Approval'])->count(),
+                'approved' => (clone $leaves)->where('status', 'Approved')->count(),
+                'disapproved' => (clone $leaves)->where('status', 'Disapproved')->count(),
+                'special_applications' => (clone $leaves)->whereHas('leaveType', fn ($types) => $types->whereNotIn('code', ['VACATION', 'SICK', 'OTHER', 'WELLNESS', 'MONETIZATION', 'TERMINAL']))->count(),
+            ];
         }
 
         $viewData = [
@@ -213,6 +247,7 @@ class DashboardController extends Controller
             'pendingTasks' => $pendingTasks,
             'pendingFinalTasks' => $pendingFinalTasks,
             'pendingAlternateTasks' => $pendingAlternateTasks,
+            'pendingAuthorizedFinalTasks' => $pendingAuthorizedFinalTasks,
             'upcomingLeaves' => (clone $leaves)
                 ->where('status', 'Approved')
                 ->whereBetween('start_date', [today(), today()->addDays(30)])
@@ -253,6 +288,7 @@ class DashboardController extends Controller
                     $scopeEmployees($query);
                 })
                 ->count(),
+            'leaveCreditStats' => $leaveCreditStats,
             'departmentDistribution' => Department::query()
                 ->where('is_active', true)
                 ->when($departmentId, fn ($query) => $query->whereKey($departmentId))
