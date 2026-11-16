@@ -27,9 +27,34 @@ A Laravel 12, Blade, Tailwind CSS, Alpine.js, and MySQL-ready HRIS prototype for
 
 5. Open the URL printed by `php artisan serve`.
 
-`php artisan migrate --seed` applies pending migrations and adds missing leave-type reference data. It does not invent or create account identities unless optional initial-account settings are explicitly supplied. It never creates employee, department, or position records.
+`php artisan migrate --seed` applies pending migrations, synchronizes configured accounts, and adds missing leave-type reference data. It never creates employee, department, or position records.
 
-To bootstrap an installation, configure `HRIS_INITIAL_SUPER_ADMIN_NAME`, `HRIS_INITIAL_SUPER_ADMIN_EMAIL`, and a strong `HRIS_INITIAL_SUPER_ADMIN_PASSWORD` in the protected active environment file, then run `php artisan db:seed`. The Super Admin account is created only if that email is unused; a conflicting existing non-Super-Admin account causes seeding to stop rather than promote it. Optional initial ADMIN, HRMO, and Office Head accounts can be configured with the corresponding `HRIS_INITIAL_*` values; an Office Head also requires an existing `HRIS_INITIAL_OFFICE_HEAD_DEPARTMENT_ID`. Remove bootstrap credentials from the environment after setup. Rerunning seeders never updates existing names, roles, passwords, status, or relationships.
+Predefined accounts are optional and configured in the protected active environment file. Existing `HRIS_INITIAL_*` names are supported, as are the shorter `INITIAL_*` aliases. The supported slots are Super Admin, Admin, HRMO, Mayor, and Office Head. For example:
+
+```dotenv
+HRIS_INITIAL_SUPER_ADMIN_NAME="Super Administrator"
+HRIS_INITIAL_SUPER_ADMIN_EMAIL=superadmin@example.com
+HRIS_INITIAL_SUPER_ADMIN_PASSWORD=replace-with-a-strong-secret
+HRIS_INITIAL_ADMIN_NAME="System Administrator"
+HRIS_INITIAL_ADMIN_EMAIL=admin@example.com
+HRIS_INITIAL_ADMIN_PASSWORD=replace-with-a-strong-secret
+HRIS_INITIAL_HRMO_NAME="HRMO"
+HRIS_INITIAL_HRMO_EMAIL=hrmo@example.com
+HRIS_INITIAL_HRMO_PASSWORD=replace-with-a-strong-secret
+HRIS_INITIAL_MAYOR_NAME="Mayor"
+HRIS_INITIAL_MAYOR_EMAIL=mayor@example.com
+HRIS_INITIAL_MAYOR_PASSWORD=replace-with-a-strong-secret
+HRIS_INITIAL_OFFICE_HEAD_NAME="Office Head"
+HRIS_INITIAL_OFFICE_HEAD_EMAIL=officehead@example.com
+HRIS_INITIAL_OFFICE_HEAD_PASSWORD=replace-with-a-strong-secret
+HRIS_INITIAL_OFFICE_HEAD_DEPARTMENT_ID=1
+```
+
+Each configured slot has a stable `seed_key` in the users table, independent of its email. The default stored roles are `super_admin`, `admin`, `hrmo`, `mayor`, and `office_head`; optional `HRIS_INITIAL_<SLOT>_ROLE` values can change a slot's role to another supported role. Optional `HRIS_INITIAL_<SLOT>_IS_ACTIVE` values synchronize status, and `HRIS_INITIAL_ADMIN_FINAL_APPROVER` controls the Admin final-approver flag. Office Heads require an existing department ID (find it in the Departments screen/database); the seeder does not create departments. Changing their configured department moves the assignment. Empty optional values are ignored; removing a slot's name/email/password configuration skips that slot without deleting its account or HR records. Passwords are hashed, and an unchanged configured password is not rewritten.
+
+After changing `.env`, run `php artisan config:clear` followed by `php artisan db:seed`. The first deployment of the `seed_key` migration must run `php artisan migrate` before seeding. To safely associate existing untagged bootstrap accounts, run the seeder once while their currently configured emails still match; after the stable keys are stored, future email changes are synchronized automatically. Legacy matching never claims an account with the Employee role or an employee record, and a conflicting unrelated email causes a clear error instead of overwriting that user. A configured account is updated by its stable key, including its name, email, role, active status, supported permissions, and password when supplied. Super Admin defaults to `super_admin`; it is never implicitly made an Admin.
+
+When configuration is cached in production, deploy the updated environment and rebuild Laravel's config cache before running seeders, for example `php artisan config:cache` followed by `php artisan db:seed`. Protect `.env` and never commit real passwords. Seeding does not delete users, departments, or HR data.
 
 For safe population, first verify `DB_CONNECTION` and `DB_DATABASE` in the active environment. In production, back up and test restoration before applying approved migrations. Migrations are additive; never use `migrate:fresh` or truncate tables on a database containing records. Create department and position records from the authorized HR screens, then enter verified municipal employee data. Employee accounts must be linked to one existing, non-archived employee record.
 

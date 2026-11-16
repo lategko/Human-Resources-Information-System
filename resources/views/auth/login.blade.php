@@ -10,7 +10,7 @@
 </head>
 <body class="login-page" style="--login-image: url('{{ asset('image/login.background.jpg') }}')" x-data="{ showPassword: false, isSubmitting: false }">
     <main class="login-panel">
-        <a href="{{ route('home') }}" class="login-back"><span aria-hidden="true">←</span> Back to portal</a>
+        <a href="{{ route('home') }}" class="login-back">Back to portal</a>
         <div class="login-brand">
             <img class="login-logo" src="{{ asset('image/hrislogo.webp') }}" alt="Municipality of Camalaniugan HRMO seal" width="64" height="64" decoding="async">
             <div>
@@ -41,7 +41,6 @@
             <button type="submit" class="button button-primary button-wide login-submit" :disabled="isSubmitting">
                 <span class="login-spinner" x-show="isSubmitting" aria-hidden="true"></span>
                 <span x-text="isSubmitting ? 'Signing in…' : 'Sign In'">Sign In</span>
-                <span aria-hidden="true">→</span>
             </button>
         </form>
         <p class="login-privacy">Access is limited to authorized personnel. Your activity may be logged for security and accountability.</p>

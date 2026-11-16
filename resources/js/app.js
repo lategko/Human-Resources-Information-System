@@ -34,6 +34,63 @@ window.publicNavigation = () => ({
     },
 });
 
+window.hrisWorkflow = () => ({
+    activeStep: 0,
+    steps: [
+        {
+            title: 'Secure Account Access',
+            role: 'Employees and authorized municipal personnel',
+            action: 'Sign in with a registered email address and password. The HRIS verifies credentials, account status, and assigned permissions.',
+            next: 'Users enter only the system areas permitted for their account role.',
+        },
+        {
+            title: 'Employee Information Management',
+            role: 'HRMO and authorized administrators; employees for their own permitted information',
+            action: 'Authorized personnel manage employee profiles, employment details, department assignments, and personnel records. Employees can view and update permitted personal information.',
+            next: 'Employees can use available services, including submitting a leave application.',
+        },
+        {
+            title: 'Leave Application Submission',
+            role: 'Employee',
+            action: 'Complete the leave application, provide the required information, attach applicable supporting documents, and submit the request.',
+            next: 'The application is routed to the assigned Office Head, or to an authorized alternate when the Office Head is unavailable.',
+        },
+        {
+            title: 'Department Head Review',
+            role: 'Assigned Office Head or authorized alternate',
+            action: 'The assigned Office Head reviews an application from their department and records a recommendation for approval or disapproval, or returns it for correction.',
+            next: 'An Office Head endorsement moves the application to HRMO verification.',
+        },
+        {
+            title: 'HRMO Verification',
+            role: 'HRMO',
+            action: 'Verify required supporting documents and working days, review available leave-credit information, and record the HR certification.',
+            next: 'Ordinary applications proceed to an authorized final approver. If an alternate final decision was already recorded, HRMO verification finalizes that outcome.',
+        },
+        {
+            title: 'Final Approval',
+            role: 'Authorized final approver',
+            action: 'The Mayor or an administrator with final-approval permission reviews applications awaiting final approval and records an approval or disapproval.',
+            next: 'The decision and application status are recorded, and the employee is notified.',
+        },
+        {
+            title: 'Application Status and Records',
+            role: 'Employee and authorized HR personnel',
+            action: 'Employees check their application status. Authorized HRMO personnel maintain application records and monitor leave transactions and related HR activity.',
+            next: 'The application history remains available to permitted users for follow-up and accountability.',
+        },
+    ],
+    selectStep(index) {
+        if (index >= 0 && index < this.steps.length) this.activeStep = index;
+    },
+    previousStep() {
+        this.selectStep(this.activeStep - 1);
+    },
+    nextStep() {
+        this.selectStep(this.activeStep + 1);
+    },
+});
+
 createIcons({
     icons: {
         Activity, ArrowRight, ArrowUpDown, Bell, BriefcaseBusiness, Building2, CalendarDays,
