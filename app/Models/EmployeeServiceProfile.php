@@ -21,6 +21,9 @@ class EmployeeServiceProfile extends Model
         'additional_service_years',
         'employee_import_id',
         'source_row',
+        'source_identity_hash',
+        'source_identity_type',
+        'plantilla_item_no',
     ];
 
     protected function casts(): array

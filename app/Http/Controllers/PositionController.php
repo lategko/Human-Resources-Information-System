@@ -26,6 +26,7 @@ class PositionController extends Controller
             'title' => ['required', 'string', 'max:150'],
             'department_id' => ['nullable', 'exists:departments,id'],
             'salary_grade' => ['nullable', 'string', 'max:10'],
+            'is_office_head_designation' => ['nullable', 'boolean'],
         ]);
         $position = Position::create($data);
         $auditLogger->record('position.created', $position);
@@ -40,6 +41,7 @@ class PositionController extends Controller
             'department_id' => ['nullable', 'exists:departments,id'],
             'salary_grade' => ['nullable', 'string', 'max:10'],
             'is_active' => ['required', 'boolean'],
+            'is_office_head_designation' => ['nullable', 'boolean'],
         ]);
         $position->update($data);
         $auditLogger->record('position.updated', $position);

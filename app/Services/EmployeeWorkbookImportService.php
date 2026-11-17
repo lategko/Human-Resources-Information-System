@@ -10,133 +10,107 @@ use App\Models\EmployeeImportMappingEvent;
 use App\Models\EmployeeImportRow;
 use App\Models\EmployeeServiceProfile;
 use App\Models\Position;
+use App\Models\User;
 use DateTimeImmutable;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 use PhpOffice\PhpSpreadsheet\IOFactory;
-use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
+use PhpOffice\PhpSpreadsheet\Reader\Exception;
+use PhpOffice\PhpSpreadsheet\Reader\Xls;
 use PhpOffice\PhpSpreadsheet\Reader\Xlsx;
+use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 
 class EmployeeWorkbookImportService
 {
-    private const MAX_ROWS = 1000;
+    private const MAX_ROWS = 5000;
 
     private const MAX_COLUMNS = 60;
 
+    private const MAX_WORKSHEET_ROWS = 10000;
+
+    private const HEADER_SCAN_ROWS = 10;
+
+    public function __construct(private readonly EmployeeUsernameGenerator $usernameGenerator) {}
+
     public function stage(UploadedFile $file, int $userId): EmployeeImport
     {
-        $this->validateArchive($file->getRealPath());
+        $extension = mb_strtolower($file->getClientOriginalExtension());
+        if ($extension === 'xlsx') {
+            $this->validateArchive($file->getRealPath());
+        } elseif ($extension !== 'xls') {
+            throw ValidationException::withMessages(['file' => 'Upload an .xlsx or .xls workbook.']);
+        }
         try {
             $reader = IOFactory::createReaderForFile($file->getRealPath());
-        } catch (\PhpOffice\PhpSpreadsheet\Reader\Exception) {
-            throw ValidationException::withMessages(['file' => 'The uploaded file is not a readable XLSX workbook.']);
-        }
-        if (! $reader instanceof Xlsx) {
-            throw ValidationException::withMessages([
-                'file' => 'Upload an .xlsx workbook. Other spreadsheet formats are not supported.',
-            ]);
-        }
-        $reader->setReadDataOnly(false);
-        try {
-            $spreadsheet = $reader->load($file->getRealPath());
-        } catch (\PhpOffice\PhpSpreadsheet\Reader\Exception) {
-            throw ValidationException::withMessages(['file' => 'The uploaded workbook could not be parsed. Re-save it as a valid .xlsx file and try again.']);
-        }
-        $sheet = $spreadsheet->getActiveSheet();
-        $lastRow = $sheet->getHighestDataRow();
-        $lastColumn = Coordinate::columnIndexFromString($sheet->getHighestDataColumn());
-
-        if ($lastRow < 2 || $lastRow > self::MAX_ROWS + 1 || $lastColumn > self::MAX_COLUMNS) {
-            $spreadsheet->disconnectWorksheets();
-            throw ValidationException::withMessages([
-                'file' => 'The workbook must contain a header, at least one data row, no more than '.self::MAX_ROWS.' data rows, and no more than '.self::MAX_COLUMNS.' columns.',
-            ]);
-        }
-
-        $headers = [];
-        $headerNames = [];
-        for ($column = 1; $column <= $lastColumn; $column++) {
-            $cell = $sheet->getCell([$column, 1]);
-            $value = trim((string) $cell->getValue());
-            $label = $value === '' ? null : $value;
-            $headers[] = [
-                'index' => $column,
-                'letter' => Coordinate::stringFromColumnIndex($column),
-                'label' => $label,
-                'display_label' => $label ?? 'Unnamed column '.Coordinate::stringFromColumnIndex($column),
-            ];
-            if ($label !== null) {
-                $headerNames[] = mb_strtoupper(preg_replace('/\s+/', ' ', $label));
+            if (! $reader instanceof Xlsx && ! $reader instanceof Xls) {
+                throw ValidationException::withMessages(['file' => 'The uploaded file is not a supported Excel workbook.']);
             }
+            $reader->setReadDataOnly(false);
+            $spreadsheet = $reader->load($file->getRealPath());
+        } catch (ValidationException $exception) {
+            throw $exception;
+        } catch (\Throwable $exception) {
+            report($exception);
+            throw ValidationException::withMessages(['file' => 'The uploaded file is not a readable XLS or XLSX workbook.']);
         }
-        $headerCounts = array_count_values($headerNames);
-        $requiredHeaders = [
-            'NO.', 'NAME', 'POSITION LEVEL', 'BDATE', 'CAT', 'GENDER',
-            'NATURE OF APPOINTMENT', 'LATEST POSITION', '1ST POSITION',
-            '2ND POSITION', '3RD POSITION', '4TH POSITION', 'DATE APPOINTED (1ST)',
-            'DATE APPOINTED (2ND)', 'DATE APPOINTED (3RD)', 'DATE APPOINTED (4TH)',
-            'LATEST DATE APPOINTED', 'ELIGIBILITY/PERCENT', 'LICENSE- DATE EXPIRATION',
-            'EDUCATIONAL ATTAINMENT', 'YEARS IN SERVICE',
-            'EXPECTED DATE OF MANDATORY RETIREMENT', 'AGE',
-        ];
-        $missingHeaders = array_values(array_filter(
-            $requiredHeaders,
-            fn (string $required) => ! isset($headerCounts[$required])
-        ));
-        if ($missingHeaders || ($headerCounts['OFFICE'] ?? 0) !== 2 || ($headerCounts['YEARS IN SERVICE'] ?? 0) < 2) {
+
+        try {
+            $analysis = $this->analyzeWorkbook($spreadsheet);
+        } catch (ValidationException $exception) {
             $spreadsheet->disconnectWorksheets();
+            throw $exception;
+        } catch (\Throwable $exception) {
+            $spreadsheet->disconnectWorksheets();
+            report($exception);
             throw ValidationException::withMessages([
-                'file' => 'Workbook headers are incomplete or ambiguous. Required headings include employee number, name, appointment history, and exactly two OFFICE columns.',
+                'file' => 'The workbook could not be analyzed. Check that it is a valid Excel file and that its employee sheet is readable.',
             ]);
         }
+        $spreadsheet->disconnectWorksheets();
 
         $filePath = $file->store('employee-imports', 'local');
         if (! $filePath) {
-            $spreadsheet->disconnectWorksheets();
             throw new \RuntimeException('The uploaded workbook could not be stored securely.');
         }
 
         try {
-            $import = DB::transaction(function () use ($file, $filePath, $userId, $headers, $sheet, $lastRow) {
+            $import = DB::transaction(function () use ($file, $filePath, $userId, $analysis) {
                 $import = EmployeeImport::create([
                     'uploaded_by' => $userId,
                     'original_name' => mb_substr($file->getClientOriginalName(), 0, 255),
                     'source_file_path' => $filePath,
                     'source_sha256' => hash_file('sha256', $file->getRealPath()),
-                    'status' => 'pending_review',
-                    'source_headers' => $headers,
-                    'row_count' => $lastRow - 1,
+                    'status' => 'mapping_required',
+                    'source_headers' => $analysis['headers'],
+                    'worksheet_name' => $analysis['worksheet_name'],
+                    'header_row' => $analysis['header_row'],
+                    'worksheet_names' => $analysis['worksheet_names'],
+                    'row_count' => count($analysis['rows']),
+                    'source_row_count' => $analysis['source_row_count'],
+                    'excluded_rows_count' => $analysis['excluded_rows_count'],
                 ]);
                 $seenEmployeeNos = [];
+                $seenIdentityHashes = [];
                 $duplicateCount = 0;
                 $reviewCount = 0;
 
-                for ($rowNumber = 2; $rowNumber <= $lastRow; $rowNumber++) {
-                    $sourceData = [];
-                    foreach ($headers as $header) {
-                        $cell = $sheet->getCell([$header['index'], $rowNumber]);
-                        $raw = $cell->getValue();
-                        $isFormula = $cell->getDataType() === 'f';
-                        $display = $isFormula ? (string) $raw : (string) $cell->getFormattedValue();
-                        $sourceData[] = [
-                            'column' => $header['letter'],
-                            'header' => $header['label'],
-                            'value' => is_scalar($raw) || $raw === null ? $raw : (string) $raw,
-                            'display_value' => $display,
-                            'data_type' => $cell->getDataType(),
-                            'number_format' => $cell->getStyle()->getNumberFormat()->getFormatCode(),
-                        ];
-                    }
-
-                    $employeeNumber = $this->cellByHeader($sourceData, 'NO.');
-                    $employeeNumber = trim((string) ($employeeNumber['display_value'] ?? ''));
-                    $issues = [];
+                foreach ($analysis['rows'] as $sourceRow) {
+                    $sourceData = $sourceRow['data'];
+                    $identity = $sourceRow['identity'];
+                    $employeeNumber = $analysis['format'] === 'plantilla'
+                        ? ''
+                        : trim((string) ($this->cellByHeader($sourceData, 'NO.')['display_value'] ?? ''));
+                    $issues = $identity['error'] ? [$identity['error']] : [];
+                    $existingEmployee = null;
                     if ($employeeNumber === '') {
-                        $issues[] = 'Employee reference number is missing.';
+                        if ($analysis['format'] === 'legacy') {
+                            $issues[] = 'Employee reference number is missing.';
+                        }
                     } else {
                         $key = mb_strtolower($employeeNumber);
                         if (isset($seenEmployeeNos[$key])) {
@@ -144,30 +118,58 @@ class EmployeeWorkbookImportService
                         } else {
                             $seenEmployeeNos[$key] = true;
                         }
-                        if (Employee::withTrashed()->where('employee_no', $employeeNumber)->exists()) {
-                            $issues[] = 'Employee reference number already exists; existing records will not be overwritten.';
+                        $existingEmployee = Employee::withTrashed()
+                            ->with('user')
+                            ->whereRaw('LOWER(employee_no) = ?', [$key])
+                            ->first();
+                        if ($existingEmployee?->trashed()) {
+                            $issues[] = 'An archived employee already uses this employee number. Review the archived record before importing.';
+                        }
+                        if ($existingEmployee?->user?->role === 'admin') {
+                            $issues[] = 'This employee number belongs to a protected Admin account. Imports cannot change that employee or account.';
                         }
                     }
-                    if (trim((string) ($this->cellByHeader($sourceData, 'NAME')['display_value'] ?? '')) === '') {
+                    if ($analysis['format'] === 'plantilla' && $identity['hash']) {
+                        $existingProfile = EmployeeServiceProfile::query()
+                            ->with('employee.user')
+                            ->where('source_identity_hash', $identity['hash'])
+                            ->first();
+                        $existingEmployee ??= $existingProfile?->employee;
+                    }
+                    if ($existingEmployee?->user?->role === 'admin'
+                        && ! in_array('This employee number belongs to a protected Admin account. Imports cannot change that employee or account.', $issues, true)) {
+                        $issues[] = 'This employee number belongs to a protected Admin account. Imports cannot change that employee or account.';
+                    }
+                    if ($analysis['format'] === 'legacy'
+                        && trim((string) ($this->cellByHeader($sourceData, 'NAME')['display_value'] ?? '')) === '') {
                         $issues[] = 'Employee name is missing.';
                     }
-                    foreach ($sourceData as $cell) {
-                        if ($cell['data_type'] === 'f') {
-                            $issues[] = 'Formula cells require HRMO review; formulas are preserved and are not evaluated.';
-                            break;
-                        }
+                    if ($identity['hash'] && isset($seenIdentityHashes[$identity['hash']])) {
+                        $issues[] = 'The same source identity appears more than once in this workbook.';
+                    } elseif ($identity['hash']) {
+                        $seenIdentityHashes[$identity['hash']] = true;
                     }
-
                     $status = in_array('Duplicate employee reference number within this workbook.', $issues, true)
-                        || str_contains(implode(' ', $issues), 'already exists')
+                        || in_array('The same source identity appears more than once in this workbook.', $issues, true)
+                        || $existingEmployee?->trashed()
+                        || $existingEmployee?->user?->role === 'admin'
                         ? 'duplicate'
-                        : ($issues ? 'needs_review' : 'pending_review');
+                        : ($issues
+                            ? 'needs_review'
+                            : ($existingEmployee ? 'existing_to_update' : 'unvalidated'));
                     $duplicateCount += $status === 'duplicate' ? 1 : 0;
                     $reviewCount += $status === 'needs_review' ? 1 : 0;
                     EmployeeImportRow::create([
                         'employee_import_id' => $import->id,
-                        'source_row' => $rowNumber,
+                        'source_row' => $sourceRow['source_row'],
                         'source_data' => $sourceData,
+                        'review_data' => [
+                            'identity' => $identity,
+                            'classification' => [
+                                'action' => $existingEmployee ? 'update' : 'create',
+                                'account_action' => $existingEmployee?->user_id ? 'existing' : 'create',
+                            ],
+                        ],
                         'issues' => $issues ?: null,
                         'status' => $status,
                     ]);
@@ -182,26 +184,344 @@ class EmployeeWorkbookImportService
         } catch (\Throwable $exception) {
             Storage::disk('local')->delete($filePath);
             throw $exception;
-        } finally {
-            $spreadsheet->disconnectWorksheets();
         }
 
         return $import->fresh('rows');
     }
 
+    private function analyzeWorkbook(\PhpOffice\PhpSpreadsheet\Spreadsheet $spreadsheet): array
+    {
+        $sheets = $spreadsheet->getAllSheets();
+        $worksheetNames = array_map(fn ($sheet) => $sheet->getTitle(), $sheets);
+        usort($sheets, fn ($left, $right) => (
+            $this->normalizeMatchValue($right->getTitle()) === 'PLANTILLA'
+        ) <=> (
+            $this->normalizeMatchValue($left->getTitle()) === 'PLANTILLA'
+        ));
+
+        $detected = null;
+        foreach ($sheets as $sheet) {
+            $bounds = $this->worksheetBounds($sheet);
+            if ($bounds['max_row'] < 2) {
+                continue;
+            }
+            for ($headerRow = 1; $headerRow <= min(self::HEADER_SCAN_ROWS, $bounds['max_row']); $headerRow++) {
+                $labels = [];
+                for ($column = 1; $column <= $bounds['max_column']; $column++) {
+                    $labels[] = $this->normalizeHeader((string) $sheet->getCell([$column, $headerRow])->getFormattedValue());
+                }
+                $labelSet = array_unique($labels);
+                $isPlantilla = count(array_diff([
+                    'ORGANIZATIONAL UNIT',
+                    'ITEM NUMBER',
+                    'POSITION TITLE',
+                    'LAST NAME',
+                    'FIRST NAME',
+                    'MIDDLE NAME',
+                ], $labelSet)) === 0;
+                $isLegacy = count(array_diff(['NO.', 'NAME', 'LATEST POSITION'], $labelSet)) === 0
+                    && in_array('OFFICE', $labelSet, true);
+
+                if ($isPlantilla || $isLegacy) {
+                    $detected = [
+                        'sheet' => $sheet,
+                        'worksheet_name' => $sheet->getTitle(),
+                        'header_row' => $headerRow,
+                        'format' => $isPlantilla ? 'plantilla' : 'legacy',
+                        'bounds' => $bounds,
+                    ];
+                    break 2;
+                }
+            }
+        }
+
+        if (! $detected) {
+            throw ValidationException::withMessages([
+                'file' => 'No employee data worksheet was recognized. The workbook must contain a supported Plantilla or HRMO employee header row.',
+            ]);
+        }
+
+        $sheet = $detected['sheet'];
+        $bounds = $detected['bounds'];
+        if ($bounds['max_column'] > self::MAX_COLUMNS) {
+            throw ValidationException::withMessages([
+                'file' => 'The employee worksheet contains more than '.self::MAX_COLUMNS.' populated columns.',
+            ]);
+        }
+        if ($bounds['max_row'] - $detected['header_row'] > self::MAX_WORKSHEET_ROWS) {
+            throw ValidationException::withMessages([
+                'file' => 'The employee worksheet exceeds the configured row scan limit.',
+            ]);
+        }
+
+        $headers = [];
+        $headerNames = [];
+        for ($column = 1; $column <= $bounds['max_column']; $column++) {
+            $value = trim((string) $sheet->getCell([$column, $detected['header_row']])->getFormattedValue());
+            $label = $value === '' ? null : $value;
+            $canonicalLabel = $label === null ? null : $this->canonicalHeader($label);
+            $headers[] = [
+                'index' => $column,
+                'letter' => Coordinate::stringFromColumnIndex($column),
+                'label' => $label,
+                'canonical_label' => $canonicalLabel,
+                'display_label' => $label ?? 'Unnamed column '.Coordinate::stringFromColumnIndex($column),
+            ];
+            if ($canonicalLabel !== null) {
+                $headerNames[] = $canonicalLabel;
+            }
+        }
+
+        $headerCounts = array_count_values($headerNames);
+        if ($detected['format'] === 'plantilla') {
+            $requiredHeaders = [
+                'OFFICE', 'ITEM NUMBER', 'LATEST POSITION', 'LAST NAME', 'FIRST NAME',
+                'MIDDLE NAME', 'GENDER', 'BDATE', 'STATUS',
+            ];
+            $missingHeaders = array_values(array_filter(
+                $requiredHeaders,
+                fn (string $required) => ! isset($headerCounts[$required])
+            ));
+            if ($missingHeaders) {
+                throw ValidationException::withMessages([
+                    'file' => 'The PLANTILLA worksheet is missing required columns: '.implode(', ', $missingHeaders).'.',
+                ]);
+            }
+        } else {
+            $requiredHeaders = [
+                'NO.', 'NAME', 'POSITION LEVEL', 'BDATE', 'CAT', 'GENDER',
+                'NATURE OF APPOINTMENT', 'LATEST POSITION', '1ST POSITION',
+                '2ND POSITION', '3RD POSITION', '4TH POSITION', 'DATE APPOINTED (1ST)',
+                'DATE APPOINTED (2ND)', 'DATE APPOINTED (3RD)', 'DATE APPOINTED (4TH)',
+                'LATEST DATE APPOINTED', 'ELIGIBILITY/PERCENT', 'LICENSE- DATE EXPIRATION',
+                'EDUCATIONAL ATTAINMENT', 'YEARS IN SERVICE',
+                'EXPECTED DATE OF MANDATORY RETIREMENT', 'AGE',
+            ];
+            $missingHeaders = array_values(array_filter(
+                $requiredHeaders,
+                fn (string $required) => ! isset($headerCounts[$this->canonicalHeader($required)])
+            ));
+            if ($missingHeaders || ($headerCounts['OFFICE'] ?? 0) < 1 || ($headerCounts['YEARS IN SERVICE'] ?? 0) < 2) {
+                throw ValidationException::withMessages([
+                    'file' => 'The HRMO employee worksheet is missing required headings such as employee number, name, OFFICE, or appointment history.',
+                ]);
+            }
+        }
+
+        $rows = [];
+        $sourceRowCount = max(0, $bounds['max_row'] - $detected['header_row']);
+        for ($rowNumber = $detected['header_row'] + 1; $rowNumber <= $bounds['max_row']; $rowNumber++) {
+            $sourceData = [];
+            $hasValue = false;
+            foreach ($headers as $header) {
+                $cell = $sheet->getCell([$header['index'], $rowNumber]);
+                $raw = $cell->getValue();
+                $isFormula = $cell->getDataType() === 'f';
+                $calculationError = false;
+                if ($isFormula) {
+                    try {
+                        $value = $cell->getCalculatedValue();
+                        $display = (string) $cell->getFormattedValue();
+                    } catch (\Throwable) {
+                        $value = $cell->getOldCalculatedValue();
+                        $display = $value === null ? (string) $raw : (string) $value;
+                        $calculationError = true;
+                    }
+                } else {
+                    $value = $raw;
+                    $display = (string) $cell->getFormattedValue();
+                }
+                $value = is_scalar($value) || $value === null ? $value : (string) $value;
+                $hasValue = $hasValue || trim($display) !== '';
+                $sourceData[] = [
+                    'column' => $header['letter'],
+                    'header' => $header['label'],
+                    'canonical_header' => $header['canonical_label'],
+                    'value' => $value,
+                    'display_value' => $display,
+                    'data_type' => $cell->getDataType(),
+                    'formula' => $isFormula ? (string) $raw : null,
+                    'formula_error' => $calculationError,
+                    'number_format' => $cell->getStyle()->getNumberFormat()->getFormatCode(),
+                ];
+            }
+
+            if (! $hasValue) {
+                continue;
+            }
+            if ($detected['format'] === 'plantilla'
+                && (trim((string) ($this->cellByHeader($sourceData, 'LAST NAME')['display_value'] ?? '')) === ''
+                    || trim((string) ($this->cellByHeader($sourceData, 'FIRST NAME')['display_value'] ?? '')) === '')) {
+                continue;
+            }
+
+            $rows[] = ['source_row' => $rowNumber, 'data' => $sourceData];
+        }
+        if (count($rows) > self::MAX_ROWS) {
+            throw ValidationException::withMessages([
+                'file' => 'The employee worksheet contains more than '.self::MAX_ROWS.' occupied employee records.',
+            ]);
+        }
+        if ($rows === []) {
+            throw ValidationException::withMessages(['file' => 'No occupied employee records with complete names were found in the recognized worksheet.']);
+        }
+
+        if ($detected['format'] === 'plantilla') {
+            $rows = $this->attachPlantillaIdentity($rows);
+        } else {
+            $rows = array_map(fn (array $row) => [
+                ...$row,
+                'identity' => ['hash' => null, 'type' => null, 'item_number' => null, 'error' => null],
+            ], $rows);
+        }
+
+        return [
+            'format' => $detected['format'],
+            'worksheet_name' => $detected['worksheet_name'],
+            'worksheet_names' => $worksheetNames,
+            'header_row' => $detected['header_row'],
+            'headers' => $headers,
+            'rows' => $rows,
+            'source_row_count' => $sourceRowCount,
+            'excluded_rows_count' => max(0, $sourceRowCount - count($rows)),
+        ];
+    }
+
+    private function worksheetBounds($sheet): array
+    {
+        $maxRow = 0;
+        $maxColumn = 0;
+        foreach ($sheet->getCellCollection()->getCoordinates() as $coordinate) {
+            $cell = $sheet->getCell($coordinate);
+            $value = $cell->getValue();
+            if ($value === null || (is_string($value) && trim($value) === '')) {
+                continue;
+            }
+            [$columnName, $row] = Coordinate::coordinateFromString($coordinate);
+            $maxRow = max($maxRow, (int) $row);
+            $maxColumn = max($maxColumn, Coordinate::columnIndexFromString($columnName));
+        }
+
+        return ['max_row' => $maxRow, 'max_column' => $maxColumn];
+    }
+
+    private function normalizeHeader(string $header): string
+    {
+        $header = mb_strtoupper(preg_replace('/\s+/', ' ', trim($header)));
+
+        return trim((string) preg_replace('/\s*\(\s*\d+\s*\)\s*$/', '', $header));
+    }
+
+    private function canonicalHeader(string $header): string
+    {
+        return match ($this->normalizeHeader($header)) {
+            'ORGANIZATIONAL UNIT' => 'OFFICE',
+            'POSITION TITLE' => 'LATEST POSITION',
+            'LEVEL' => 'POSITION LEVEL',
+            'DATE OF BIRTH' => 'BDATE',
+            'BIRTHDATE' => 'BDATE',
+            'SEX' => 'GENDER',
+            'EDUCATIONAL LEVEL' => 'EDUCATIONAL ATTAINMENT',
+            'ELIGIBILITY/IES' => 'ELIGIBILITY/PERCENT',
+            default => $this->normalizeHeader($header),
+        };
+    }
+
+    private function attachPlantillaIdentity(array $rows): array
+    {
+        $identifierCounts = ['GSIS BP NUMBER' => [], 'TIN' => []];
+        foreach ($rows as $row) {
+            foreach (array_keys($identifierCounts) as $header) {
+                $value = $this->normalizeIdentifier((string) ($this->cellByHeader($row['data'], $header)['display_value'] ?? ''));
+                if ($value !== '') {
+                    $identifierCounts[$header][$value] = ($identifierCounts[$header][$value] ?? 0) + 1;
+                }
+            }
+        }
+
+        foreach ($rows as &$row) {
+            $data = $row['data'];
+            $gsis = $this->normalizeIdentifier((string) ($this->cellByHeader($data, 'GSIS BP NUMBER')['display_value'] ?? ''));
+            $tin = $this->normalizeIdentifier((string) ($this->cellByHeader($data, 'TIN')['display_value'] ?? ''));
+            $itemNumber = trim((string) ($this->cellByHeader($data, 'ITEM NUMBER')['display_value'] ?? ''));
+            $lastName = $this->normalizeMatchValue((string) ($this->cellByHeader($data, 'LAST NAME')['display_value'] ?? ''));
+            $firstName = $this->normalizeMatchValue((string) ($this->cellByHeader($data, 'FIRST NAME')['display_value'] ?? ''));
+            $middleName = $this->normalizeMatchValue((string) ($this->cellByHeader($data, 'MIDDLE NAME')['display_value'] ?? ''));
+            $birthDate = $this->dateValue($this->cellByHeader($data, 'BDATE'));
+
+            $identityType = null;
+            $identityValue = null;
+            if ($gsis !== '' && ($identifierCounts['GSIS BP NUMBER'][$gsis] ?? 0) === 1) {
+                $identityType = 'gsis_bp';
+                $identityValue = 'GSIS:'.$gsis;
+            } elseif ($tin !== '' && ($identifierCounts['TIN'][$tin] ?? 0) === 1) {
+                $identityType = 'tin';
+                $identityValue = 'TIN:'.$tin;
+            } elseif ($itemNumber !== '') {
+                $identityType = $birthDate ? 'item_name_dob' : 'item_name';
+                $identityValue = implode(':', [
+                    'PLANTILLA',
+                    $this->normalizeMatchValue($itemNumber),
+                    $lastName,
+                    $firstName,
+                    $middleName,
+                    $birthDate ?? '',
+                ]);
+            }
+
+            $identity = [
+                'hash' => $identityValue === null
+                    ? null
+                    : hash_hmac('sha256', $identityValue, (string) config('app.key')),
+                'type' => $identityType,
+                'item_number' => $itemNumber ?: null,
+                'error' => $identityValue === null
+                    ? 'A plantilla item number is missing, so a safe re-import identity cannot be generated.'
+                    : null,
+            ];
+            $row['identity'] = $identity;
+        }
+        unset($row);
+
+        return $rows;
+    }
+
+    private function normalizeIdentifier(string $value): string
+    {
+        $normalized = $this->normalizeMatchValue($value);
+
+        return in_array($normalized, ['', 'NONE', 'NA', 'NOTAPPLICABLE', '0'], true) ? '' : $normalized;
+    }
+
     public function availableOfficeColumns(EmployeeImport $import): array
     {
         return collect($import->source_headers)
-            ->filter(fn (array $header) => mb_strtoupper(trim((string) $header['label'])) === 'OFFICE')
+            ->filter(fn (array $header) => ($header['canonical_label'] ?? $this->canonicalHeader((string) ($header['label'] ?? ''))) === 'OFFICE')
             ->values()
             ->all();
+    }
+
+    public function suggestedOfficeColumn(EmployeeImport $import): ?int
+    {
+        $rows = $import->rows()->get();
+
+        return collect($this->availableOfficeColumns($import))
+            ->map(function (array $header) use ($rows) {
+                $filled = $rows->filter(
+                    fn (EmployeeImportRow $row) => trim((string) ($this->cellByColumn($row->source_data, $header['index'])['display_value'] ?? '')) !== ''
+                )->count();
+
+                return ['index' => (int) $header['index'], 'filled' => $filled];
+            })
+            ->sortByDesc('filled')
+            ->first()['index'] ?? null;
     }
 
     public function ambiguousColumns(EmployeeImport $import): array
     {
         return collect($import->source_headers)
             ->filter(fn (array $header) => $header['label'] === null
-                || mb_strtoupper(trim((string) $header['label'])) === 'OFFICE')
+                || ($header['canonical_label'] ?? $this->canonicalHeader((string) ($header['label'] ?? ''))) === 'OFFICE')
             ->values()
             ->all();
     }
@@ -231,9 +551,194 @@ class EmployeeWorkbookImportService
             ->values();
     }
 
+    public function suggestedDepartmentMap(EmployeeImport $import, int $officeColumn): array
+    {
+        $departments = Department::query()->where('is_active', true)->get();
+        $aliases = collect(config('hris.employee_import.department_aliases', []))
+            ->mapWithKeys(fn (string $target, string $alias) => [$this->normalizeMatchValue($alias) => $target]);
+
+        return $this->officeValues($import, $officeColumn)->mapWithKeys(function (string $office) use ($departments, $aliases) {
+            $lookup = $aliases->get($this->normalizeMatchValue($office), $office);
+            $normalized = $this->normalizeMatchValue($lookup);
+            $officeNormalized = $this->normalizeMatchValue($office);
+            $matches = $departments->filter(fn (Department $department) => $this->normalizeMatchValue($department->code ?? '') === $normalized
+                || $this->normalizeMatchValue($department->name) === $normalized
+                || collect($department->aliases ?? [])->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $officeNormalized));
+
+            return $matches->count() === 1
+                ? [hash('sha256', $office) => $matches->first()->id]
+                : [];
+        })->all();
+    }
+
+    public function suggestedPositionMap(EmployeeImport $import, int $officeColumn, array $departmentMap): array
+    {
+        $positions = Position::query()->where('is_active', true)->get();
+
+        return $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($positions, $departmentMap) {
+            $departmentId = $departmentMap[hash('sha256', $pair['office'])] ?? null;
+            $normalizedTitle = $this->normalizeMatchValue($pair['position']);
+            $candidates = $positions->filter(fn (Position $position) => (
+                $this->normalizeMatchValue($position->title) === $normalizedTitle
+                || collect($position->aliases ?? [])->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalizedTitle)
+            ) && ($position->department_id === null || (int) $position->department_id === (int) $departmentId));
+
+            if ($departmentId && $candidates->where('department_id', $departmentId)->count() === 1) {
+                $candidates = $candidates->where('department_id', $departmentId);
+            }
+
+            $key = hash('sha256', $pair['office']."\0".$pair['position']);
+
+            return $candidates->count() === 1 ? [$key => $candidates->first()->id] : [];
+        })->all();
+    }
+
+    public function departmentSuggestions(string $office): array
+    {
+        $normalized = $this->normalizeMatchValue($office);
+        if ($normalized === '') {
+            return [];
+        }
+
+        return Department::query()->where('is_active', true)->get()
+            ->map(function (Department $department) use ($normalized) {
+                $score = collect([$department->name, $department->code, ...($department->aliases ?? [])])
+                    ->filter()
+                    ->map(fn (string $candidate) => $this->matchScore($normalized, $candidate))
+                    ->max() ?? 0;
+
+                return ['id' => $department->id, 'name' => $department->name, 'code' => $department->code, 'score' => $score];
+            })
+            ->filter(fn (array $candidate) => $candidate['score'] >= 50)
+            ->sortByDesc('score')
+            ->take(3)
+            ->values()
+            ->all();
+    }
+
+    public function positionSuggestions(string $title, ?int $departmentId): array
+    {
+        $normalized = $this->normalizeMatchValue($title);
+        if ($normalized === '') {
+            return [];
+        }
+
+        return Position::query()->where('is_active', true)
+            ->where(function ($query) use ($departmentId) {
+                $query->whereNull('department_id');
+                if ($departmentId) {
+                    $query->orWhere('department_id', $departmentId);
+                }
+            })->get()
+            ->map(function (Position $position) use ($normalized) {
+                $score = collect([$position->title, ...($position->aliases ?? [])])
+                    ->map(fn (string $candidate) => $this->matchScore($normalized, $candidate))
+                    ->max() ?? 0;
+
+                return ['id' => $position->id, 'title' => $position->title, 'score' => $score];
+            })
+            ->filter(fn (array $candidate) => $candidate['score'] >= 55)
+            ->sortByDesc('score')
+            ->take(3)
+            ->values()
+            ->all();
+    }
+
+    public function mappingSummary(EmployeeImport $import, ?int $officeColumn): array
+    {
+        if (! $officeColumn) {
+            return [
+                'departments' => collect(),
+                'positions' => collect(),
+                'department_map' => [],
+                'position_map' => [],
+                'department_suggestions' => [],
+                'position_suggestions' => [],
+            ];
+        }
+
+        $departmentMap = array_replace(
+            $this->suggestedDepartmentMap($import, $officeColumn),
+            $import->field_mappings['department_map'] ?? []
+        );
+        $positionMap = array_replace(
+            $this->suggestedPositionMap($import, $officeColumn, $departmentMap),
+            $import->field_mappings['position_map'] ?? []
+        );
+        $departmentSuggestions = $this->officeValues($import, $officeColumn)->mapWithKeys(
+            fn (string $office) => [hash('sha256', $office) => $this->departmentSuggestions($office)]
+        )->all();
+        $positionSuggestions = $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($departmentMap) {
+            $departmentId = filter_var(
+                $departmentMap[hash('sha256', $pair['office'])] ?? null,
+                FILTER_VALIDATE_INT
+            );
+            $key = hash('sha256', $pair['office']."\0".$pair['position']);
+
+            return [$key => $this->positionSuggestions($pair['position'], $departmentId ?: null)];
+        })->all();
+
+        return [
+            'departments' => $this->officeValues($import, $officeColumn)
+                ->filter(fn (string $office) => empty($departmentMap[hash('sha256', $office)]))
+                ->values(),
+            'positions' => $this->positionPairs($import, $officeColumn)
+                ->filter(fn (array $pair) => empty($positionMap[hash('sha256', $pair['office']."\0".$pair['position'])]))
+                ->values(),
+            'department_map' => $departmentMap,
+            'position_map' => $positionMap,
+            'department_suggestions' => $departmentSuggestions,
+            'position_suggestions' => $positionSuggestions,
+        ];
+    }
+
+    public function importSummary(EmployeeImport $import, ?int $officeColumn): array
+    {
+        $rows = $import->rows()->get();
+        $mappingSummary = $this->mappingSummary($import, $officeColumn);
+        $mappedDepartments = count(array_unique(array_values($mappingSummary['department_map'])));
+        $mappedPositions = count(array_unique(array_values($mappingSummary['position_map'])));
+        $readyNew = $rows->where('status', 'ready')->count();
+        $readyUpdates = $rows->where('status', 'ready_to_update')->count();
+
+        $validatedRows = $rows->whereIn('status', ['ready', 'ready_to_update']);
+
+        return [
+            'total' => $import->row_count,
+            'valid' => $validatedRows->count(),
+            'ready_new' => $readyNew,
+            'ready_updates' => $readyUpdates,
+            'new_records' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['action'] ?? 'create') === 'create'
+                && ! in_array($row->status, ['duplicate', 'failed'], true))->count(),
+            'accounts_to_create' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['account_action'] ?? 'create') === 'create'
+                && in_array($row->status, ['unvalidated', 'existing_to_update', 'ready', 'ready_to_update'], true))->count(),
+            'existing_to_update' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['action'] ?? null) === 'update'
+                && ! in_array($row->status, ['duplicate', 'failed'], true))->count(),
+            'imported' => $rows->where('status', 'imported')->count(),
+            'updated' => $rows->where('status', 'updated')->count(),
+            'accounts_created' => (int) $import->accounts_created_count,
+            'failed' => $rows->where('status', 'failed')->count(),
+            'office_heads' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['role'] ?? null) === 'office_head')->count(),
+            'employees' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['role'] ?? 'employee') === 'employee'
+                && $row->status !== 'duplicate')->count(),
+            'departments' => $officeColumn ? $this->officeValues($import, $officeColumn)->count() : 0,
+            'matched_positions' => $mappedPositions,
+            'unmatched_departments' => $mappingSummary['departments'],
+            'unmatched_positions' => $mappingSummary['positions'],
+            'duplicates' => $rows->where('status', 'duplicate')->count(),
+            'corrections' => $rows->where('status', 'needs_review')->count(),
+            'matched_departments' => $mappedDepartments,
+        ];
+    }
+
     public function saveMapping(EmployeeImport $import, array $mapping, int $userId): void
     {
-        if (! in_array($import->status, ['pending_review', 'mapping_approved', 'review_required'], true)) {
+        DB::transaction(fn () => $this->persistMapping($import, $mapping, $userId));
+    }
+
+    private function persistMapping(EmployeeImport $import, array $mapping, int $userId): void
+    {
+        if (! in_array($import->status, ['mapping_required', 'ready_for_import', 'completed_with_errors', 'failed', 'pending_review', 'mapping_approved', 'review_required'], true)) {
             throw ValidationException::withMessages(['mapping' => 'Mappings can only be changed while an import is awaiting review.']);
         }
         $officeColumn = (int) ($mapping['office_source_column'] ?? 0);
@@ -241,65 +746,62 @@ class EmployeeWorkbookImportService
         if (! in_array($officeColumn, $officeColumns, true)) {
             throw ValidationException::withMessages(['office_source_column' => 'Choose one of the source OFFICE columns.']);
         }
-        if (! in_array($mapping['name_format'] ?? null, ['surname_comma_given', 'given_middle_surname'], true)) {
-            throw ValidationException::withMessages(['name_format' => 'Select the employee-name format used in the workbook.']);
+        $employmentStatus = $mapping['employment_status'] ?? 'Active';
+        if (! in_array($employmentStatus, ['Active', 'On Leave', 'Separated', 'Retired'], true)) {
+            throw ValidationException::withMessages(['employment_status' => 'Select a supported employment status.']);
         }
-        if (! in_array($mapping['employment_status'] ?? null, ['Active', 'On Leave', 'Separated', 'Retired'], true)) {
-            throw ValidationException::withMessages(['employment_status' => 'Select the employment status HRMO has verified for these records.']);
-        }
-        $dateSourceColumn = isset($mapping['date_source_column']) && $mapping['date_source_column'] !== ''
-            ? (int) $mapping['date_source_column']
-            : null;
-        $dateTarget = $mapping['date_target'] ?? 'source_only';
-        $dateTargetFields = ['source_only', 'date_of_birth', 'date_hired', 'license_expiration_date', 'expected_retirement_date'];
-        if (! in_array($dateTarget, $dateTargetFields, true)) {
-            throw ValidationException::withMessages(['date_target' => 'Choose a supported date field or retain the source value only.']);
-        }
-        $blankColumns = collect($this->ambiguousColumns($import))
-            ->filter(fn (array $header) => $header['label'] === null)
-            ->pluck('index')->all();
-        if ($dateTarget !== 'source_only' && ! in_array($dateSourceColumn, $blankColumns, true)) {
-            throw ValidationException::withMessages(['date_source_column' => 'Choose an unnamed source column before mapping its date.']);
-        }
-
-        $departments = $mapping['department_map'] ?? [];
+        $departments = array_replace(
+            $this->suggestedDepartmentMap($import, $officeColumn),
+            $mapping['department_map'] ?? []
+        );
         foreach ($this->officeValues($import, $officeColumn) as $value) {
             $key = hash('sha256', $value);
-            $departmentId = filter_var($departments[$key] ?? null, FILTER_VALIDATE_INT);
+            $selectedDepartment = $departments[$key] ?? null;
+            if ($selectedDepartment === 'create') {
+                $department = $this->createDepartmentFromOffice($value);
+                $departments[$key] = $department->id;
+
+                continue;
+            }
+            $departmentId = filter_var($selectedDepartment, FILTER_VALIDATE_INT);
             $department = $departmentId ? Department::query()->where('is_active', true)->find($departmentId) : null;
             if (! $department) {
                 throw ValidationException::withMessages([
-                    "department_map.{$key}" => 'Map every source office value to an existing active department.',
+                    "department_map.{$key}" => "Select an existing department or confirm creating a department for \"{$value}\".",
                 ]);
             }
         }
 
-        $positions = $mapping['position_map'] ?? [];
+        $positions = array_replace(
+            $this->suggestedPositionMap($import, $officeColumn, $departments),
+            $mapping['position_map'] ?? []
+        );
         foreach ($this->positionPairs($import, $officeColumn) as $pair) {
             $key = hash('sha256', $pair['office']."\0".$pair['position']);
+            if (($positions[$key] ?? null) === 'create') {
+                $position = $this->createPositionFromSource($pair['position'], (int) $departments[hash('sha256', $pair['office'])]);
+                $positions[$key] = $position->id;
+
+                continue;
+            }
             $positionId = filter_var($positions[$key] ?? null, FILTER_VALIDATE_INT);
             $position = $positionId ? Position::query()->where('is_active', true)->find($positionId) : null;
             $departmentId = (int) $departments[hash('sha256', $pair['office'])];
-            if (! $position || ($position->department_id && $position->department_id !== $departmentId)) {
+            if (! $position || ($position->department_id && (int) $position->department_id !== $departmentId)) {
                 throw ValidationException::withMessages([
-                    "position_map.{$key}" => 'Map every latest-position value to an active position in its mapped department.',
+                    "position_map.{$key}" => "Select an existing position or confirm creating \"{$pair['position']}\" in its mapped department.",
                 ]);
             }
         }
 
         $approvedMapping = [
+            'source_format' => $this->normalizeMatchValue((string) $import->worksheet_name) === 'PLANTILLA'
+                ? 'plantilla'
+                : 'legacy',
             'office_source_column' => $officeColumn,
-            'name_format' => $mapping['name_format'],
-            'employment_status' => $mapping['employment_status'],
-            'date_source_column' => $dateSourceColumn,
-            'date_target' => $dateTarget,
-            'ambiguous_field_notes' => array_intersect_key(
-                $mapping['ambiguous_field_notes'] ?? [],
-                array_fill_keys(array_map(
-                    fn (array $header) => (string) $header['index'],
-                    $this->ambiguousColumns($import)
-                ), true)
-            ),
+            'employment_status' => $employmentStatus,
+            'date_source_column' => null,
+            'date_target' => 'source_only',
             'department_map' => array_intersect_key($departments, array_fill_keys(
                 $this->officeValues($import, $officeColumn)->map(fn (string $value) => hash('sha256', $value))->all(),
                 true
@@ -312,14 +814,15 @@ class EmployeeWorkbookImportService
 
         DB::transaction(function () use ($import, $approvedMapping, $userId) {
             $locked = EmployeeImport::query()->lockForUpdate()->findOrFail($import->id);
-            if (! in_array($locked->status, ['pending_review', 'mapping_approved', 'review_required'], true)) {
+            if (! in_array($locked->status, ['mapping_required', 'ready_for_import', 'completed_with_errors', 'failed', 'pending_review', 'mapping_approved', 'review_required'], true)) {
                 throw ValidationException::withMessages(['mapping' => 'This import is no longer available for mapping review.']);
             }
+            $this->persistApprovedAliases($import, $approvedMapping);
             $locked->update([
                 'field_mappings' => $approvedMapping,
                 'mapping_approved_by' => $userId,
                 'mapping_approved_at' => now(),
-                'status' => 'mapping_approved',
+                'status' => 'ready_for_import',
             ]);
             EmployeeImportMappingEvent::create([
                 'employee_import_id' => $locked->id,
@@ -330,84 +833,296 @@ class EmployeeWorkbookImportService
         });
     }
 
-    public function confirm(EmployeeImport $import, int $userId): EmployeeImport
+    private function persistApprovedAliases(EmployeeImport $import, array $mapping): void
     {
-        if (! in_array($import->status, ['mapping_approved', 'review_required'], true) || ! $import->field_mappings) {
-            throw ValidationException::withMessages(['mapping' => 'HRMO must review and approve all field mappings before import.']);
+        $officeColumn = (int) $mapping['office_source_column'];
+        foreach ($this->officeValues($import, $officeColumn) as $office) {
+            $departmentId = (int) $mapping['department_map'][hash('sha256', $office)];
+            $department = Department::query()->lockForUpdate()->findOrFail($departmentId);
+            $normalized = $this->normalizeMatchValue($office);
+            if ($normalized === $this->normalizeMatchValue($department->name)
+                || $normalized === $this->normalizeMatchValue($department->code ?? '')) {
+                continue;
+            }
+
+            $configuredTarget = collect(config('hris.employee_import.department_aliases', []))
+                ->first(fn (string $target, string $alias) => $this->normalizeMatchValue($alias) === $normalized);
+            $configuredDepartment = $configuredTarget
+                ? Department::query()->get()->first(fn (Department $candidate) => $this->normalizeMatchValue($candidate->name) === $this->normalizeMatchValue($configuredTarget)
+                    || $this->normalizeMatchValue($candidate->code ?? '') === $this->normalizeMatchValue($configuredTarget))
+                : null;
+            $conflict = ($configuredDepartment && (int) $configuredDepartment->id !== (int) $department->id)
+                || Department::query()->where('id', '!=', $department->id)->get()->contains(
+                fn (Department $candidate) => $this->normalizeMatchValue($candidate->name) === $normalized
+                    || $this->normalizeMatchValue($candidate->code ?? '') === $normalized
+                    || collect($candidate->aliases ?? [])->contains(
+                        fn (string $alias) => $this->normalizeMatchValue($alias) === $normalized
+                    )
+            );
+            if ($conflict) {
+                throw ValidationException::withMessages([
+                    'department_map' => "The office value \"{$office}\" conflicts with another department name or approved alias.",
+                ]);
+            }
+
+            $aliases = $department->aliases ?? [];
+            if (! collect($aliases)->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalized)) {
+                $aliases[] = $office;
+                $department->update(['aliases' => array_values($aliases)]);
+            }
         }
 
-        return DB::transaction(function () use ($import, $userId) {
+        foreach ($this->positionPairs($import, $officeColumn) as $pair) {
+            $key = hash('sha256', $pair['office']."\0".$pair['position']);
+            $position = Position::query()->lockForUpdate()->findOrFail((int) $mapping['position_map'][$key]);
+            $normalized = $this->normalizeMatchValue($pair['position']);
+            if ($normalized === $this->normalizeMatchValue($position->title)) {
+                continue;
+            }
+
+            $departmentId = (int) $mapping['department_map'][hash('sha256', $pair['office'])];
+            $conflict = Position::query()
+                ->where('id', '!=', $position->id)
+                ->where(function ($query) use ($departmentId, $position) {
+                    $query->whereNull('department_id')
+                        ->orWhere('department_id', $departmentId);
+                    if ($position->department_id === null) {
+                        $query->orWhereNotNull('department_id');
+                    }
+                })
+                ->get()
+                ->contains(fn (Position $candidate) => $this->normalizeMatchValue($candidate->title) === $normalized
+                    || collect($candidate->aliases ?? [])->contains(
+                        fn (string $alias) => $this->normalizeMatchValue($alias) === $normalized
+                    ));
+            if ($conflict) {
+                throw ValidationException::withMessages([
+                    'position_map' => "The source title \"{$pair['position']}\" conflicts with another position title or approved alias.",
+                ]);
+            }
+
+            $aliases = $position->aliases ?? [];
+            if (! collect($aliases)->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalized)) {
+                $aliases[] = $pair['position'];
+                $position->update(['aliases' => array_values($aliases)]);
+            }
+        }
+    }
+
+    public function confirm(EmployeeImport $import, int $userId): EmployeeImport
+    {
+        if (! in_array($import->status, ['ready_for_import', 'completed_with_errors', 'failed', 'mapping_approved', 'review_required'], true) || ! $import->field_mappings) {
+            throw ValidationException::withMessages(['mapping' => 'Select an OFFICE column, map its values and positions, and save the mappings before importing.']);
+        }
+        if ($import->status === 'failed' && $import->rows()->where('status', 'failed')->exists()) {
+            throw ValidationException::withMessages(['import' => 'Correct or remap the records that failed before retrying this batch.']);
+        }
+
+        $lockedForImport = DB::transaction(function () use ($import) {
             $lockedImport = EmployeeImport::query()->lockForUpdate()->findOrFail($import->id);
-            if (! in_array($lockedImport->status, ['mapping_approved', 'review_required'], true)
+            if (! in_array($lockedImport->status, ['ready_for_import', 'completed_with_errors', 'failed', 'mapping_approved', 'review_required'], true)
                 || ! $lockedImport->field_mappings || ! $lockedImport->previewed_at) {
                 throw ValidationException::withMessages(['import' => 'This workbook has already been processed or changed.']);
             }
 
-            $mapping = $lockedImport->field_mappings;
-            $imported = 0;
-            $skipped = $lockedImport->rows()->where('status', 'duplicate')->count();
-            $needsReview = 0;
-            foreach ($lockedImport->rows()->where('status', 'pending_review')->orderBy('source_row')->lockForUpdate()->get() as $row) {
-                $prepared = $this->prepareEmployeeData($row, $mapping);
-                if ($prepared['issues']) {
-                    $row->update(['status' => 'needs_review', 'issues' => $prepared['issues']]);
-                    $needsReview++;
+            $lockedImport->update(['status' => 'importing']);
 
-                    continue;
-                }
-                if (Employee::withTrashed()->where('employee_no', $prepared['employee']['employee_no'])->exists()) {
-                    $row->update([
-                        'status' => 'duplicate',
-                        'issues' => ['Employee reference number already exists; existing records were not changed.'],
-                    ]);
-                    $skipped++;
-
-                    continue;
-                }
-
-                $employee = Employee::create($prepared['employee']);
-                $prepared['profile']['employee_id'] = $employee->id;
-                $prepared['profile']['employee_import_id'] = $lockedImport->id;
-                $prepared['profile']['source_row'] = $row->source_row;
-                EmployeeServiceProfile::create($prepared['profile']);
-
-                foreach ($prepared['history'] as $history) {
-                    EmployeeEmploymentHistory::create([
-                        ...$history,
-                        'employee_id' => $employee->id,
-                        'employee_import_id' => $lockedImport->id,
-                        'source_row' => $row->source_row,
-                    ]);
-                }
-
-                $row->update(['employee_id' => $employee->id, 'status' => 'imported', 'issues' => null]);
-                $imported++;
-            }
-
-            $needsReview = $lockedImport->rows()->where('status', 'needs_review')->count();
-            $skipped = $lockedImport->rows()->where('status', 'duplicate')->count();
-            $lockedImport->update([
-                'status' => $needsReview ? 'review_required' : 'completed',
-                'confirmed_by' => $userId,
-                'confirmed_at' => now(),
-                'imported_count' => $lockedImport->imported_count + $imported,
-                'skipped_count' => $skipped,
-                'review_count' => $needsReview,
-            ]);
-
-            return $lockedImport->fresh();
+            return $lockedImport;
         });
+
+        try {
+            return DB::transaction(fn () => $this->importReadyRows($lockedForImport, $userId));
+        } catch (\Throwable $exception) {
+            EmployeeImportRow::query()
+                ->where('employee_import_id', $lockedForImport->id)
+                ->whereIn('status', ['ready', 'ready_to_update'])
+                ->get()
+                ->each(fn (EmployeeImportRow $row) => $row->update([
+                    'status' => 'failed',
+                    'issues' => ['The import transaction failed. Review the record and retry after correcting the cause.'],
+                ]));
+            EmployeeImport::query()->whereKey($lockedForImport->id)
+                ->where('status', 'importing')
+                ->update(['status' => 'failed']);
+            throw $exception;
+        }
     }
 
-    public function saveRowReview(EmployeeImport $import, EmployeeImportRow $row, array $name, int $userId): void
+    private function importReadyRows(EmployeeImport $import, int $userId): EmployeeImport
+    {
+        $lockedImport = EmployeeImport::query()->lockForUpdate()->findOrFail($import->id);
+        $mapping = $lockedImport->field_mappings;
+        foreach ($lockedImport->rows()->whereIn('status', ['ready', 'ready_to_update', 'pending_review'])->orderBy('source_row')->lockForUpdate()->get() as $row) {
+            $prepared = $this->prepareEmployeeData($row, $mapping);
+            if ($prepared['issues']) {
+                $row->update(['status' => 'needs_review', 'issues' => $prepared['issues']]);
+
+                continue;
+            }
+            $employeeQuery = Employee::withTrashed()->with('user')->lockForUpdate();
+            $employee = $prepared['existing_employee_id']
+                ? $employeeQuery->find($prepared['existing_employee_id'])
+                : $employeeQuery->whereRaw('LOWER(employee_no) = ?', [mb_strtolower((string) $prepared['employee']['employee_no'])])->first();
+            if ($employee?->trashed()) {
+                $row->update([
+                    'status' => 'duplicate',
+                    'issues' => ['An archived employee already uses this employee number. The archived record was not changed.'],
+                ]);
+
+                continue;
+            }
+            if ($employee?->user?->role === 'admin') {
+                $row->update([
+                    'status' => 'duplicate',
+                    'issues' => ['This employee number belongs to a protected Admin account. The employee and account were not changed.'],
+                ]);
+
+                continue;
+            }
+
+            $isExisting = $employee !== null;
+            $previousDepartmentId = $employee?->department_id;
+            $existingUser = $employee?->user;
+            $effectiveRole = $existingUser?->role ?? $prepared['role'];
+            $targetDepartment = null;
+            if ($effectiveRole === 'office_head') {
+                $targetDepartment = Department::query()
+                    ->whereKey($prepared['employee']['department_id'])
+                    ->lockForUpdate()
+                    ->firstOrFail();
+                if ($targetDepartment->head_user_id
+                    && (int) $targetDepartment->head_user_id !== (int) ($existingUser?->id ?? 0)) {
+                    $row->update([
+                        'status' => 'needs_review',
+                        'issues' => ['This department has another assigned Office Head. Resolve the assignment before importing.'],
+                    ]);
+
+                    continue;
+                }
+            }
+            $employeeData = $prepared['employee'];
+            if (! $prepared['employment_status_from_source'] && $isExisting) {
+                unset($employeeData['employment_status']);
+            }
+            if ($isExisting) {
+                unset($employeeData['employee_no']);
+                $employeeData = array_filter($employeeData, fn ($value) => $value !== null && $value !== '');
+                $employee->update($employeeData);
+                $employee->refresh();
+            } else {
+                if (! $employeeData['employee_no']) {
+                    $employeeData['employee_no'] = $this->generateInternalEmployeeNumber();
+                }
+                $employee = Employee::create($employeeData);
+            }
+
+            $user = $employee->user;
+            $accountCreated = false;
+            if (! $user) {
+                $user = User::create([
+                    'name' => $employee->full_name,
+                    'username' => $this->usernameGenerator->generate($employee->full_name, $employee->employee_no),
+                    'email' => $prepared['employee']['email'],
+                    'password' => Str::random(64),
+                    'must_change_password' => true,
+                    'account_setup_completed' => false,
+                    'role' => $prepared['role'],
+                    'is_active' => true,
+                    'can_final_approve' => false,
+                ]);
+                $employee->update(['user_id' => $user->id]);
+                $accountCreated = true;
+            } else {
+                $user->update(['name' => $employee->full_name]);
+            }
+
+            if ($user->role === 'office_head') {
+                if ($previousDepartmentId && (int) $previousDepartmentId !== (int) $employee->department_id) {
+                    Department::query()->whereKey($previousDepartmentId)
+                        ->where('head_user_id', $user->id)
+                        ->update(['head_user_id' => null]);
+                }
+                $targetDepartment?->update(['head_user_id' => $user->id]);
+            }
+
+            $prepared['profile']['employee_id'] = $employee->id;
+            $prepared['profile']['employee_import_id'] = $lockedImport->id;
+            $prepared['profile']['source_row'] = $row->source_row;
+            if ($isExisting) {
+                $profileData = array_filter($prepared['profile'], fn ($value) => $value !== null && $value !== '');
+                EmployeeServiceProfile::updateOrCreate(
+                    ['employee_id' => $employee->id],
+                    $profileData
+                );
+            } else {
+                EmployeeServiceProfile::create($prepared['profile']);
+            }
+
+            foreach ($prepared['history'] as $history) {
+                $historyData = [
+                    ...$history,
+                    'employee_id' => $employee->id,
+                    'employee_import_id' => $lockedImport->id,
+                    'source_row' => $row->source_row,
+                ];
+                $existingHistory = $isExisting
+                    ? EmployeeEmploymentHistory::query()
+                        ->where('employee_id', $employee->id)
+                        ->where('sequence', $history['sequence'])
+                        ->first()
+                    : null;
+                if ($existingHistory && ! $existingHistory->employee_import_id) {
+                    continue;
+                }
+                if ($existingHistory) {
+                    $existingHistory->update($historyData);
+                } else {
+                    EmployeeEmploymentHistory::create($historyData);
+                }
+            }
+
+            $resultData = array_replace($row->review_data ?? [], [
+                'import_result' => [
+                    'action' => $isExisting ? 'updated' : 'created',
+                    'account_created' => $accountCreated,
+                ],
+            ]);
+            $row->update([
+                'employee_id' => $employee->id,
+                'review_data' => $resultData,
+                'status' => $isExisting ? 'updated' : 'imported',
+                'issues' => null,
+            ]);
+        }
+
+        $needsReview = $lockedImport->rows()->where('status', 'needs_review')->count();
+        $skipped = $lockedImport->rows()->where('status', 'duplicate')->count();
+        $lockedImport->update([
+            'status' => $needsReview ? 'completed_with_errors' : 'completed',
+            'confirmed_by' => $userId,
+            'confirmed_at' => now(),
+            'imported_count' => $lockedImport->rows()->where('status', 'imported')->count(),
+            'updated_count' => $lockedImport->rows()->where('status', 'updated')->count(),
+            'accounts_created_count' => $lockedImport->rows()->whereIn('status', ['imported', 'updated'])
+                ->get()
+                ->filter(fn (EmployeeImportRow $row) => $row->review_data['import_result']['account_created'] ?? false)
+                ->count(),
+            'skipped_count' => $skipped,
+            'review_count' => $needsReview,
+        ]);
+
+        return $lockedImport->fresh();
+    }
+
+    public function saveRowReview(EmployeeImport $import, EmployeeImportRow $row, array $correction, int $userId): void
     {
         if ($row->employee_import_id !== $import->id || $row->status === 'duplicate' || $row->status === 'imported') {
             throw ValidationException::withMessages(['row' => 'This source row cannot be edited in its current state.']);
         }
 
-        DB::transaction(function () use ($import, $row, $name, $userId) {
+        DB::transaction(function () use ($import, $row, $correction, $userId) {
             $lockedImport = EmployeeImport::query()->lockForUpdate()->findOrFail($import->id);
-            if (! in_array($lockedImport->status, ['pending_review', 'mapping_approved', 'review_required'], true)) {
+            if (! in_array($lockedImport->status, ['mapping_required', 'ready_for_import', 'completed_with_errors', 'failed', 'pending_review', 'mapping_approved', 'review_required'], true)) {
                 throw ValidationException::withMessages(['row' => 'Rows can only be reviewed before the import is complete.']);
             }
             $lockedRow = EmployeeImportRow::query()
@@ -418,10 +1133,14 @@ class EmployeeWorkbookImportService
                 throw ValidationException::withMessages(['row' => 'This source row cannot be edited in its current state.']);
             }
             $lockedRow->update([
-                'review_data' => ['name' => $name],
+                'review_data' => array_replace($lockedRow->review_data ?? [], array_filter([
+                    'name' => $correction['name'] ?? null,
+                    'employee' => array_filter($correction['employee'] ?? [], fn ($value) => $value !== null && $value !== ''),
+                    'profile' => array_filter($correction['profile'] ?? [], fn ($value) => $value !== null && $value !== ''),
+                ], fn ($value) => $value !== null && $value !== [])),
                 'reviewed_by' => $userId,
                 'reviewed_at' => now(),
-                'status' => 'pending_review',
+                'status' => 'ready',
                 'issues' => null,
             ]);
             if ($lockedImport->field_mappings) {
@@ -437,57 +1156,143 @@ class EmployeeWorkbookImportService
             throw ValidationException::withMessages(['mapping' => 'Approve source mappings before previewing rows.']);
         }
 
+        $rows = $import->rows()->whereNotIn('status', ['duplicate', 'imported', 'updated'])->orderBy('source_row')->lockForUpdate()->get();
+        $preparedRows = $rows->mapWithKeys(fn (EmployeeImportRow $row) => [$row->id => $this->prepareEmployeeData($row, $mapping)]);
+        $emailCounts = $preparedRows->pluck('employee.email')->filter()->countBy();
         $needsReview = 0;
-        foreach ($import->rows()->whereNotIn('status', ['duplicate', 'imported'])->orderBy('source_row')->lockForUpdate()->get() as $row) {
-            $issues = $this->prepareEmployeeData($row, $mapping)['issues'];
+        foreach ($rows as $row) {
+            $prepared = $preparedRows[$row->id];
+            $issues = $prepared['issues'];
+            $email = $prepared['employee']['email'];
+            if ($email && $emailCounts[$email] > 1) {
+                $issues[] = 'This email address appears more than once in the workbook.';
+            }
             $needsReview += $issues ? 1 : 0;
+            $row->update(['review_data' => array_replace($row->review_data ?? [], [
+                'classification' => [
+                    'action' => $prepared['existing_employee_id'] ? 'update' : 'create',
+                    'account_action' => $prepared['account_action'],
+                    'role' => $prepared['role'],
+                    'department' => $prepared['department_name'],
+                    'position' => $prepared['position_title'],
+                    'possible_name_matches' => $prepared['possible_name_matches'],
+                    'identity_type' => $prepared['identity_type'],
+                    'plantilla_item_no' => $prepared['plantilla_item_no'],
+                ],
+            ])]);
             $row->update([
-                'status' => $issues ? 'needs_review' : 'pending_review',
-                'issues' => $issues ?: null,
+                'status' => $issues ? 'needs_review' : ($prepared['existing_employee_id'] ? 'ready_to_update' : 'ready'),
+                'issues' => array_values(array_unique($issues)) ?: null,
             ]);
         }
         $import->update([
             'previewed_by' => $userId,
             'previewed_at' => now(),
             'review_count' => $needsReview,
+            'status' => $import->status === 'completed_with_errors' && $needsReview
+                ? 'completed_with_errors'
+                : 'ready_for_import',
         ]);
     }
 
-    public function parsedName(EmployeeImportRow $row, string $format): ?array
+    public function parsedName(EmployeeImportRow $row): ?array
     {
-        return $this->parseName(trim((string) ($this->cellByHeader($row->source_data, 'NAME')['display_value'] ?? '')), $format);
+        $firstName = $this->displayByHeader($row->source_data, 'FIRST NAME');
+        $lastName = $this->displayByHeader($row->source_data, 'LAST NAME');
+        if ($firstName !== null || $lastName !== null) {
+            return [
+                'first_name' => trim((string) $firstName),
+                'middle_name' => trim((string) ($this->displayByHeader($row->source_data, 'MIDDLE NAME') ?? '')) ?: null,
+                'last_name' => trim((string) $lastName),
+                'suffix' => null,
+            ];
+        }
+
+        return $this->parseName(trim((string) ($this->cellByHeader($row->source_data, 'NAME')['display_value'] ?? '')));
+    }
+
+    public function correctionDefaults(EmployeeImportRow $row): array
+    {
+        return [
+            'name' => $this->parsedName($row) ?? [],
+            'employee' => [
+                'employee_no' => $this->displayByHeader($row->source_data, 'NO.'),
+                'email' => $this->emailFromSource($row->source_data),
+                'sex' => $this->displayByHeader($row->source_data, 'GENDER'),
+                'date_of_birth' => $this->dateValue($this->cellByHeader($row->source_data, 'BDATE')),
+                'employment_type' => $this->displayByHeader(
+                    $row->source_data,
+                    $this->cellByHeader($row->source_data, 'STATUS') ? 'STATUS' : 'NATURE OF APPOINTMENT'
+                ),
+            ],
+            'profile' => [
+                'position_level' => $this->displayByHeader($row->source_data, 'POSITION LEVEL'),
+                'source_classification' => $this->displayByHeader(
+                    $row->source_data,
+                    $this->cellByHeader($row->source_data, 'STATUS') ? 'STATUS' : 'CAT'
+                ),
+            ],
+        ];
     }
 
     private function prepareEmployeeData(EmployeeImportRow $row, array $mapping): array
     {
         $data = $row->source_data;
+        $format = $mapping['source_format'] ?? 'legacy';
+        $identity = $row->review_data['identity'] ?? [];
+        $reviewEmployee = $row->review_data['employee'] ?? [];
+        $reviewProfile = $row->review_data['profile'] ?? [];
         $officeCell = $this->cellByColumn($data, (int) $mapping['office_source_column']);
         $officeValue = trim((string) ($officeCell['display_value'] ?? ''));
         $positionColumn = $this->headerColumnFromData($data, 'LATEST POSITION');
         $positionValue = trim((string) ($this->cellByColumn($data, $positionColumn)['display_value'] ?? ''));
         $departmentId = $mapping['department_map'][hash('sha256', $officeValue)] ?? null;
         $positionId = $mapping['position_map'][hash('sha256', $officeValue."\0".$positionValue)] ?? null;
-        $name = $row->review_data['name'] ?? $this->parseName(
-            trim((string) ($this->cellByHeader($data, 'NAME')['display_value'] ?? '')),
-            $mapping['name_format']
-        );
+        $name = $row->review_data['name'] ?? ($format === 'plantilla'
+            ? [
+                'first_name' => trim((string) ($this->displayByHeader($data, 'FIRST NAME') ?? '')),
+                'middle_name' => trim((string) ($this->displayByHeader($data, 'MIDDLE NAME') ?? '')) ?: null,
+                'last_name' => trim((string) ($this->displayByHeader($data, 'LAST NAME') ?? '')),
+                'suffix' => null,
+            ]
+            : $this->parseName(trim((string) ($this->cellByHeader($data, 'NAME')['display_value'] ?? ''))));
         $issues = [];
+        if (! empty($identity['error'])) {
+            $issues[] = $identity['error'];
+        }
+        $requiredHeaders = $format === 'plantilla'
+            ? ['LAST NAME', 'FIRST NAME', 'ITEM NUMBER', 'BDATE', 'GENDER', 'STATUS', 'LATEST POSITION', 'OFFICE']
+            : ['NO.', 'NAME', 'BDATE', 'CAT', 'GENDER', 'NATURE OF APPOINTMENT', 'LATEST POSITION'];
         foreach ($data as $cell) {
-            if ($cell['data_type'] === 'f') {
-                $issues[] = 'Formula cells require HRMO review; formulas are preserved and are not evaluated.';
+            if ($cell['formula_error'] && in_array($cell['canonical_header'] ?? $cell['header'], $requiredHeaders, true)) {
+                $issues[] = 'A required employee value contains a formula that could not be calculated.';
                 break;
             }
         }
         if (! $name) {
-            $issues[] = 'Employee name does not match the HRMO-approved name format.';
+            $issues[] = 'Employee name is missing or cannot be parsed unambiguously.';
+        }
+        if ($name && collect(['first_name', 'last_name'])->contains(fn (string $field) => trim((string) ($name[$field] ?? '')) === ''
+            || mb_strlen((string) $name[$field]) > 255)) {
+            $issues[] = 'Employee first or last name is missing or exceeds the supported length.';
+        }
+        if ($name && mb_strlen((string) ($name['middle_name'] ?? '')) > 255) {
+            $issues[] = 'Employee middle name exceeds the supported length.';
+        }
+        if ($name && mb_strlen((string) ($name['suffix'] ?? '')) > 20) {
+            $issues[] = 'Employee suffix exceeds the supported length.';
         }
         if ($officeValue === '' || ! $departmentId) {
-            $issues[] = 'Office value is blank or has no approved department mapping.';
+            $issues[] = $officeValue === ''
+                ? 'Office value is blank.'
+                : "Office value \"{$officeValue}\" has no approved department mapping.";
         } elseif (! Department::query()->whereKey($departmentId)->where('is_active', true)->exists()) {
-            $issues[] = 'The mapped department is no longer active; HRMO review is required.';
+            $issues[] = 'The mapped department is no longer active.';
         }
         if ($positionValue === '' || ! $positionId) {
-            $issues[] = 'Latest position is blank or has no approved position mapping.';
+            $issues[] = $positionValue === ''
+                ? 'Latest position is blank.'
+                : 'Latest position has no approved position mapping.';
         } elseif (! Position::query()->whereKey($positionId)->where('is_active', true)
             ->where(function ($query) use ($departmentId) {
                 $query->whereNull('department_id')->orWhere('department_id', $departmentId);
@@ -496,37 +1301,135 @@ class EmployeeWorkbookImportService
         }
 
         $birthDateCell = $this->cellByHeader($data, 'BDATE');
-        $birthDate = $this->dateValue($birthDateCell);
+        $birthDate = $reviewEmployee['date_of_birth'] ?? $this->dateValue($birthDateCell);
         $mappedAmbiguousCell = $mapping['date_target'] !== 'source_only'
             ? $this->cellByColumn($data, (int) $mapping['date_source_column'])
             : null;
         $mappedAmbiguousDate = $this->dateValue($mappedAmbiguousCell);
         $hasMappedAmbiguousDate = trim((string) ($mappedAmbiguousCell['display_value'] ?? '')) !== '';
         if ($hasMappedAmbiguousDate && ! $mappedAmbiguousDate) {
-            $issues[] = 'The HRMO-mapped unnamed date could not be interpreted; review this row.';
+            $issues[] = 'The additional mapped date could not be interpreted; correct this record.';
         }
         if ($mapping['date_target'] === 'date_of_birth' && $hasMappedAmbiguousDate) {
             $birthDate = $mappedAmbiguousDate;
         }
-        if ($birthDateCell && trim((string) $birthDateCell['display_value']) !== '') {
-            if (! $birthDate || $birthDate >= today()->toDateString()) {
-                $issues[] = 'Birth date is invalid or not in the past.';
-            }
+        if (! $birthDate || $birthDate >= today()->toDateString()) {
+            $issues[] = 'Birth date is missing, invalid, or not in the past.';
         }
-        $dateHired = $this->dateValue($this->cellByHeader($data, 'DATE APPOINTED (1ST)'));
+        $dateHired = $format === 'plantilla'
+            ? $this->dateValue($this->cellByHeader($data, 'DATE OF ORIGINAL APPOINTMENT'))
+            : $this->dateValue($this->cellByHeader($data, 'DATE APPOINTED (1ST)'));
         $retirementCell = $this->cellByHeader($data, 'EXPECTED DATE OF MANDATORY RETIREMENT');
         $retirementDate = $this->dateValue($retirementCell);
         if ($retirementCell && trim((string) $retirementCell['display_value']) !== '' && ! $retirementDate) {
-            $issues[] = 'Expected retirement date could not be interpreted; HRMO review is required.';
+            $issues[] = 'Expected retirement date could not be interpreted; correct this record.';
         }
         if ($mapping['date_target'] === 'date_hired' && $hasMappedAmbiguousDate) {
             $dateHired = $mappedAmbiguousDate;
         }
-        $history = $this->employmentHistory($data, $issues);
-
-        $employeeNumber = trim((string) ($this->cellByHeader($data, 'NO.')['display_value'] ?? ''));
-        if ($employeeNumber === '') {
+        if ($format === 'plantilla') {
+            $history = $dateHired ? [[
+                'position_title' => $positionValue,
+                'appointment_date' => $dateHired,
+                'sequence' => 1,
+            ]] : [];
+        } else {
+            $history = $this->employmentHistory($data, $issues);
+        }
+        $sourceEmployeeNumber = $format === 'plantilla'
+            ? ''
+            : trim((string) ($this->cellByHeader($data, 'NO.')['display_value'] ?? ''));
+        $employeeNumber = trim((string) ($reviewEmployee['employee_no'] ?? $sourceEmployeeNumber));
+        if ($format === 'legacy' && ($employeeNumber === '' || mb_strlen($employeeNumber) > 255)) {
             $issues[] = 'Employee reference number is required.';
+        }
+        if ($format === 'plantilla' && trim((string) ($identity['item_number'] ?? '')) === '') {
+            $issues[] = 'A plantilla item number is required to generate a safe HRIS employee number.';
+        }
+        $existingByNumber = $employeeNumber !== ''
+            ? Employee::withTrashed()->with('user')
+                ->whereRaw('LOWER(employee_no) = ?', [mb_strtolower($employeeNumber)])
+                ->first()
+            : null;
+        $existingByIdentity = ! $existingByNumber && ! empty($identity['hash'])
+            ? EmployeeServiceProfile::query()
+                ->with('employee.user')
+                ->where('source_identity_hash', $identity['hash'])
+                ->first()?->employee
+            : null;
+        $existing = $existingByNumber ?? $existingByIdentity;
+        if ($existing && $employeeNumber === '') {
+            $employeeNumber = $existing->employee_no;
+        }
+        if ($existing?->trashed()) {
+            $issues[] = 'An archived employee already uses this employee number. Review the archived record before importing.';
+        }
+        if ($existing?->user?->role === 'admin') {
+            $issues[] = 'This employee number belongs to a protected Admin account. Imports cannot change that employee or account.';
+        }
+        $possibleNameMatches = $existing || ! $name
+            ? []
+            : $this->possibleEmployeeMatches($name);
+        if ($possibleNameMatches && empty($reviewEmployee['confirm_distinct_employee'])) {
+            $numbers = collect($possibleNameMatches)->pluck('employee_no')->filter()->implode(', ');
+            $issues[] = 'A current employee has the same normalized name'.($numbers !== '' ? " (employee number(s): {$numbers})" : '').'. Confirm this is a different person or correct the employee number.';
+        }
+
+        $positionLevel = $reviewProfile['position_level'] ?? $this->displayByHeader($data, 'POSITION LEVEL');
+        $category = $reviewProfile['source_classification'] ?? $this->displayByHeader(
+            $data,
+            $format === 'plantilla' ? 'STATUS' : 'CAT'
+        );
+        $gender = trim((string) ($reviewEmployee['sex'] ?? $this->displayByHeader($data, 'GENDER')));
+        $natureOfAppointment = $reviewEmployee['employment_type'] ?? $this->displayByHeader(
+            $data,
+            $format === 'plantilla' ? 'STATUS' : 'NATURE OF APPOINTMENT'
+        );
+        $linkedUser = $existing?->user;
+        $sourceEmail = trim((string) ($reviewEmployee['email'] ?? $this->emailFromSource($data) ?? ''));
+        $email = $sourceEmail;
+        if ($email === '') {
+            $existingEmail = trim((string) ($existing?->email ?? ''));
+            $email = filter_var($existingEmail, FILTER_VALIDATE_EMAIL)
+                ? $existingEmail
+                : (string) ($linkedUser?->email ?? '');
+        }
+        $email = mb_strtolower(trim($email));
+        if ($email !== '' && ! filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $issues[] = 'The employee email address is invalid.';
+        } elseif ($email !== '' && User::query()->whereRaw('LOWER(email) = ?', [$email])
+            ->when($linkedUser, fn ($query) => $query->where('id', '!=', $linkedUser->id))
+            ->exists()) {
+            $issues[] = 'This email address is already used by another login account.';
+        }
+        if (trim((string) $positionLevel) === '' || mb_strlen((string) $positionLevel) > 255) {
+            $issues[] = 'Position level is missing or exceeds the supported length.';
+        }
+        if (trim((string) $category) === '' || mb_strlen((string) $category) > 255) {
+            $issues[] = 'Employment category is missing or exceeds the supported length.';
+        }
+        if (! in_array(mb_strtolower($gender), ['m', 'f', 'male', 'female', 'other'], true)) {
+            $issues[] = 'Gender is missing or has an unsupported value.';
+        }
+        if (trim((string) $natureOfAppointment) === '' || mb_strlen((string) $natureOfAppointment) > 60) {
+            $issues[] = 'Nature of appointment is missing or exceeds the supported length.';
+        }
+        $department = $departmentId ? Department::find($departmentId) : null;
+        $role = $linkedUser?->role ?? $this->classifyRole($positionValue, $department, (int) $positionId);
+        if ($role === 'office_head' && $department?->head_user_id
+            && (int) $department->head_user_id !== (int) ($linkedUser?->id ?? 0)) {
+            $issues[] = 'This department already has an assigned Office Head; confirm the correct assignment before importing another.';
+        }
+        $statusCell = $format === 'plantilla'
+            ? null
+            : ($this->cellByHeader($data, 'EMPLOYMENT STATUS') ?? $this->cellByHeader($data, 'STATUS'));
+        $sourceEmploymentStatus = $statusCell
+            ? $this->parseEmploymentStatus(trim((string) ($statusCell['display_value'] ?? '')))
+            : null;
+        if ($statusCell && trim((string) ($statusCell['display_value'] ?? '')) !== '' && ! $sourceEmploymentStatus) {
+            $issues[] = 'Employment status is not a supported value.';
+        } elseif ($statusCell && trim((string) ($statusCell['display_value'] ?? '')) === '') {
+            $issues[] = 'Employment status is missing.';
         }
 
         $licenseCell = $this->cellByHeader($data, 'LICENSE- DATE EXPIRATION');
@@ -536,8 +1439,8 @@ class EmployeeWorkbookImportService
             ? $this->dateValue($licenseCell)
             : null;
         $profile = [
-            'position_level' => $this->displayByHeader($data, 'POSITION LEVEL'),
-            'source_classification' => $this->displayByHeader($data, 'CAT'),
+            'position_level' => $positionLevel,
+            'source_classification' => $category,
             'eligibility_rating' => $this->displayByHeader($data, 'ELIGIBILITY/PERCENT'),
             'professional_license' => $this->displayByHeader($data, 'LICENSE- DATE EXPIRATION'),
             'license_expiration_date' => $mapping['date_target'] === 'license_expiration_date' && $hasMappedAmbiguousDate
@@ -550,26 +1453,40 @@ class EmployeeWorkbookImportService
                 : $retirementDate,
             'age_at_source' => $this->displayByHeader($data, 'AGE'),
             'additional_service_years' => $this->displayByHeader($data, 'YEARS IN SERVICE', 2),
+            'source_identity_hash' => $identity['hash'] ?? null,
+            'source_identity_type' => $identity['type'] ?? null,
+            'plantilla_item_no' => $identity['item_number'] ?? null,
         ];
 
         return [
             'issues' => array_values(array_unique($issues)),
+            'existing_employee_id' => $existing?->id,
+            'identity_hash' => $identity['hash'] ?? null,
+            'identity_type' => $identity['type'] ?? null,
+            'plantilla_item_no' => $identity['item_number'] ?? null,
+            'possible_name_matches' => $possibleNameMatches,
+            'account_action' => $linkedUser ? 'existing' : 'create',
+            'department_name' => $department?->name,
+            'position_title' => $positionValue,
             'employee' => [
                 'department_id' => $departmentId,
                 'position_id' => $positionId,
                 'employee_no' => $employeeNumber,
+                'email' => $email,
                 'first_name' => $name['first_name'] ?? '',
                 'middle_name' => $name['middle_name'] ?? null,
                 'last_name' => $name['last_name'] ?? '',
                 'suffix' => $name['suffix'] ?? null,
-                'sex' => $this->displayByHeader($data, 'GENDER'),
+                'sex' => $gender,
                 'date_of_birth' => $birthDate,
-                'employment_status' => $mapping['employment_status'],
-                'employment_type' => $this->displayByHeader($data, 'NATURE OF APPOINTMENT'),
+                'employment_status' => $sourceEmploymentStatus ?? ($mapping['employment_status'] ?? 'Active'),
+                'employment_type' => $natureOfAppointment,
                 'date_hired' => $dateHired,
             ],
             'profile' => $profile,
             'history' => $history,
+            'role' => $role,
+            'employment_status_from_source' => $statusCell && trim((string) ($statusCell['display_value'] ?? '')) !== '',
         ];
     }
 
@@ -588,11 +1505,11 @@ class EmployeeWorkbookImportService
             $dateCell = $this->cellByHeader($data, $dateHeader);
             $date = $this->dateValue($dateCell);
             if ($dateCell && trim((string) ($dateCell['display_value'] ?? '')) !== '' && ! $date) {
-                $issues[] = 'An appointment-history date could not be interpreted; HRMO review is required.';
+                $issues[] = 'An appointment-history date could not be interpreted.';
             }
             if ($position !== '' || $date !== null) {
                 if ($position === '') {
-                    $issues[] = 'An appointment date has no associated position; HRMO review is required.';
+                    $issues[] = 'An appointment date has no associated position.';
 
                     continue;
                 }
@@ -607,19 +1524,21 @@ class EmployeeWorkbookImportService
         return $history;
     }
 
-    private function parseName(string $value, string $format): ?array
+    private function parseName(string $value): ?array
     {
         if ($value === '') {
             return null;
         }
-        if ($format === 'surname_comma_given') {
-            if (! str_contains($value, ',')) {
-                return null;
-            }
+        if (str_contains($value, ',')) {
             [$lastName, $givenNames] = array_map('trim', explode(',', $value, 2));
             $suffix = $this->extractSuffix($lastName);
             if ($suffix !== null) {
-                $lastName = trim((string) preg_replace('/\s+'.preg_quote($suffix, '/').'\.?$/i', '', $lastName));
+                $lastName = $this->removeSuffix($lastName, $suffix);
+            } else {
+                $suffix = $this->extractSuffix($givenNames);
+                if ($suffix !== null) {
+                    $givenNames = $this->removeSuffix($givenNames, $suffix);
+                }
             }
             $givenParts = preg_split('/\s+/', $givenNames, -1, PREG_SPLIT_NO_EMPTY);
 
@@ -633,9 +1552,6 @@ class EmployeeWorkbookImportService
                 : null;
         }
 
-        if (str_contains($value, ',')) {
-            return null;
-        }
         $parts = preg_split('/\s+/', $value, -1, PREG_SPLIT_NO_EMPTY);
         if (count($parts) < 2) {
             return null;
@@ -644,26 +1560,183 @@ class EmployeeWorkbookImportService
         if ($suffix !== null) {
             array_pop($parts);
         }
-        $lastName = array_pop($parts);
+        $lastNameStart = count($parts) - 1;
+        $surnameParticles = ['da', 'das', 'de', 'del', 'della', 'der', 'di', 'dos', 'du', 'la', 'le', 'van', 'von'];
+        while ($lastNameStart > 1 && in_array(mb_strtolower($parts[$lastNameStart - 1]), $surnameParticles, true)) {
+            $lastNameStart--;
+        }
+        $lastName = implode(' ', array_slice($parts, $lastNameStart));
+        $givenParts = array_slice($parts, 0, $lastNameStart);
 
         return [
-            'first_name' => array_shift($parts),
-            'middle_name' => implode(' ', $parts) ?: null,
+            'first_name' => array_shift($givenParts),
+            'middle_name' => implode(' ', $givenParts) ?: null,
             'last_name' => $lastName,
             'suffix' => $suffix,
         ];
     }
 
+    private function possibleEmployeeMatches(array $name): array
+    {
+        $firstName = trim((string) ($name['first_name'] ?? ''));
+        $lastName = trim((string) ($name['last_name'] ?? ''));
+        if ($firstName === '' || $lastName === '') {
+            return [];
+        }
+
+        return Employee::withTrashed()
+            ->whereRaw('LOWER(first_name) = ?', [mb_strtolower($firstName)])
+            ->whereRaw('LOWER(last_name) = ?', [mb_strtolower($lastName)])
+            ->get()
+            ->filter(fn (Employee $employee) => $this->normalizeMatchValue((string) $employee->middle_name)
+                    === $this->normalizeMatchValue((string) ($name['middle_name'] ?? ''))
+                && $this->normalizeMatchValue((string) $employee->suffix)
+                    === $this->normalizeMatchValue((string) ($name['suffix'] ?? '')))
+            ->map(fn (Employee $employee) => [
+                'employee_no' => $employee->employee_no,
+                'full_name' => $employee->full_name,
+                'archived' => $employee->trashed(),
+            ])
+            ->values()
+            ->all();
+    }
+
     private function extractSuffix(string $value): ?string
     {
-        $suffixes = ['Jr.', 'Jr', 'Sr.', 'Sr', 'II', 'III', 'IV', 'V'];
-        foreach ($suffixes as $suffix) {
-            if (mb_strtolower(trim($value)) === mb_strtolower($suffix)) {
-                return rtrim($suffix, '.');
+        if (! preg_match('/(?:^|\s)(Jr\.?|Sr\.?|II|III|IV|V)$/i', trim($value), $matches)) {
+            return null;
+        }
+
+        return in_array(mb_strtoupper(rtrim($matches[1], '.')), ['II', 'III', 'IV', 'V'], true)
+            ? mb_strtoupper(rtrim($matches[1], '.'))
+            : ucfirst(mb_strtolower(rtrim($matches[1], '.'))).'.';
+    }
+
+    private function removeSuffix(string $value, string $suffix): string
+    {
+        return trim((string) preg_replace('/\s+'.preg_quote($suffix, '/').'\.?$/i', '', trim($value)));
+    }
+
+    private function emailFromSource(array $data): ?string
+    {
+        foreach ($data as $cell) {
+            $header = $this->normalizeMatchValue((string) ($cell['header'] ?? ''));
+            if (in_array($header, ['EMAIL', 'EMAILADDRESS', 'EMPLOYEEEMAIL', 'WORKEMAIL', 'EMAILADD'], true)
+                && trim((string) ($cell['display_value'] ?? '')) !== '') {
+                return trim((string) $cell['display_value']);
             }
         }
 
         return null;
+    }
+
+    private function parseEmploymentStatus(string $value): ?string
+    {
+        $normalized = $this->normalizeMatchValue($value);
+
+        return match ($normalized) {
+            'ACTIVE', 'EMPLOYED', 'INSERVICE', 'REGULAR' => 'Active',
+            'ONLEAVE', 'LEAVE' => 'On Leave',
+            'SEPARATED', 'RESIGNED', 'TERMINATED', 'INACTIVE' => 'Separated',
+            'RETIRED' => 'Retired',
+            default => null,
+        };
+    }
+
+    private function classifyRole(string $positionTitle, ?Department $department, ?int $positionId = null): string
+    {
+        $officeHeadDesignations = collect(config('hris.employee_import.office_head_designations', []))
+            ->map(fn (string $designation) => $this->normalizeMatchValue($designation));
+        $normalizedTitle = $this->normalizeMatchValue($positionTitle);
+        $approvedPosition = $positionId
+            ? Position::query()->whereKey($positionId)
+                ->where('is_office_head_designation', true)
+                ->where(function ($query) use ($department) {
+                    $query->whereNull('department_id');
+                    if ($department) {
+                        $query->orWhere('department_id', $department->id);
+                    }
+                })->exists()
+            : false;
+        $verifiedDesignation = $approvedPosition
+            || $officeHeadDesignations->contains($normalizedTitle);
+
+        return $verifiedDesignation && $department ? 'office_head' : 'employee';
+    }
+
+    private function generateInternalEmployeeNumber(): string
+    {
+        do {
+            $employeeNumber = 'HRIS-'.Str::upper(Str::random(12));
+        } while (Employee::query()->where('employee_no', $employeeNumber)->exists());
+
+        return $employeeNumber;
+    }
+
+    private function matchScore(string $normalized, string $candidate): float
+    {
+        $candidate = $this->normalizeMatchValue($candidate);
+        if ($normalized === '' || $candidate === '') {
+            return 0;
+        }
+        similar_text($normalized, $candidate, $score);
+
+        return round($score, 1);
+    }
+
+    private function normalizeMatchValue(string $value): string
+    {
+        return mb_strtoupper(preg_replace('/[^[:alnum:]]+/u', '', trim($value)));
+    }
+
+    private function createDepartmentFromOffice(string $office): Department
+    {
+        $name = mb_substr(trim($office), 0, 150);
+        $normalized = $this->normalizeMatchValue($name);
+        $matches = Department::query()->get()->filter(fn (Department $department) => $this->normalizeMatchValue($department->name) === $normalized
+            || $this->normalizeMatchValue($department->code ?? '') === $normalized
+            || collect($department->aliases ?? [])->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalized));
+        if ($matches->count() > 1) {
+            throw ValidationException::withMessages(['department_map' => "The office value \"{$office}\" matches multiple departments. Choose the correct existing department."]);
+        }
+        if ($existing = $matches->first()) {
+            if (! $existing->is_active) {
+                throw ValidationException::withMessages(['department_map' => "The existing department \"{$name}\" is inactive. Activate it or choose another department."]);
+            }
+
+            return $existing;
+        }
+
+        $code = mb_strlen($office) <= 20 ? mb_strtoupper(trim($office)) : null;
+        if ($code && Department::query()->whereRaw('LOWER(code) = ?', [mb_strtolower($code)])->exists()) {
+            $code = null;
+        }
+
+        return Department::create(['name' => $name, 'code' => $code, 'is_active' => true]);
+    }
+
+    private function createPositionFromSource(string $title, int $departmentId): Position
+    {
+        $normalized = $this->normalizeMatchValue($title);
+        $matches = Position::query()->where('department_id', $departmentId)->get()
+            ->filter(fn (Position $position) => $this->normalizeMatchValue($position->title) === $normalized
+                || collect($position->aliases ?? [])->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalized));
+        if ($matches->count() > 1) {
+            throw ValidationException::withMessages(['position_map' => "The source title \"{$title}\" matches multiple positions. Choose the correct existing position."]);
+        }
+        if ($existing = $matches->first()) {
+            if (! $existing->is_active) {
+                throw ValidationException::withMessages(['position_map' => "The existing position \"{$title}\" is inactive. Activate it or choose another position."]);
+            }
+
+            return $existing;
+        }
+
+        if (mb_strlen(trim($title)) > 150) {
+            throw ValidationException::withMessages(['position_map' => 'The source position title is too long to create. Correct it or map it to an existing position.']);
+        }
+
+        return Position::create(['title' => trim($title), 'department_id' => $departmentId, 'is_active' => true]);
     }
 
     private function dateValue(?array $cell): ?string
@@ -698,14 +1771,16 @@ class EmployeeWorkbookImportService
 
     private function displayByHeader(array $data, string $header, int $occurrence = 1): ?string
     {
-        return $this->cellByHeader($data, $header, $occurrence)['display_value'] ?? null;
+        $cell = $this->cellByHeader($data, $header, $occurrence);
+
+        return $cell ? $cell['display_value'] : null;
     }
 
     private function cellByHeader(array $data, string $header, int $occurrence = 1): ?array
     {
-        $wanted = mb_strtoupper(preg_replace('/\s+/', ' ', trim($header)));
+        $wanted = $this->canonicalHeader($header);
         foreach ($data as $cell) {
-            $actual = mb_strtoupper(preg_replace('/\s+/', ' ', trim((string) ($cell['header'] ?? ''))));
+            $actual = $cell['canonical_header'] ?? $this->canonicalHeader((string) ($cell['header'] ?? ''));
             if ($actual === $wanted && --$occurrence === 0) {
                 return $cell;
             }
@@ -730,8 +1805,9 @@ class EmployeeWorkbookImportService
     private function headerColumn(EmployeeImport $import, string $header): int
     {
         foreach ($import->source_headers as $sourceHeader) {
-            if (mb_strtoupper(preg_replace('/\s+/', ' ', trim((string) ($sourceHeader['label'] ?? ''))))
-                === mb_strtoupper(preg_replace('/\s+/', ' ', trim($header)))) {
+            $actual = $sourceHeader['canonical_label']
+                ?? $this->canonicalHeader((string) ($sourceHeader['label'] ?? ''));
+            if ($actual === $this->canonicalHeader($header)) {
                 return (int) $sourceHeader['index'];
             }
         }
@@ -742,8 +1818,8 @@ class EmployeeWorkbookImportService
     private function headerColumnFromData(array $data, string $header): int
     {
         foreach ($data as $cell) {
-            if (mb_strtoupper(preg_replace('/\s+/', ' ', trim((string) ($cell['header'] ?? ''))))
-                === mb_strtoupper(preg_replace('/\s+/', ' ', trim($header)))) {
+            $actual = $cell['canonical_header'] ?? $this->canonicalHeader((string) ($cell['header'] ?? ''));
+            if ($actual === $this->canonicalHeader($header)) {
                 return Coordinate::columnIndexFromString($cell['column']);
             }
         }

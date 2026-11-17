@@ -1305,6 +1305,54 @@ tbody tr:last-child td {
     color: #668098;
     font-size: 10px;
 }
+.warning-note {
+    margin: 14px 0;
+    padding: 10px 12px;
+    border-radius: 5px;
+    background: #fff7e6;
+    color: #815d1d;
+    font-size: 12px;
+}
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(125px, 1fr));
+    gap: 10px;
+    margin-top: 16px;
+}
+.summary-card {
+    display: grid;
+    gap: 5px;
+    padding: 12px;
+    border: 1px solid #e2e8ed;
+    border-radius: 6px;
+    background: #fbfcfd;
+}
+.summary-card b {
+    color: #26394b;
+    font-size: 20px;
+}
+.summary-card span,
+.mapping-row small {
+    color: #65788a;
+    font-size: 11px;
+}
+.mapping-row {
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) minmax(220px, 1fr);
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid #edf1f4;
+}
+.mapping-row > span {
+    display: grid;
+    gap: 4px;
+}
+@media (max-width: 600px) {
+    .mapping-row {
+        grid-template-columns: 1fr;
+    }
+}
 .requirements-box {
     margin: 14px 0;
     padding: 14px;

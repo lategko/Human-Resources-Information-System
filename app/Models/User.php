@@ -2,16 +2,22 @@
 
 namespace App\Models;
 
-// use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Database\Factories\UserFactory;
+use Illuminate\Auth\MustVerifyEmail as MustVerifyEmailTrait;
+use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 
-class User extends Authenticatable
+class User extends Authenticatable implements MustVerifyEmail
 {
+    protected $attributes = [
+        'must_change_password' => false,
+        'account_setup_completed' => true,
+    ];
+
     public const VALID_ROLES = [
         'admin',
         'mayor',
@@ -20,7 +26,7 @@ class User extends Authenticatable
     ];
 
     /** @use HasFactory<UserFactory> */
-    use HasFactory, Notifiable;
+    use HasFactory, MustVerifyEmailTrait, Notifiable;
 
     /**
      * The attributes that are mass assignable.
@@ -29,8 +35,11 @@ class User extends Authenticatable
      */
     protected $fillable = [
         'name',
+        'username',
         'email',
         'password',
+        'must_change_password',
+        'account_setup_completed',
         'role',
         'is_active',
         'can_final_approve',
@@ -65,10 +74,22 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'must_change_password' => 'boolean',
+            'account_setup_completed' => 'boolean',
             'is_active' => 'boolean',
             'can_final_approve' => 'boolean',
             'profile_birthdate' => 'date',
         ];
+    }
+
+    public function setUsernameAttribute(?string $value): void
+    {
+        $this->attributes['username'] = filled($value) ? mb_strtolower(trim($value)) : null;
+    }
+
+    public function setEmailAttribute(?string $value): void
+    {
+        $this->attributes['email'] = filled($value) ? mb_strtolower(trim($value)) : null;
     }
 
     public function employee(): HasOne

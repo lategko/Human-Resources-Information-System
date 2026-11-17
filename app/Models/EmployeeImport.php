@@ -16,6 +16,11 @@ class EmployeeImport extends Model
         'original_name',
         'source_file_path',
         'source_sha256',
+        'worksheet_name',
+        'header_row',
+        'worksheet_names',
+        'source_row_count',
+        'excluded_rows_count',
         'status',
         'source_headers',
         'field_mappings',
@@ -24,6 +29,8 @@ class EmployeeImport extends Model
         'confirmed_at',
         'row_count',
         'imported_count',
+        'updated_count',
+        'accounts_created_count',
         'skipped_count',
         'review_count',
     ];
@@ -32,6 +39,7 @@ class EmployeeImport extends Model
     {
         return [
             'source_headers' => 'array',
+            'worksheet_names' => 'array',
             'field_mappings' => 'array',
             'mapping_approved_at' => 'datetime',
             'previewed_at' => 'datetime',

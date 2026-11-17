@@ -99,7 +99,6 @@ class EmployeeController extends Controller
         $this->authorize('updatePersonal', $employee);
         $data = $request->validate([
             'contact_number' => ['nullable', 'string', 'max:40'],
-            'email' => ['nullable', 'email', 'max:255'],
             'address' => ['nullable', 'string', 'max:2000'],
             'emergency_contact_name' => ['nullable', 'string', 'max:150'],
             'emergency_contact_number' => ['nullable', 'string', 'max:40'],

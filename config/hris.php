@@ -1,6 +1,11 @@
 <?php
 
 return [
+    'employee_import' => [
+        'department_aliases' => [],
+        // Only exact HR-confirmed titles grant the Office Head role.
+        'office_head_designations' => [],
+    ],
     'initial_accounts' => [
         'admin' => [
             'name' => env('HRIS_INITIAL_ADMIN_NAME'),

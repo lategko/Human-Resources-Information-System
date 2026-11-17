@@ -11,6 +11,7 @@
         <aside class="panel"><div class="panel-heading"><div><h2>Add position</h2><p>Position titles can be department-specific.</p></div></div>
             <form method="POST" action="{{ route('positions.store') }}" class="form-stack">@csrf
                 <label>Position title *<input name="title" required></label><label>Department<select name="department_id"><option value="">Any department</option>@foreach($departments as $department)<option value="{{ $department->id }}">{{ $department->name }}</option>@endforeach</select></label><label>Salary grade<input name="salary_grade"></label>
+                <input type="hidden" name="is_office_head_designation" value="0"><label class="checkbox-label"><input type="checkbox" name="is_office_head_designation" value="1"> HR-approved Office Head designation</label>
                 <button class="button button-primary">Add position</button>
             </form>
         </aside>
@@ -21,6 +22,7 @@
                 <b>{{ $position->title }}</b><input name="title" value="{{ $position->title }}" required>
                 <select name="department_id"><option value="">Any department</option>@foreach($departments as $department)<option value="{{ $department->id }}" @selected($position->department_id === $department->id)>{{ $department->name }}</option>@endforeach</select>
                 <input name="salary_grade" value="{{ $position->salary_grade }}" placeholder="Salary grade">
+                <input type="hidden" name="is_office_head_designation" value="0"><label class="checkbox-label"><input type="checkbox" name="is_office_head_designation" value="1" @checked($position->is_office_head_designation)> HR-approved Office Head designation</label>
                 <input type="hidden" name="is_active" value="0"><label class="checkbox-label"><input type="checkbox" name="is_active" value="1" @checked($position->is_active)> Active</label><button class="button button-outline">Save changes</button>
             </form>
         @endforeach</div>

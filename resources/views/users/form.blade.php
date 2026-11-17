@@ -14,7 +14,8 @@
             <label x-show="role !== 'employee'" x-cloak>Last name *<input name="last_name" x-model="lastName" @input="syncName" :disabled="role === 'employee'" :required="role !== 'employee'" autocomplete="family-name"></label>
             <label x-show="role !== 'employee'" x-cloak>Suffix<input name="suffix" x-model="suffix" @input="syncName" :disabled="role === 'employee'" autocomplete="honorific-suffix"></label>
             <label class="field-span" x-show="role !== 'employee'" x-cloak>Full name *<input name="name" x-model="displayName" :readonly="firstName && lastName" :disabled="role === 'employee'" :required="role !== 'employee'" autocomplete="name"><small>The name is composed from the name fields above.</small></label>
-            <label class="field-span">Email address *<input type="email" name="email" value="{{ old('email', $user->email) }}" required autocomplete="email"></label>
+            <label>Username<input name="username" value="{{ old('username', $user->username) }}" minlength="3" maxlength="100" autocomplete="username"><small>Employee usernames are generated automatically if left blank.</small></label>
+            <label>Email address (optional)<input type="email" name="email" value="{{ old('email', $user->email) }}" autocomplete="email"><small>Required only for sending an activation or password reset link.</small></label>
             <label>Assigned role *
                 <select name="role" x-model="role" required>
                     @foreach($allowedRoles as $value)
@@ -37,7 +38,7 @@
                 <select name="employee_id" :disabled="role !== 'employee'" :required="role === 'employee'">
                     <option value="">Select an existing employee</option>
                     @foreach($employees as $employee)
-                        <option value="{{ $employee->id }}" @selected(old('employee_id', $user->employee?->id) == $employee->id)>{{ $employee->employee_no }} · {{ $employee->full_name }} — {{ $employee->department?->name }}</option>
+                        <option value="{{ $employee->id }}" @selected(old('employee_id', $selectedEmployeeId ?? $user->employee?->id) == $employee->id)>{{ $employee->employee_no }} · {{ $employee->full_name }} — {{ $employee->department?->name }}</option>
                     @endforeach
                 </select>
                 <small>Employee accounts must use an existing, non-archived employee record. No employee records are created here.</small>
@@ -52,11 +53,9 @@
                 <small>Link this account to an existing employee record to enable personal leave and employee-record access.</small>
             </label>
             @if(!$user->exists)
-                <label>Initial password *<input type="password" name="password" minlength="12" required autocomplete="new-password"><small>At least 12 characters.</small></label>
-                <label>Confirm initial password *<input type="password" name="password_confirmation" minlength="12" required autocomplete="new-password"></label>
-            @else
-                <label>Reset password <small>Leave blank to keep the current password.</small><input type="password" name="password" minlength="12" autocomplete="new-password"></label>
-                <label>Confirm new password<input type="password" name="password_confirmation" minlength="12" autocomplete="new-password"></label>
+                <label x-show="role !== 'employee'" x-cloak>Initial password *<input type="password" name="password" minlength="12" :required="role !== 'employee'" :disabled="role === 'employee'" autocomplete="new-password"><small>Employee accounts receive a random password and must be activated securely.</small></label>
+                <label x-show="role !== 'employee'" x-cloak>Confirm initial password *<input type="password" name="password_confirmation" minlength="12" :required="role !== 'employee'" :disabled="role === 'employee'" autocomplete="new-password"></label>
+                <p class="field-span alert alert-info" x-show="role === 'employee'" x-cloak>The employee account will be created with a unique username and secure activation requirement. Add an email address and send an activation link after saving.</p>
             @endif
         </div>
 
@@ -66,4 +65,15 @@
         <label class="checkbox-label top-space" x-show="role === 'admin'" x-cloak><input type="checkbox" name="can_final_approve" value="1" @checked(old('can_final_approve', $user->can_final_approve))> Explicitly designate as the authorized approver for a Mayor’s personal leave only</label>
         <div class="form-actions"><a class="button button-outline" href="{{ route('users.index') }}">Cancel</a><button type="submit" class="button button-primary">Save account</button></div>
     </form>
+    @if($user->exists)
+        <section class="panel form-panel top-space">
+            <div class="panel-heading"><div><h2>{{ $user->isEmployee() ? 'Employee account activation' : 'Secure password reset' }}</h2><p>Send a secure, single-use password setup/reset link. No plaintext password is shown or written to the audit log.</p></div></div>
+            @if($user->email)
+                <p>Link will be sent to <b>{{ $user->email }}</b>{{ $user->hasVerifiedEmail() ? ' (verified)' : ' (not verified)' }}.</p>
+                <form method="POST" action="{{ route('users.activation-link', $user) }}">@csrf<button class="button button-primary" type="submit">Send password setup/reset link</button></form>
+            @else
+                <p class="alert alert-info">Add an email address above and save the account before sending a setup/reset link.</p>
+            @endif
+        </section>
+    @endif
 @endsection

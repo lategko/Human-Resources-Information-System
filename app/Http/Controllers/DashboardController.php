@@ -320,7 +320,7 @@ class DashboardController extends Controller
             'role' => $user->canFinalApprove() ? 'mayor' : ($user->isAdministrator() ? 'administrator' : $user->role),
             'pendingEmployeeImports' => $user->isHrmo()
                 ? EmployeeImport::query()
-                    ->whereIn('status', ['pending_review', 'mapping_approved', 'review_required'])
+                    ->whereIn('status', ['mapping_required', 'ready_for_import', 'importing', 'completed_with_errors', 'failed', 'pending_review', 'mapping_approved', 'review_required'])
                     ->with('uploader:id,name')
                     ->oldest()
                     ->limit(5)

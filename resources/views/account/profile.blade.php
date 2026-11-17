@@ -9,7 +9,7 @@
     <div class="profile-layout account-profile-layout">
         <section class="panel profile-card account-profile-card">
             @include('shared.avatar', ['user' => $user, 'size' => 'profile-photo-large'])
-            <h2>{{ $user->name }}</h2>
+            <h2>{{ $user->employee?->full_name ?? $user->name }}</h2>
             <span class="status-tag {{ $user->is_active ? 'status-active' : 'status-inactive' }}">{{ $user->is_active ? 'Active account' : 'Disabled account' }}</span>
             <div class="profile-meta">
                 <span>Assigned role</span>
@@ -42,11 +42,20 @@
             <section class="panel profile-details">
                 <div class="panel-heading"><div><h2>Account information</h2><p>Your sign-in details and assigned access. Role and account status are managed by authorized administrators.</p></div></div>
                 <div class="detail-grid">
-                    <div><small>Full name</small><b>{{ $user->name }}</b></div>
-                    <div><small>Email address</small><b>{{ $user->email }}</b></div>
+                    <div><small>Full name</small><b>{{ $user->employee?->full_name ?? $user->name }}</b></div>
+                    @if($user->employee)<div><small>Employee number</small><b>{{ $user->employee->employee_no }}</b></div>@endif
+                    <div><small>Username</small><b>{{ $user->username ?: 'Not set' }}</b></div>
+                    <div><small>Email address</small><b>{{ $user->email ?: 'Not registered' }}</b></div>
+                    <div><small>Email verification</small><b>{{ $user->hasVerifiedEmail() ? 'Verified' : 'Not verified' }}</b></div>
                     <div><small>Assigned role</small><b>{{ str_replace('_', ' ', ucfirst($user->role)) }}{{ $user->canFinalApprove() ? ' · Final approver' : '' }}</b></div>
                     <div><small>Account status</small><b>{{ $user->is_active ? 'Active' : 'Disabled' }}</b></div>
                 </div>
+                @if($user->email && ! $user->hasVerifiedEmail())
+                    <form method="POST" action="{{ route('verification.send') }}" class="top-space">
+                        @csrf
+                        <button class="button button-outline" type="submit">Send email verification link</button>
+                    </form>
+                @endif
             </section>
 
             @if($user->employee)

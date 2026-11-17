@@ -41,6 +41,7 @@ class AccountProfileTest extends TestCase
 
             $this->actingAs($user)->put(route('account.profile.update'), [
                 'name' => 'Updated '.ucfirst($role),
+                'current_password' => 'CurrentPassword123!',
                 'email' => 'updated-'.$role.'@example.test',
                 'role' => 'employee',
                 'is_active' => false,
@@ -58,7 +59,7 @@ class AccountProfileTest extends TestCase
         }
     }
 
-    public function test_linked_employee_can_update_own_personal_details_without_changing_permissions(): void
+    public function test_linked_employee_can_update_only_contact_details_without_changing_permissions(): void
     {
         $user = $this->createUser('employee');
         $employee = $this->createEmployee($user);
@@ -72,6 +73,8 @@ class AccountProfileTest extends TestCase
             'date_of_birth' => '1990-04-12',
             'contact_number' => '09171234567',
             'address' => 'New residential address',
+            'username' => 'updated.employee',
+            'current_password' => 'CurrentPassword123!',
             'email' => 'updated@example.test',
             'role' => 'admin',
             'is_active' => false,
@@ -80,15 +83,15 @@ class AccountProfileTest extends TestCase
 
         $this->assertDatabaseHas('employees', [
             'id' => $employee->id,
-            'first_name' => 'Updated',
-            'middle_name' => 'Maria',
+            'first_name' => 'Test',
+            'middle_name' => null,
             'last_name' => 'Employee',
             'contact_number' => '09171234567',
             'address' => 'New residential address',
         ]);
         $this->assertDatabaseHas('users', [
             'id' => $user->id,
-            'name' => 'Updated Maria Employee Jr.',
+            'name' => 'Employee Test User',
             'email' => 'updated@example.test',
             'role' => 'employee',
             'is_active' => true,
@@ -110,6 +113,7 @@ class AccountProfileTest extends TestCase
             'profile_birthdate' => '1990-04-12',
             'profile_contact_number' => '09171234567',
             'profile_address' => 'Municipal address',
+            'current_password' => 'CurrentPassword123!',
             'email' => 'updated-admin@example.test',
             'role' => 'admin',
         ])->assertRedirect(route('account.profile'));

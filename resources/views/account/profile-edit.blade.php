@@ -8,26 +8,10 @@
 
     <form method="POST" action="{{ route('account.profile.update') }}" class="panel form-panel account-edit-form">
         @csrf @method('PUT')
-        <div class="panel-heading"><div><h2>Personal information</h2><p>Personal details are saved to your linked employee record when one is available.</p></div></div>
+        <div class="panel-heading"><div><h2>Personal information</h2><p>Employee name, birthdate, department, position, and employee number are managed by HR.</p></div></div>
         @if($user->employee)
             <div class="form-grid">
-                <label>First name<input name="first_name" value="{{ old('first_name', $user->employee->first_name) }}" autocomplete="given-name" required></label>
-                <label>Middle name<input name="middle_name" value="{{ old('middle_name', $user->employee->middle_name) }}" autocomplete="additional-name"></label>
-                <label>Last name<input name="last_name" value="{{ old('last_name', $user->employee->last_name) }}" autocomplete="family-name" required></label>
-                <label>Suffix<input name="suffix" value="{{ old('suffix', $user->employee->suffix) }}" autocomplete="honorific-suffix"></label>
-                @php($genderOptions = ['Female', 'Male', 'Non-binary', 'Prefer not to say'])
-                <label>Gender
-                    <select name="sex">
-                        <option value="">Select gender</option>
-                        @if($user->employee->sex && ! in_array($user->employee->sex, $genderOptions, true))
-                            <option value="{{ $user->employee->sex }}" @selected(old('sex', $user->employee->sex) === $user->employee->sex)>{{ $user->employee->sex }}</option>
-                        @endif
-                        @foreach($genderOptions as $gender)
-                            <option value="{{ $gender }}" @selected(old('sex', $user->employee->sex) === $gender)>{{ $gender }}</option>
-                        @endforeach
-                    </select>
-                </label>
-                <label>Birthdate<input type="date" name="date_of_birth" value="{{ old('date_of_birth', $user->employee->date_of_birth?->format('Y-m-d')) }}" max="{{ today()->subDay()->format('Y-m-d') }}"></label>
+                <div><small>Full name</small><b>{{ $user->employee->full_name }}</b></div>
                 <label>Contact number<input name="contact_number" value="{{ old('contact_number', $user->employee->contact_number) }}" autocomplete="tel"></label>
                 <label class="field-span">Residential address<textarea name="address" rows="3" autocomplete="street-address">{{ old('address', $user->employee->address) }}</textarea></label>
             </div>
@@ -56,15 +40,20 @@
             </div>
         @endif
 
-        <div class="panel-heading account-form-section-heading"><div><h2>Account information</h2><p>Use this email address to sign in to the HRIS.</p></div></div>
+        <div class="panel-heading account-form-section-heading"><div><h2>Account information</h2><p>Sign in using your username or email address. Email is optional; a new address must be verified.</p></div></div>
         <div class="form-grid">
-            @if($user->employee)
-                <label class="field-span">Full name<input value="{{ $user->employee->full_name }}" readonly aria-describedby="profile-name-help"><small id="profile-name-help">This is based on your first, middle, and last name above.</small></label>
-            @endif
-            <label>Email address<input type="email" name="email" value="{{ old('email', $user->email) }}" autocomplete="email" required></label>
+            <label>Username<input name="username" value="{{ old('username', $user->username) }}" autocomplete="username" minlength="3" maxlength="100" @required((bool) $user->employee)></label>
+            <label>Email address (optional)<input type="email" name="email" value="{{ old('email', $user->email) }}" autocomplete="email"></label>
+            <label class="field-span">New password (optional)<input type="password" name="new_password" autocomplete="new-password" minlength="12"><small>Enter your current password below to confirm this change.</small></label>
+            <label>Current password<input type="password" name="current_password" autocomplete="current-password"><small>Required to change sign-in details.</small></label>
+            <label>Confirm new password<input type="password" name="new_password_confirmation" autocomplete="new-password" minlength="12"></label>
             <label>Assigned role<input value="{{ str_replace('_', ' ', ucfirst($user->role)) }}{{ $user->canFinalApprove() ? ' · Final approver' : '' }}" readonly></label>
             <label>Account status<input value="{{ $user->is_active ? 'Active' : 'Disabled' }}" readonly></label>
         </div>
+        @error('username')<span class="field-error" role="alert">{{ $message }}</span>@enderror
+        @error('email')<span class="field-error" role="alert">{{ $message }}</span>@enderror
+        @error('current_password')<span class="field-error" role="alert">{{ $message }}</span>@enderror
+        @error('new_password')<span class="field-error" role="alert">{{ $message }}</span>@enderror
         <div class="form-actions">
             <a class="button button-outline" href="{{ route('account.profile') }}">Cancel</a>
             <button class="button button-primary" type="submit">Save changes</button>

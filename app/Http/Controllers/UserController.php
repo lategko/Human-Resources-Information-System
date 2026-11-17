@@ -2,45 +2,88 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Employee;
 use App\Models\Department;
+use App\Models\Employee;
 use App\Models\User;
 use App\Services\AuditLogger;
+use App\Services\EmployeeUsernameGenerator;
+use Illuminate\Contracts\Auth\PasswordBroker;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
+use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
 
 class UserController extends Controller
 {
-    public function index(): View
+    public function index(Request $request): View
     {
+        $search = trim((string) $request->query('search', ''));
+        abort_if(mb_strlen($search) > 100, 422, 'The search term is too long.');
+
         return view('users.index', [
-            'users' => User::with(['employee.department', 'departmentHead'])->orderBy('name')->paginate(20),
+            'search' => $search,
+            'users' => User::with(['employee.department', 'employee.position', 'departmentHead'])
+                ->when($search !== '', fn ($query) => $query->where(function ($query) use ($search) {
+                    $query->where('name', 'like', "%{$search}%")
+                        ->orWhere('username', 'like', "%{$search}%")
+                        ->orWhereHas('employee', fn ($employee) => $employee
+                            ->where('employee_no', 'like', "%{$search}%")
+                            ->orWhere('first_name', 'like', "%{$search}%")
+                            ->orWhere('last_name', 'like', "%{$search}%"));
+                }))
+                ->orderBy('name')->paginate(20)->withQueryString(),
+            'unlinkedEmployees' => Employee::with(['department', 'position'])
+                ->whereNull('user_id')->whereNull('archived_at')
+                ->when($search !== '', fn ($query) => $query->where(function ($query) use ($search) {
+                    $query->where('employee_no', 'like', "%{$search}%")
+                        ->orWhere('first_name', 'like', "%{$search}%")
+                        ->orWhere('middle_name', 'like', "%{$search}%")
+                        ->orWhere('last_name', 'like', "%{$search}%");
+                }))
+                ->orderBy('last_name')->paginate(20, ['*'], 'unlinked_page')->withQueryString(),
         ]);
     }
 
     public function create(Request $request): View
     {
+        $selectedEmployee = $request->integer('employee_id')
+            ? Employee::whereNull('user_id')->whereNull('archived_at')->find($request->integer('employee_id'))
+            : null;
+
         return view('users.form', [
-            'user' => new User(['is_active' => true]),
+            'user' => new User([
+                'is_active' => true,
+                'role' => $selectedEmployee ? 'employee' : null,
+                'email' => $selectedEmployee?->email,
+            ]),
+            'selectedEmployeeId' => $selectedEmployee?->id,
             'employees' => Employee::whereNull('user_id')->whereNull('archived_at')->orderBy('last_name')->get(),
             'departments' => Department::where('is_active', true)->orderBy('name')->get(),
             'allowedRoles' => $this->allowedRoles($request->user()),
         ]);
     }
 
-    public function store(Request $request, AuditLogger $auditLogger): RedirectResponse
-    {
+    public function store(
+        Request $request,
+        AuditLogger $auditLogger,
+        EmployeeUsernameGenerator $usernameGenerator
+    ): RedirectResponse {
         $data = $this->validated($request);
-        $user = DB::transaction(function () use ($data, $request) {
+        $user = DB::transaction(function () use ($data, $usernameGenerator) {
+            $employee = ! empty($data['employee_id']) ? Employee::findOrFail($data['employee_id']) : null;
+            $isEmployeeAccount = $data['role'] === 'employee';
             $user = User::create([
                 'name' => $this->accountName($data),
-                'email' => $data['email'],
+                'username' => filled($data['username'] ?? null) ? $data['username'] : ($employee
+                    ? $usernameGenerator->generate($employee->full_name, $employee->employee_no)
+                    : null),
+                'email' => $data['email'] ?? null,
                 'role' => $data['role'],
                 'first_name' => $data['role'] === 'employee' ? null : ($data['first_name'] ?? null),
                 'middle_name' => $data['role'] === 'employee' ? null : ($data['middle_name'] ?? null),
@@ -48,7 +91,9 @@ class UserController extends Controller
                 'suffix' => $data['role'] === 'employee' ? null : ($data['suffix'] ?? null),
                 'is_active' => $data['is_active'] ?? true,
                 'can_final_approve' => $data['role'] === 'admin' && ($data['can_final_approve'] ?? false),
-                'password' => $data['password'],
+                'password' => $isEmployeeAccount ? Str::random(64) : $data['password'],
+                'must_change_password' => $isEmployeeAccount,
+                'account_setup_completed' => ! $isEmployeeAccount,
             ]);
             if (array_key_exists('employee_id', $data)) {
                 $this->assignEmployee($user, $data['employee_id'] ?? null);
@@ -57,9 +102,41 @@ class UserController extends Controller
 
             return $user;
         });
-        $auditLogger->record('user.created', $user, ['role' => $user->role]);
+        $auditLogger->record('user.created', $user, [
+            'role' => $user->role,
+            'username' => $user->username,
+            'activation_pending' => $user->isEmployee() && ! $user->email,
+        ]);
 
-        return redirect()->route('users.index')->with('success', 'User account created.');
+        if ($user->isEmployee() && $user->email) {
+            try {
+                $status = Password::sendResetLink(['email' => $user->email]);
+            } catch (TransportExceptionInterface $exception) {
+                report($exception);
+
+                return redirect()->route('users.index')->with(
+                    'warning',
+                    'Employee account created, but the activation email could not be sent. Check the email address and mail service, then resend the link from account management.'
+                );
+            }
+            if ($status === PasswordBroker::RESET_LINK_SENT) {
+                $auditLogger->record('user.password_reset_link_sent', $user);
+
+                return redirect()->route('users.index')->with('success', 'Employee account created. A secure activation link was emailed.');
+            }
+
+            return redirect()->route('users.index')->with(
+                'warning',
+                'Employee account created, but the activation email could not be sent. Check the email address and mail service, then resend the link from account management.'
+            );
+        }
+
+        return redirect()->route('users.index')->with(
+            $user->isEmployee() ? 'warning' : 'success',
+            $user->isEmployee()
+                ? 'Employee account created without an email. Add a verified contact address and send an activation link from account management.'
+                : 'User account created.'
+        );
     }
 
     public function edit(Request $request, User $user): View
@@ -68,6 +145,7 @@ class UserController extends Controller
 
         return view('users.form', [
             'user' => $user->load('employee'),
+            'selectedEmployeeId' => $user->employee?->id,
             'employees' => Employee::whereNull('archived_at')
                 ->where(function ($query) use ($user) {
                     $query->whereNull('user_id')->orWhere('user_id', $user->id);
@@ -96,12 +174,11 @@ class UserController extends Controller
         $previousRole = $user->role;
         $previousEffectiveRole = $user->canFinalApprove() ? 'mayor' : $user->role;
         $previousStatus = $user->is_active;
-        $passwordReset = filled($data['password'] ?? null);
-
-        DB::transaction(function () use ($user, $data, $request, $passwordReset, $previousStatus) {
+        DB::transaction(function () use ($user, $data, $previousStatus) {
             $user->fill([
                 'name' => $this->accountName($data),
-                'email' => $data['email'],
+                'username' => $data['username'] ?? $user->username,
+                'email' => $data['email'] ?? null,
                 'role' => $data['role'],
                 'first_name' => $data['role'] === 'employee' ? null : ($data['first_name'] ?? $user->first_name),
                 'middle_name' => $data['role'] === 'employee' ? null : ($data['middle_name'] ?? null),
@@ -110,15 +187,14 @@ class UserController extends Controller
                 'is_active' => $data['is_active'] ?? true,
                 'can_final_approve' => $data['role'] === 'admin' && ($data['can_final_approve'] ?? false),
             ]);
-            if (! empty($data['password'])) {
-                $user->password = $data['password'];
-                $user->setRememberToken(Str::random(60));
+            if ($user->isDirty('email')) {
+                $user->email_verified_at = null;
             }
             if ($previousStatus && ! $user->is_active) {
                 $user->setRememberToken(Str::random(60));
             }
             $user->save();
-            if (($passwordReset || ($previousStatus && ! $user->is_active)) && Schema::hasTable('sessions')) {
+            if (($previousStatus && ! $user->is_active) && Schema::hasTable('sessions')) {
                 DB::table('sessions')->where('user_id', $user->id)->delete();
             }
             if (array_key_exists('employee_id', $data)) {
@@ -141,21 +217,53 @@ class UserController extends Controller
                 'new_status' => $user->is_active ? 'active' : 'inactive',
             ]);
         }
-        if ($passwordReset) {
-            $auditLogger->record('user.credentials_reset', $user);
-        }
         $auditLogger->record('user.updated', $user, ['role' => $user->role, 'is_active' => $user->is_active]);
 
         return redirect()->route('users.index')->with('success', 'User account updated.');
     }
 
+    public function sendActivationLink(Request $request, User $user, AuditLogger $auditLogger): RedirectResponse
+    {
+        $this->authorizeAccountManagement($request->user(), $user);
+        if (! $user->email) {
+            return back()->withErrors(['email' => 'Add an email address before sending an account activation or password reset link.']);
+        }
+
+        try {
+            $status = Password::sendResetLink(['email' => $user->email]);
+        } catch (TransportExceptionInterface $exception) {
+            report($exception);
+
+            return back()->withErrors(['email' => 'The activation/reset email could not be sent. Check the mail service and try again.']);
+        }
+        if ($status !== PasswordBroker::RESET_LINK_SENT) {
+            return back()->withErrors(['email' => __($status)]);
+        }
+        $auditLogger->record('user.password_reset_link_sent', $user);
+
+        return back()->with('success', 'A secure password setup/reset link was sent to the registered email address.');
+    }
+
     private function validated(Request $request, ?User $user = null): array
     {
+        $request->merge([
+            'username' => filled($request->input('username'))
+                ? Str::lower(trim((string) $request->input('username')))
+                : null,
+            'email' => filled($request->input('email'))
+                ? Str::lower(trim((string) $request->input('email')))
+                : null,
+        ]);
         $employeeRole = $request->input('role') === 'employee';
         $namePartsRequired = ! $user && ! $employeeRole ? 'required' : 'nullable';
         $data = $request->validate([
             'name' => [$employeeRole ? 'nullable' : 'required', 'string', 'max:150'],
-            'email' => ['required', 'email', 'max:255', Rule::unique('users')->ignore($user?->id)],
+            'email' => ['nullable', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user?->id)],
+            'username' => [
+                Rule::requiredIf(fn () => ! $employeeRole && ! filled($request->input('email'))),
+                'nullable', 'string', 'min:3', 'max:100', 'regex:/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/',
+                Rule::unique('users', 'username')->ignore($user?->id),
+            ],
             'role' => ['required', Rule::in($this->allowedRoles($request->user(), $user))],
             'first_name' => [$employeeRole ? 'nullable' : $namePartsRequired, 'string', 'max:100'],
             'middle_name' => ['nullable', 'string', 'max:100'],
@@ -180,8 +288,12 @@ class UserController extends Controller
                 Rule::exists('departments', 'id'),
             ],
             'is_active' => ['nullable', 'boolean'],
-            'password' => [$user ? 'nullable' : 'required', 'string', 'min:12', 'confirmed'],
         ]);
+        if (! $user && ! $employeeRole) {
+            $data += $request->validate([
+                'password' => ['required', 'string', 'min:12', 'confirmed'],
+            ]);
+        }
         if (! empty($data['employee_id']) && Employee::whereKey($data['employee_id'])
             ->whereNotNull('user_id')->where('user_id', '!=', $user?->id)->exists()) {
             throw ValidationException::withMessages(['employee_id' => 'This employee record is already linked to another account.']);

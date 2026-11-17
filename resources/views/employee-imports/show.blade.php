@@ -1,259 +1,275 @@
 @extends('layouts.app')
-@section('title', 'Workbook review')
+@section('title', 'Review employee import')
 @section('content')
-    @php
-        $mapping = $import->field_mappings ?? [];
-        $dateSourceColumn = $mapping['date_source_column'] ?? null;
-        $dateTarget = $mapping['date_target'] ?? 'source_only';
-        $officeLabels = collect($officeColumns)->keyBy('index');
-        $canConfirm = in_array($import->status, ['mapping_approved', 'review_required'], true)
-            && $import->field_mappings
-            && $import->previewed_at;
-    @endphp
     <div class="page-heading">
         <div>
-            <span class="eyebrow">CONFIDENTIAL HRMO REVIEW · IMPORT #{{ $import->id }}</span>
-            <h1>{{ $import->original_name }}</h1>
-            <p>{{ $import->row_count }} source rows · Uploaded by {{ $import->uploader->name }} · {{ $import->created_at->format('M j, Y H:i') }}</p>
+            <span class="eyebrow">EMPLOYEE RECORDS · BATCH #{{ $import->id }}</span>
+            <h1>Review employee import</h1>
+            <p>Review the detected {{ $import->worksheet_name }} employee sheet, correct exceptions, and import valid employee accounts. No employee-by-employee HR approval is needed.</p>
         </div>
-        <a class="button button-outline" href="{{ route('employee-imports.source', $import) }}">Download original workbook</a>
+        <a class="button button-secondary" href="{{ route('employee-imports.source', $import) }}">Download original workbook</a>
     </div>
 
-    <div class="info-note">Original workbook SHA-256: <code>{{ $import->source_sha256 }}</code>. Source cells, formulas, number formats, duplicate headers, blank headers, and the original file are retained in private storage.</div>
-    <div class="attendance-summary top-space">
-        <div><small>ROWS</small><b>{{ $import->row_count }}</b></div>
-        <div><small>IMPORTED</small><b>{{ $import->imported_count }}</b></div>
-        <div><small>SKIPPED / DUPLICATE</small><b>{{ $import->skipped_count }}</b></div>
-        <div><small>NEEDS REVIEW</small><b>{{ $import->review_count }}</b></div>
-    </div>
-    @if($import->previewed_at)
-        <div class="info-note top-space">Validation preview completed {{ $import->previewed_at->format('M j, Y H:i') }} by {{ $import->previewer?->name ?? 'an authorized HR user' }}. {{ $import->review_count }} row(s) require review; they will remain staged and will not be imported until corrected. No employee records have been changed by preview.</div>
-    @endif
+    @if (session('success'))<div class="success-note">{{ session('success') }}</div>@endif
+    @if (session('warning'))<div class="warning-note">{{ session('warning') }}</div>@endif
 
-    @if(in_array($import->status, ['pending_review', 'mapping_approved', 'review_required'], true))
-        <section class="panel top-space">
-            <div class="panel-heading"><div><h2>Step 2: Review and approve field mappings</h2><p>Choose mappings explicitly. No source column is silently inferred as an office or employee field.</p></div></div>
+    <section class="panel">
+        <div class="panel-heading">
+            <div>
+                <h2>Step 2: Automatic analysis</h2>
+                <p>{{ $import->original_name }} · {{ $summary['total'] }} occupied employee rows detected on {{ $import->worksheet_name ?: 'the employee' }} worksheet (headers on row {{ $import->header_row ?: 1 }})</p>
+                @if($import->worksheet_names)
+                    <details class="top-space"><summary>{{ count($import->worksheet_names) }} worksheets recognized</summary><p>{{ implode(' · ', $import->worksheet_names) }}</p></details>
+                @endif
+            </div>
+            <span class="status-tag">{{ match($import->status) {
+                'mapping_required', 'pending_review' => 'Mapping Required',
+                'ready_for_import', 'mapping_approved' => 'Ready for Import',
+                'importing' => 'Importing',
+                'completed' => 'Completed',
+                'completed_with_errors', 'review_required' => 'Completed with Errors',
+                'failed' => 'Failed',
+                default => ucfirst(str_replace('_', ' ', $import->status)),
+            } }}</span>
+        </div>
+        <div class="summary-grid">
+            <div class="summary-card"><b>{{ $summary['valid'] }}</b><span>Ready to import</span></div>
+            <div class="summary-card"><b>{{ $summary['new_records'] }}</b><span>New employee records</span></div>
+            <div class="summary-card"><b>{{ $summary['accounts_to_create'] }}</b><span>New accounts</span></div>
+            <div class="summary-card"><b>{{ $summary['existing_to_update'] }}</b><span>Existing employees to update</span></div>
+            <div class="summary-card"><b>{{ $summary['imported'] }}</b><span>Successfully imported</span></div>
+            <div class="summary-card"><b>{{ $summary['updated'] }}</b><span>Employee records updated</span></div>
+            <div class="summary-card"><b>{{ $summary['accounts_created'] }}</b><span>Accounts created</span></div>
+            <div class="summary-card"><b>{{ $summary['office_heads'] }}</b><span>Verified Office Heads</span></div>
+            <div class="summary-card"><b>{{ $summary['employees'] }}</b><span>Employee accounts</span></div>
+            <div class="summary-card"><b>{{ $summary['departments'] }}</b><span>Departments detected</span></div>
+            <div class="summary-card"><b>{{ $summary['matched_departments'] }}</b><span>Departments matched</span></div>
+            <div class="summary-card"><b>{{ $summary['unmatched_departments']->count() }}</b><span>Departments unmatched</span></div>
+            <div class="summary-card"><b>{{ $summary['matched_positions'] }}</b><span>Positions matched</span></div>
+            <div class="summary-card"><b>{{ $summary['unmatched_positions']->count() }}</b><span>Positions unmatched</span></div>
+            <div class="summary-card"><b>{{ $summary['duplicates'] }}</b><span>Duplicates to skip</span></div>
+            <div class="summary-card"><b>{{ $summary['corrections'] }}</b><span>Records to correct</span></div>
+            <div class="summary-card"><b>{{ $summary['failed'] }}</b><span>Failed records</span></div>
+        </div>
+        <p class="info-note top-space">Email is optional during import. Each new account receives a unique, randomly generated temporary credential and must complete secure password setup; HR can send an activation link after an email is added. Only HR-approved Office Head designations receive that role.</p>
+    </section>
 
-            <form method="GET" action="{{ route('employee-imports.show', $import) }}" class="filter-bar">
-                <label>Review OFFICE source column
-                    <select name="office_column" onchange="this.form.submit()">
-                        <option value="" @selected($selectedOfficeColumn === 0)>Choose the source column only after HRMO review</option>
+    @if($canEditMappings)
+        <section class="panel">
+            <div class="panel-heading">
+                <div><h2>Step 3: Confirm automatic matches</h2><p>Choose the workbook’s OFFICE column for department / organizational unit names. Departments and positions are matched automatically; only exceptions need your attention.</p></div>
+            </div>
+            <form method="GET" action="{{ route('employee-imports.show', $import) }}" class="form-actions top-space">
+                <label>Office / organizational unit column
+                    <select name="office_column" required>
+                        <option value="">Select the column containing office names</option>
                         @foreach($officeColumns as $column)
-                            <option value="{{ $column['index'] }}" @selected($selectedOfficeColumn === $column['index'])>
-                                Column {{ $column['letter'] }} — duplicate OFFICE header
+                            <option value="{{ $column['index'] }}" @selected($selectedOfficeColumn === (int) $column['index'])>
+                                Column {{ $column['letter'] }} — {{ $column['label'] }} ({{ $column['filled'] }} unique values){{ $suggestedOfficeColumn === (int) $column['index'] ? ' — suggested' : '' }}
                             </option>
                         @endforeach
                     </select>
                 </label>
-                <noscript><button class="button button-outline">Load selected column values</button></noscript>
+                <button class="button button-secondary">Analyze column</button>
             </form>
 
-            <div class="content-grid">
-                <section class="info-note">
-                    <strong>Ambiguous source fields</strong>
-                    <p>Both OFFICE columns and every unnamed column remain separate source fields. Only the OFFICE column explicitly selected below is used for department mapping. Unselected OFFICE columns and unnamed columns remain source-only unless an HRMO-approved mapping is explicitly chosen.</p>
-                    <ul>
-                        @foreach($ambiguousColumns as $column)
+            @if($selectedOfficeColumn)
+                <form method="POST" action="{{ route('employee-imports.mapping', $import) }}" class="form-stack top-space">
+                    @csrf
+                    @method('PUT')
+                    @if($errors->any())
+                        <div class="warning-note"><ul>@foreach($errors->all() as $error)<li>{{ $error }}</li>@endforeach</ul></div>
+                    @endif
+                    <input type="hidden" name="office_source_column" value="{{ $selectedOfficeColumn }}">
+                    <input type="hidden" name="employment_status" value="{{ $import->field_mappings['employment_status'] ?? 'Active' }}">
+
+                    @if($officeValues->isNotEmpty())
+                        <h3>Departments</h3>
+                        <p class="muted">Each distinct office is assigned automatically when it matches an active department. For an unmatched value, select an existing department or explicitly create one.</p>
+                        @foreach($officeValues as $office)
                             @php
-                                $fieldKey = (string) $column['index'];
+                                $key = hash('sha256', $office);
+                                $selectedDepartment = old("department_map.{$key}", $mappingSummary['department_map'][$key] ?? '');
+                                $matchedDepartment = $selectedDepartment !== 'create'
+                                    ? $departments->firstWhere('id', (int) $selectedDepartment)
+                                    : null;
                             @endphp
-                            <li>
-                                <b>Column {{ $column['letter'] }} — {{ $column['display_label'] }}</b>
-                                @if(mb_strtoupper((string) $column['label']) === 'OFFICE')
-                                    {{ $selectedOfficeColumn === $column['index'] ? '(selected for department mapping)' : '(retained separately; not mapped)' }}
-                                @else
-                                    (retained source-only by default)
-                                @endif
-                                @if($column['label'] === null)
-                                    @php
-                                        $cellCount = $import->rows->filter(fn ($row) => collect($row->source_data)->contains(fn ($cell) => $cell['column'] === $column['letter'] && trim((string) $cell['display_value']) !== ''))->count();
-                                    @endphp
-                                    <small>Non-empty in {{ $cellCount }} row(s). It is not assigned to an employee field unless HRMO selects and approves a target below.</small>
-                                @endif
-                                <label class="top-space">HRMO meaning / review note
-                                    <input type="text" name="ambiguous_field_notes[{{ $column['index'] }}]" form="employee-import-mapping" maxlength="500" value="{{ old('ambiguous_field_notes.'.$column['index'], $mapping['ambiguous_field_notes'][$fieldKey] ?? '') }}" placeholder="Optional; do not guess">
-                                </label>
-                            </li>
-                        @endforeach
-                    </ul>
-                </section>
-
-                <section class="panel panel-muted">
-                    <p><b>Original source column meanings</b> are recorded by column letter and preserved exactly. The blank-header date is source-only unless you deliberately select an employee date field and approve it.</p>
-                    <form id="employee-import-mapping" method="POST" action="{{ route('employee-imports.mapping', $import) }}" class="form-stack">
-                        @csrf
-                        @method('PUT')
-                        <input type="hidden" name="office_source_column" value="{{ $selectedOfficeColumn }}">
-
-                        <label>Employee name format *
-                            <select name="name_format" required>
-                                <option value="">Select the confirmed source format</option>
-                                <option value="surname_comma_given" @selected(old('name_format', $mapping['name_format'] ?? '') === 'surname_comma_given')>Surname, Given Name Middle Name</option>
-                                <option value="given_middle_surname" @selected(old('name_format', $mapping['name_format'] ?? '') === 'given_middle_surname')>Given Name Middle Name Surname</option>
-                            </select>
-                        </label>
-                        <label>Verified employment status *
-                            <select name="employment_status" required>
-                                <option value="">Select after HRMO verification</option>
-                                @foreach(['Active', 'On Leave', 'Separated', 'Retired'] as $status)
-                                    <option value="{{ $status }}" @selected(old('employment_status', $mapping['employment_status'] ?? '') === $status)>{{ $status }}</option>
-                                @endforeach
-                            </select>
-                        </label>
-
-                        <label>Unnamed date source column
-                            <select name="date_source_column">
-                                <option value="">Do not map an unnamed date</option>
-                                @foreach($ambiguousColumns as $column)
-                                    @if($column['label'] === null)
-                                        <option value="{{ $column['index'] }}" @selected((string) old('date_source_column', $dateSourceColumn) === (string) $column['index'])>Column {{ $column['letter'] }} — unnamed</option>
-                                    @endif
-                                @endforeach
-                            </select>
-                        </label>
-                        <label>Unnamed date mapping
-                            <select name="date_target">
-                                <option value="source_only" @selected(old('date_target', $dateTarget) === 'source_only')>Keep source-only (recommended until HRMO confirms meaning)</option>
-                                <option value="date_of_birth" @selected(old('date_target', $dateTarget) === 'date_of_birth')>Date of birth</option>
-                                <option value="date_hired" @selected(old('date_target', $dateTarget) === 'date_hired')>Date hired</option>
-                                <option value="license_expiration_date" @selected(old('date_target', $dateTarget) === 'license_expiration_date')>License expiration date</option>
-                                <option value="expected_retirement_date" @selected(old('date_target', $dateTarget) === 'expected_retirement_date')>Expected retirement date</option>
-                            </select>
-                        </label>
-                        <div class="info-note">Mapping the unnamed date to an employee field is an explicit HRMO decision and will be included in the mapping audit. It remains source-only by default.</div>
-
-                        <h3>Map each source office to an existing department</h3>
-                        <p>{{ $selectedOfficeColumn ? 'Column '.$officeLabels[$selectedOfficeColumn]['letter'].' is selected for department mapping.' : 'First select which OFFICE column HRMO confirms as the department assignment.' }} No department will be created automatically.</p>
-                        @foreach($officeValues as $officeValue)
-                            @php
-                                $officeKey = hash('sha256', $officeValue);
-                            @endphp
-                            <label>Source value: <b>{{ $officeValue }}</b>
-                                <select name="department_map[{{ $officeKey }}]" required>
-                                    <option value="">Select an existing department</option>
-                                    @foreach($departments as $department)
-                                        <option value="{{ $department->id }}" @selected((string) old('department_map.'.$officeKey, $mapping['department_map'][$officeKey] ?? '') === (string) $department->id)>{{ $department->name }}</option>
-                                    @endforeach
-                                </select>
+                            @if($matchedDepartment)
+                                <input type="hidden" name="department_map[{{ $key }}]" value="{{ $matchedDepartment->id }}">
+                            @else
+                            <label class="mapping-row">
+                                <span><b>{{ $office }}</b><small>{{ $matchedDepartment ? 'Matched: '.$matchedDepartment->name : 'Needs department assignment' }}</small></span>
+                                    <select name="department_map[{{ $key }}]">
+                                        <option value="">Choose a department</option>
+                                        @php $departmentSuggestions = $mappingSummary['department_suggestions'][$key] ?? []; @endphp
+                                        @if($departmentSuggestions)
+                                            <optgroup label="Suggested matches">
+                                                @foreach($departmentSuggestions as $suggestion)
+                                                    <option value="{{ $suggestion['id'] }}" @selected((string) $selectedDepartment === (string) $suggestion['id'])>{{ $suggestion['name'] }} ({{ $suggestion['score'] }}% match)</option>
+                                                @endforeach
+                                            </optgroup>
+                                        @endif
+                                        <optgroup label="All existing departments">
+                                            @foreach($departments as $department)
+                                                <option value="{{ $department->id }}" @selected((string) $selectedDepartment === (string) $department->id)>{{ $department->name }}{{ $department->code ? ' ('.$department->code.')' : '' }}</option>
+                                            @endforeach
+                                        </optgroup>
+                                        <option value="create" @selected($selectedDepartment === 'create')>Create department named “{{ $office }}”</option>
+                                    </select>
                             </label>
+                            @endif
                         @endforeach
+                    @else
+                        <p class="empty-note">No office values were found in this column. Select the column containing employee department names before saving.</p>
+                    @endif
 
-                        <h3>Map latest positions</h3>
+                    @if($positionPairs->isNotEmpty())
+                        <h3 class="top-space">Positions</h3>
+                        <p class="muted">Existing positions are selected automatically. Unmatched titles can be linked to an existing position or explicitly added to that department.</p>
                         @foreach($positionPairs as $pair)
                             @php
-                                $positionKey = hash('sha256', $pair['office']."\0".$pair['position']);
+                                $key = hash('sha256', $pair['office']."\0".$pair['position']);
+                                $selectedPosition = old("position_map.{$key}", $mappingSummary['position_map'][$key] ?? '');
+                                $departmentKey = hash('sha256', $pair['office']);
+                                $departmentId = old("department_map.{$departmentKey}", $mappingSummary['department_map'][$departmentKey] ?? null);
+                                $departmentId = filter_var($departmentId, FILTER_VALIDATE_INT) ?: null;
+                                $positionCandidates = $positions->filter(fn($position) => !$position->department_id || (int)$position->department_id === (int)$departmentId);
+                                $matchedPosition = $selectedPosition !== 'create'
+                                    ? $positionCandidates->firstWhere('id', (int) $selectedPosition)
+                                    : null;
+                                $positionSuggestions = $mappingSummary['position_suggestions'][$key] ?? [];
+                                $suggestedPositionIds = collect($positionSuggestions)->pluck('id')->all();
                             @endphp
-                            <label>{{ $pair['office'] }} — {{ $pair['position'] }}
-                                <select name="position_map[{{ $positionKey }}]" required>
-                                    <option value="">Select an existing position</option>
-                                    @foreach($positions as $position)
-                                        <option value="{{ $position->id }}" @selected((string) old('position_map.'.$positionKey, $mapping['position_map'][$positionKey] ?? '') === (string) $position->id)>{{ $position->title }}{{ $position->department ? ' — '.$position->department->name : '' }}</option>
-                                    @endforeach
-                                </select>
+                            @if($matchedPosition)
+                                <input type="hidden" name="position_map[{{ $key }}]" value="{{ $matchedPosition->id }}">
+                            @else
+                            <label class="mapping-row">
+                                <span><b>{{ $pair['position'] }}</b><small>{{ $pair['office'] }} · {{ $matchedPosition ? 'Matched: '.$matchedPosition->title : 'Needs position assignment' }}</small></span>
+                                    <select name="position_map[{{ $key }}]">
+                                        <option value="">Choose a position</option>
+                                        @if($positionSuggestions)
+                                            <optgroup label="Suggested matches">
+                                                @foreach($positionSuggestions as $suggestion)
+                                                    @if($positionCandidates->contains('id', $suggestion['id']))
+                                                        <option value="{{ $suggestion['id'] }}" @selected((string) $selectedPosition === (string) $suggestion['id'])>{{ $suggestion['title'] }} ({{ $suggestion['score'] }}% match)</option>
+                                                    @endif
+                                                @endforeach
+                                            </optgroup>
+                                        @endif
+                                        <optgroup label="All existing positions">
+                                            @foreach($positionCandidates->reject(fn($position) => in_array($position->id, $suggestedPositionIds, true)) as $position)
+                                                <option value="{{ $position->id }}" @selected((string) $selectedPosition === (string) $position->id)>{{ $position->title }}</option>
+                                            @endforeach
+                                        </optgroup>
+                                        @if($departmentId)
+                                            <option value="create" @selected($selectedPosition === 'create')>Create position “{{ $pair['position'] }}”</option>
+                                        @endif
+                                    </select>
                             </label>
+                            @endif
                         @endforeach
-                        @error('mapping')<p class="form-error">{{ $message }}</p>@enderror
-                        @foreach($errors->all() as $error)<p class="form-error">{{ $error }}</p>@endforeach
-                        @php
-                            $mappingPrerequisitesMissing = $selectedOfficeColumn === 0
-                                || $officeValues->isEmpty()
-                                || $positionPairs->isEmpty()
-                                || $departments->isEmpty()
-                                || $positions->isEmpty();
-                        @endphp
-                        <div class="form-actions"><button class="button button-primary" @disabled($mappingPrerequisitesMissing)>Save and approve mappings</button></div>
-                        @if($selectedOfficeColumn === 0)
-                            <p class="text-muted">Select an OFFICE source column above to load its values before saving mappings.</p>
-                        @elseif($officeValues->isEmpty())
-                            <p class="text-muted">The selected OFFICE column has no values to map. Choose the source column that contains the employee offices.</p>
-                        @elseif($positionPairs->isEmpty())
-                            <p class="text-muted">No rows contain both an office value and a latest position. Choose the correct OFFICE column or review the source workbook.</p>
-                        @elseif($departments->isEmpty() || $positions->isEmpty())
-                            <p class="text-muted">Add existing active departments and positions before approving mappings. This import will not create them automatically.</p>
-                        @else
-                            <p class="text-muted">Complete every required department and position mapping, and confirm the employee-name format and employment status.</p>
-                        @endif
-                    </form>
-                </section>
-            </div>
+                    @endif
+                    @error('office_source_column')<p class="form-error">{{ $message }}</p>@enderror
+                    @error('department_map')<p class="form-error">{{ $message }}</p>@enderror
+                    @error('position_map')<p class="form-error">{{ $message }}</p>@enderror
+                    <div class="form-actions"><button class="button button-primary">Save matches and validate employees</button></div>
+                </form>
+            @endif
+        </section>
+    @endif
 
-            <form method="POST" action="{{ route('employee-imports.confirm', $import) }}" class="form-stack top-space" onsubmit="return confirm('Create new employee records from valid rows? Existing and duplicate records will not be overwritten. Rows requiring review will remain staged.');">
-                @csrf
-                <h3>Step 4: Confirm import</h3>
-                <label class="checkbox-label"><input type="checkbox" name="confirm_import" value="1" required @disabled(! $canConfirm)> I reviewed the validation preview and confirm importing valid rows only.</label>
-                <div class="form-actions">
-                    <button class="button button-danger" @disabled(! $canConfirm)>Confirm import of valid records</button>
-                    @if(! $canConfirm)
-                        <span class="text-muted">{{ ! $import->field_mappings ? 'Approve the field mappings first.' : (! $import->previewed_at ? 'Save the mappings to validate rows before importing.' : 'This workbook has already been processed.') }}</span>
+    @if($import->field_mappings && $import->status !== 'completed')
+        <section class="panel">
+            <div class="panel-heading">
+                <div><h2>Step 5: Confirm and import</h2><p>{{ $summary['ready_new'] }} new employee(s), {{ $summary['ready_updates'] }} existing employee(s) to update, and {{ $summary['accounts_to_create'] }} new account(s) are ready. Problem rows remain available for correction.</p></div>
+            </div>
+            @if($summary['valid'] > 0)
+                <form method="POST" action="{{ route('employee-imports.confirm', $import) }}" onsubmit="return confirm('Import {{ $summary['ready_new'] }} new employee(s), update {{ $summary['ready_updates'] }} existing employee(s), and create {{ $summary['accounts_to_create'] }} new account(s)?')">
+                    @csrf
+                    <input type="hidden" name="confirm_import" value="1">
+                    <button class="button button-primary">Confirm and import ready records</button>
+                </form>
+            @elseif($summary['duplicates'] > 0 && $summary['corrections'] === 0 && $summary['failed'] === 0)
+                <form method="POST" action="{{ route('employee-imports.confirm', $import) }}" onsubmit="return confirm('Finish this batch without importing any records? All detected records are duplicates.')">
+                    @csrf
+                    <input type="hidden" name="confirm_import" value="1">
+                    <button class="button button-secondary">Finish batch and skip duplicates</button>
+                </form>
+            @else
+                <p class="empty-note">There are no valid records ready to import. Correct the flagged records below and save your changes.</p>
+            @endif
+        </section>
+    @endif
+
+    <section class="panel">
+        <div class="panel-heading"><div><h2>Step 4: Validation and corrections</h2><p>Review unmatched departments, positions, missing details, and duplicate records.</p></div></div>
+        @forelse($rows as $row)
+            <article class="application-row">
+                <span class="row-date">Row {{ $row->source_row }}</span>
+                <div class="row-main">
+                    <b>{{ implode(' ', array_filter($parsedNames[$row->id] ?? [])) ?: 'Name needs review' }}</b>
+                    <small>
+                        {{ $row->review_data['classification']['department'] ?? 'Department unresolved' }} · {{ $row->review_data['classification']['position'] ?? 'Position unresolved' }} · {{ ucfirst(str_replace('_', ' ', $row->status)) }}
+                        @if(!empty($row->review_data['classification']['plantilla_item_no']))
+                            · Item {{ $row->review_data['classification']['plantilla_item_no'] }}
+                        @endif
+                        @if(!empty($row->review_data['classification']['identity_type']) && in_array($row->review_data['classification']['identity_type'], ['item_name', 'item_name_dob'], true))
+                            · HRIS will generate an internal employee number; re-import matching uses the item number and employee details.
+                        @endif
+                    </small>
+                    @if($row->issues)
+                        <ul>@foreach($row->issues as $issue)<li>{{ $issue }}</li>@endforeach</ul>
+                    @endif
+                    @if($canEditMappings && !in_array($row->status, ['imported', 'duplicate'], true))
+                        @php
+                            $correctedName = $row->review_data['name'] ?? [];
+                            $correctedEmployee = $row->review_data['employee'] ?? [];
+                            $correctedProfile = $row->review_data['profile'] ?? [];
+                            $defaults = $correctionDefaults[$row->id];
+                        @endphp
+                        <details class="top-space">
+                            <summary>Correct employee details</summary>
+                            <form method="POST" action="{{ route('employee-imports.rows.review', [$import, $row]) }}" class="form-stack top-space">
+                                @csrf
+                                @method('PUT')
+                                <div class="form-grid">
+                                    <label>First name *<input name="first_name" value="{{ $correctedName['first_name'] ?? $defaults['name']['first_name'] ?? '' }}" required></label>
+                                    <label>Middle name<input name="middle_name" value="{{ $correctedName['middle_name'] ?? $defaults['name']['middle_name'] ?? '' }}"></label>
+                                    <label>Last name *<input name="last_name" value="{{ $correctedName['last_name'] ?? $defaults['name']['last_name'] ?? '' }}" required></label>
+                                    <label>Suffix<input name="suffix" value="{{ $correctedName['suffix'] ?? $defaults['name']['suffix'] ?? '' }}"></label>
+                                    <label>Employee number<input name="employee_no" value="{{ $correctedEmployee['employee_no'] ?? $defaults['employee']['employee_no'] ?? '' }}"><small>For Plantilla records, HRIS generates an internal employee number when this is blank.</small></label>
+                                    <label>Email for login (optional)<input type="email" name="email" value="{{ $correctedEmployee['email'] ?? $defaults['employee']['email'] ?? '' }}"><small>HR can add an email later and send a secure activation link.</small></label>
+                                    <label>Gender<input name="sex" value="{{ $correctedEmployee['sex'] ?? $defaults['employee']['sex'] ?? '' }}"></label>
+                                    <label>Birth date<input type="date" name="date_of_birth" value="{{ $correctedEmployee['date_of_birth'] ?? $defaults['employee']['date_of_birth'] ?? '' }}"></label>
+                                    <label>Employment category<input name="source_classification" value="{{ $correctedProfile['source_classification'] ?? $defaults['profile']['source_classification'] ?? '' }}"></label>
+                                    <label>Nature of appointment<input name="employment_type" value="{{ $correctedEmployee['employment_type'] ?? $defaults['employee']['employment_type'] ?? '' }}"></label>
+                                    <label>Position level<input name="position_level" value="{{ $correctedProfile['position_level'] ?? $defaults['profile']['position_level'] ?? '' }}"></label>
+                                </div>
+                                @if(!empty($row->review_data['classification']['possible_name_matches']))
+                                    <p class="warning-note">Possible existing name matches: {{ collect($row->review_data['classification']['possible_name_matches'])->pluck('full_name')->implode(', ') }}.</p>
+                                    <label class="checkbox-label"><input type="checkbox" name="confirm_distinct_employee" value="1" @checked(!empty($correctedEmployee['confirm_distinct_employee']))> I confirm this is a different person from the possible match(es).</label>
+                                @endif
+                                <button class="button button-secondary">Save corrections and revalidate</button>
+                            </form>
+                        </details>
                     @endif
                 </div>
-            </form>
-        </section>
-    @endif
-
-    @if($import->mappingEvents->isNotEmpty())
-        <section class="panel top-space">
-            <div class="panel-heading"><div><h2>Mapping audit history</h2><p>Each approval records the source column numbers, destinations, and approver.</p></div></div>
-            @foreach($import->mappingEvents as $event)
-                <div class="application-row"><span class="row-date">{{ $event->created_at->format('M j, Y H:i') }}</span><span class="row-main"><b>{{ $event->changer->name }}</b><small>Office column {{ $event->mapping['office_source_column'] }} · {{ count($event->mapping['department_map']) }} departments · {{ count($event->mapping['position_map']) }} positions · unnamed date: {{ str_replace('_', ' ', $event->mapping['date_target']) }}</small></span></div>
-            @endforeach
-        </section>
-    @endif
-
-    <section class="panel top-space">
-        <div class="panel-heading"><div><h2>Source workbook preview</h2><p>All source columns, including both OFFICE fields and unnamed date column, are shown without merging or dropping values.</p></div></div>
-        <div class="table-wrap">
-            <table>
-                <thead><tr><th>Excel row</th><th>Review status</th><th>Parsed name / HRMO review</th>@foreach($import->source_headers as $header)<th>{{ $header['letter'] }} · {{ $header['display_label'] }}</th>@endforeach</tr></thead>
-                <tbody>
-                    @foreach($rows as $row)
-                        <tr>
-                            <td>{{ $row->source_row }}</td>
-                            @php
-                                $rowStatusLabel = match ($row->status) {
-                                    'duplicate' => 'Duplicate',
-                                    'imported' => 'Successfully imported',
-                                    'needs_review' => 'Incomplete — HRMO review required',
-                                    'pending_review' => $import->previewed_at ? 'Ready for import · Valid' : 'Pending HRMO review',
-                                    default => str_replace('_', ' ', $row->status),
-                                };
-                            @endphp
-                            <td><span class="status-tag">{{ $rowStatusLabel }}</span>@if($row->issues)<small class="form-error">{{ implode(' ', $row->issues) }}</small>@endif</td>
-                            @php
-                                $parsedName = $parsedNames[$row->id] ?? null;
-                            @endphp
-                            <td>
-                                @if($parsedName)
-                                    {{ trim($parsedName['first_name'].' '.($parsedName['middle_name'] ?? '').' '.$parsedName['last_name']) }} {{ $parsedName['suffix'] ?? '' }}
-                                @else
-                                    <span class="text-muted">Name requires HRMO parsing</span>
-                                @endif
-                                @if(in_array($import->status, ['pending_review', 'mapping_approved', 'review_required'], true) && !in_array($row->status, ['duplicate', 'imported'], true))
-                                    <details class="correction-details">
-                                        <summary>{{ $row->review_data ? 'Edit reviewed name' : 'Review / correct name' }}</summary>
-                                        <form method="POST" action="{{ route('employee-imports.rows.review', [$import, $row]) }}" class="correction-form">
-                                            @csrf
-                                            @method('PUT')
-                                            <label>First name<input name="first_name" maxlength="100" required value="{{ old('first_name', $parsedName['first_name'] ?? '') }}"></label>
-                                            <label>Middle name<input name="middle_name" maxlength="100" value="{{ old('middle_name', $parsedName['middle_name'] ?? '') }}"></label>
-                                            <label>Last name<input name="last_name" maxlength="100" required value="{{ old('last_name', $parsedName['last_name'] ?? '') }}"></label>
-                                            <label>Suffix<input name="suffix" maxlength="20" value="{{ old('suffix', $parsedName['suffix'] ?? '') }}"></label>
-                                            <button class="button button-outline">Save reviewed name</button>
-                                        </form>
-                                        @if($row->reviewer)<small>Reviewed by {{ $row->reviewer->name }}{{ $row->reviewed_at ? ' · '.$row->reviewed_at->format('M j, Y H:i') : '' }}</small>@endif
-                                    </details>
-                                @elseif($row->reviewer)
-                                    <small>HRMO reviewed by {{ $row->reviewer->name }}</small>
-                                @endif
-                            </td>
-                            @foreach($row->source_data as $cell)
-                                <td>{{ $cell['display_value'] }}</td>
-                            @endforeach
-                        </tr>
-                    @endforeach
-                </tbody>
-            </table>
-        </div>
+                <span class="status-tag">{{ match($row->status) {
+                    'unvalidated' => 'Awaiting Mapping',
+                    'existing_to_update' => 'Existing Employee',
+                    'ready' => 'Ready to Import',
+                    'ready_to_update' => 'Ready to Update',
+                    'needs_review' => 'Needs Correction',
+                    'imported' => 'Imported',
+                    'updated' => 'Updated',
+                    'duplicate' => 'Duplicate to Skip',
+                    'failed' => 'Failed',
+                    default => ucfirst(str_replace('_', ' ', $row->status)),
+                } }}</span>
+            </article>
+        @empty
+            <p class="empty-note">No employee records were found in this workbook.</p>
+        @endforelse
         <div class="pagination-wrap">{{ $rows->links() }}</div>
     </section>
 @endsection

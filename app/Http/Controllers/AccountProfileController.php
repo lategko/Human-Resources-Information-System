@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Rules\Password;
 use Illuminate\View\View;
 use RuntimeException;
 use Throwable;
@@ -34,24 +35,31 @@ class AccountProfileController extends Controller
     {
         $user = $request->user()->loadMissing('employee');
         $employee = $user->employee;
+        $request->merge([
+            'username' => filled($request->input('username'))
+                ? Str::lower(trim((string) $request->input('username')))
+                : null,
+            'email' => filled($request->input('email'))
+                ? Str::lower(trim((string) $request->input('email')))
+                : null,
+        ]);
         $rules = [
-            'name' => [$employee ? 'nullable' : 'required', 'string', 'max:150'],
-            'email' => ['required', 'email', 'max:255', Rule::unique('users')->ignore($user->id)],
+            'username' => [
+                Rule::requiredIf(fn () => $employee || ! filled($request->input('email'))),
+                'nullable', 'string', 'min:3', 'max:100',
+                'regex:/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/', Rule::unique('users', 'username')->ignore($user->id),
+            ],
+            'email' => ['nullable', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],
         ];
 
         if ($employee) {
             $rules += [
-                'first_name' => ['required', 'string', 'max:100'],
-                'middle_name' => ['nullable', 'string', 'max:100'],
-                'last_name' => ['required', 'string', 'max:100'],
-                'suffix' => ['nullable', 'string', 'max:20'],
-                'sex' => ['nullable', 'string', 'max:20'],
-                'date_of_birth' => ['nullable', 'date', 'before:today'],
                 'contact_number' => ['nullable', 'string', 'max:40'],
                 'address' => ['nullable', 'string', 'max:2000'],
             ];
         } else {
             $rules += [
+                'name' => ['required', 'string', 'max:150'],
                 'first_name' => ['nullable', 'required_with:last_name', 'string', 'max:100'],
                 'middle_name' => ['nullable', 'string', 'max:100'],
                 'last_name' => ['nullable', 'required_with:first_name', 'string', 'max:100'],
@@ -62,17 +70,23 @@ class AccountProfileController extends Controller
                 'profile_address' => ['nullable', 'string', 'max:2000'],
             ];
         }
+        $credentialsChanged = $user->username !== $request->input('username')
+            || $user->email !== $request->input('email');
+        if ($credentialsChanged || $request->filled('new_password')) {
+            $rules['current_password'] = ['required', 'current_password'];
+        }
+        if ($request->filled('new_password')) {
+            $rules += [
+                'new_password' => ['required', 'string', Password::min(12), 'confirmed'],
+            ];
+        }
 
         $data = $request->validate($rules);
-        $employeeFields = [
-            'first_name', 'middle_name', 'last_name', 'suffix', 'sex',
-            'date_of_birth', 'contact_number', 'address',
-        ];
+        $emailChanged = $user->email !== ($data['email'] ?? null);
 
-        DB::transaction(function () use ($data, $employee, $employeeFields, $user): void {
+        DB::transaction(function () use ($data, $emailChanged, $employee, $user): void {
             if ($employee) {
-                $employee->update(Arr::only($data, $employeeFields));
-                $user->name = $employee->full_name;
+                $employee->update(Arr::only($data, ['contact_number', 'address']));
             } else {
                 $nameParts = Arr::only($data, ['first_name', 'middle_name', 'last_name', 'suffix']);
                 $hasNameParts = filled($nameParts['first_name'] ?? null) && filled($nameParts['last_name'] ?? null);
@@ -91,13 +105,28 @@ class AccountProfileController extends Controller
                 }
             }
 
-            $user->email = $data['email'];
+            $user->username = $data['username'] ?? null;
+            if ($emailChanged) {
+                $user->email = $data['email'] ?? null;
+                $user->email_verified_at = null;
+            }
+            if (filled($data['new_password'] ?? null)) {
+                $user->password = $data['new_password'];
+            }
             $user->save();
         });
+        if ($emailChanged && filled($user->email)) {
+            $user->sendEmailVerificationNotification();
+        }
 
         $auditLogger->record('account.profile_updated', $user, ['fields' => array_keys($data)]);
 
-        return redirect()->route('account.profile')->with('success', 'Your profile information has been updated.');
+        return redirect()->route('account.profile')->with(
+            'success',
+            $emailChanged && filled($user->email)
+                ? 'Your profile has been updated. Check your email to verify the new address.'
+                : 'Your profile information has been updated.'
+        );
     }
 
     public function updatePhoto(Request $request, AuditLogger $auditLogger): RedirectResponse
@@ -146,7 +175,7 @@ class AccountProfileController extends Controller
     {
         $data = $request->validate([
             'current_password' => ['required', 'current_password'],
-            'new_password' => ['required', 'string', 'min:12', 'confirmed'],
+            'new_password' => ['required', 'string', Password::min(12), 'confirmed'],
         ]);
 
         $user = $request->user();

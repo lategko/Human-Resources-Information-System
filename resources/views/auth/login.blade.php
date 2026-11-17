@@ -28,8 +28,8 @@
         @endif
         <form method="POST" action="{{ route('login.store') }}" class="form-stack login-form" @submit="isSubmitting = true">
             @csrf
-            <label for="email">Email Address
-                <input id="email" type="email" name="email" value="{{ old('email') }}" placeholder="Enter your email address" autocomplete="username" required autofocus @if($errors->any()) aria-describedby="login-error" aria-invalid="true" @endif>
+            <label for="login">Username or Email Address
+                <input id="login" type="text" name="login" value="{{ old('login') }}" placeholder="Enter your username or email address" autocomplete="username" required autofocus @if($errors->any()) aria-describedby="login-error" aria-invalid="true" @endif>
             </label>
             <label for="password">Password
                 <span class="password-control">
@@ -38,6 +38,7 @@
                 </span>
             </label>
             <label class="checkbox-label login-remember"><input type="checkbox" name="remember" value="1" @checked(old('remember'))> <span>Keep me signed in</span></label>
+            <a href="{{ route('password.request') }}" class="text-link">Forgot or setting up your password?</a>
             <button type="submit" class="button button-primary button-wide login-submit" :disabled="isSubmitting">
                 <span class="login-spinner" x-show="isSubmitting" aria-hidden="true"></span>
                 <span x-text="isSubmitting ? 'Signing in…' : 'Sign In'">Sign In</span>
