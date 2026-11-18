@@ -35,6 +35,8 @@ class EmployeeWorkbookImportService
 
     private const HEADER_SCAN_ROWS = 10;
 
+    private const READY_ROW_STATUSES = ['ready', 'ready_to_update'];
+
     public function __construct(private readonly EmployeeUsernameGenerator $usernameGenerator) {}
 
     public function stage(UploadedFile $file, int $userId): EmployeeImport
@@ -162,15 +164,22 @@ class EmployeeWorkbookImportService
                             ->first();
                         $existingEmployee ??= $existingProfile?->employee;
                     }
+                    $itemOwners = $itemNumberKey !== '' ? ($existingPlantillaItemOwners[$itemNumberKey] ?? []) : [];
+                    $itemNumberOwnedByAnotherEmployee = $itemOwners
+                        && ! in_array($existingEmployee?->id, $itemOwners, true);
+                    $existingMayor = $this->existingMayorForSourceRow($sourceData, $analysis['format']);
+                    $matchesExistingMayor = $existingMayor
+                        && ! $itemNumberOwnedByAnotherEmployee
+                        && (! $existingEmployee || (int) $existingEmployee->user_id === (int) $existingMayor->id);
+                    if ($matchesExistingMayor) {
+                        $issues[] = 'This record matches the existing Mayor account and will be skipped to avoid creating a duplicate account.';
+                    }
                     if ($existingEmployee?->user?->role === 'admin'
                         && ! in_array('This employee number belongs to a protected Admin account. Imports cannot change that employee or account.', $issues, true)) {
                         $issues[] = 'This employee number belongs to a protected Admin account. Imports cannot change that employee or account.';
                     }
-                    if ($itemNumberKey !== '') {
-                        $itemOwners = $existingPlantillaItemOwners[$itemNumberKey] ?? [];
-                        if ($itemOwners && ! in_array($existingEmployee?->id, $itemOwners, true)) {
-                            $issues[] = 'This plantilla item number is already assigned to another employee.';
-                        }
+                    if ($itemNumberOwnedByAnotherEmployee) {
+                        $issues[] = 'This plantilla item number is already assigned to another employee.';
                     }
                     if ($analysis['format'] === 'legacy'
                         && trim((string) ($this->cellByHeader($sourceData, 'NAME')['display_value'] ?? '')) === '') {
@@ -186,6 +195,7 @@ class EmployeeWorkbookImportService
                         || $duplicatePlantillaItem
                         || $existingEmployee?->trashed()
                         || $existingEmployee?->user?->role === 'admin'
+                        || $matchesExistingMayor
                         ? 'duplicate'
                         : ($issues
                             ? 'needs_review'
@@ -1062,14 +1072,37 @@ class EmployeeWorkbookImportService
         $mappingSummary = $this->mappingSummary($import, $officeColumn);
         $mappedDepartments = count($mappingSummary['department_map']);
         $mappedPositions = count($mappingSummary['position_map']);
+        $positionCount = $officeColumn ? $this->positionPairs($import, $officeColumn)->count() : 0;
+        $statusCounts = $rows->countBy('status');
+        $departmentMatchStatuses = collect($mappingSummary['department_matches'])
+            ->pluck('status')
+            ->countBy();
+        $positionMatchStatuses = collect($mappingSummary['position_matches'])
+            ->pluck('status')
+            ->countBy();
         $readyNew = $rows->where('status', 'ready')->count();
         $readyUpdates = $rows->where('status', 'ready_to_update')->count();
-
-        $validatedRows = $rows->whereIn('status', ['ready', 'ready_to_update']);
+        $validatedRows = $rows->whereIn('status', self::READY_ROW_STATUSES);
+        $possibleDuplicates = $rows->filter(
+            fn (EmployeeImportRow $row) => ! empty($row->review_data['classification']['possible_name_matches'])
+        )->count();
+        $unmatchedDepartmentCount = $departmentMatchStatuses->get('Unmatched', 0);
+        $departmentConfirmationCount = $departmentMatchStatuses->get('Needs HR Confirmation', 0);
+        $unmatchedPositionCount = $positionMatchStatuses->get('Unmatched', 0);
+        $positionConfirmationCount = $positionMatchStatuses->get('Needs HR Confirmation', 0);
+        $mappingBlockedRows = $rows->filter(fn (EmployeeImportRow $row) => $this->hasUnresolvedMappingIssues($row));
 
         return [
             'total' => $import->row_count,
             'valid' => $validatedRows->count(),
+            'awaiting_mapping' => $mappingSummary['departments']->count() + $mappingSummary['positions']->count(),
+            'mapping_pending' => $import->field_mappings ? 0 : 1,
+            'awaiting_validation' => $statusCounts->get('unvalidated', 0)
+                + $statusCounts->get('existing_to_update', 0),
+            'unresolved_records' => $rows->whereIn('status', [
+                'unvalidated', 'existing_to_update', 'needs_review', 'failed',
+            ])->count(),
+            'remaining' => $rows->whereNotIn('status', ['imported', 'updated', 'duplicate'])->count(),
             'ready_new' => $readyNew,
             'ready_updates' => $readyUpdates,
             'new_records' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['action'] ?? 'create') === 'create'
@@ -1082,10 +1115,13 @@ class EmployeeWorkbookImportService
             'updated' => $rows->where('status', 'updated')->count(),
             'accounts_created' => (int) $import->accounts_created_count,
             'failed' => $rows->where('status', 'failed')->count(),
+            'possible_duplicates' => $possibleDuplicates,
+            'mapping_blocked_records' => $mappingBlockedRows->count(),
             'office_heads' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['role'] ?? null) === 'office_head')->count(),
             'employees' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['role'] ?? 'employee') === 'employee'
                 && $row->status !== 'duplicate')->count(),
             'departments' => $officeColumn ? $this->officeValues($import, $officeColumn)->count() : 0,
+            'positions_detected' => $positionCount,
             'matched_positions' => $mappedPositions,
             'position_reference_count' => (int) $import->position_reference_count,
             'reference_position_matches' => count(array_filter($mappingSummary['reference_positions'])),
@@ -1094,10 +1130,36 @@ class EmployeeWorkbookImportService
             'excluded_offices' => (int) $import->excluded_office_count,
             'unmatched_departments' => $mappingSummary['departments'],
             'unmatched_positions' => $mappingSummary['positions'],
+            'unmatched_department_count' => $unmatchedDepartmentCount,
+            'department_confirmation_count' => $departmentConfirmationCount,
+            'unmatched_position_count' => $unmatchedPositionCount,
+            'position_confirmation_count' => $positionConfirmationCount,
             'duplicates' => $rows->where('status', 'duplicate')->count(),
-            'corrections' => $rows->where('status', 'needs_review')->count(),
+            'corrections' => $rows->filter(fn (EmployeeImportRow $row) => $this->needsEmployeeCorrection($row))->count(),
             'matched_departments' => $mappedDepartments,
         ];
+    }
+
+    public function hasUnresolvedMappingIssues(EmployeeImportRow $row): bool
+    {
+        return $row->status === 'needs_review'
+            && collect($row->issues ?? [])
+                ->contains(fn (string $issue) => $this->isMappingIssue($issue));
+    }
+
+    public function needsEmployeeCorrection(EmployeeImportRow $row): bool
+    {
+        return $row->status === 'needs_review'
+            && collect($row->issues ?? [])
+                ->contains(fn (string $issue) => ! $this->isMappingIssue($issue));
+    }
+
+    private function isMappingIssue(string $issue): bool
+    {
+        return str_contains($issue, 'has no approved department mapping.')
+            || $issue === 'The mapped department is no longer active.'
+            || $issue === 'Latest position has no approved position mapping.'
+            || $issue === 'The mapped position is no longer active or does not match the department.';
     }
 
     public function saveMapping(EmployeeImport $import, array $mapping, int $userId): void
@@ -1336,17 +1398,29 @@ class EmployeeWorkbookImportService
             throw ValidationException::withMessages(['import' => 'Correct or remap the records that failed before retrying this batch.']);
         }
 
-        $lockedForImport = DB::transaction(function () use ($import) {
+        $preflight = DB::transaction(function () use ($import, $userId) {
             $lockedImport = EmployeeImport::query()->lockForUpdate()->findOrFail($import->id);
             if (! in_array($lockedImport->status, ['ready_for_import', 'completed_with_errors', 'failed', 'mapping_approved', 'review_required'], true)
                 || ! $lockedImport->field_mappings || ! $lockedImport->previewed_at) {
                 throw ValidationException::withMessages(['import' => 'This workbook has already been processed or changed.']);
             }
 
+            $this->refreshPreview($lockedImport, $userId);
+            $hasReadyRows = $this->readyImportRowsCount($lockedImport) > 0;
+            if (! $hasReadyRows && ! $this->containsOnlyDuplicateRows($lockedImport)) {
+                return ['eligible' => false, 'import' => $lockedImport->fresh()];
+            }
+
             $lockedImport->update(['status' => 'importing']);
 
-            return $lockedImport;
+            return ['eligible' => true, 'import' => $lockedImport];
         });
+        if (! $preflight['eligible']) {
+            throw ValidationException::withMessages([
+                'import' => 'No validated employee records are ready to import. Resolve outstanding mappings or corrections, then save and validate again.',
+            ]);
+        }
+        $lockedForImport = $preflight['import'];
 
         try {
             return DB::transaction(fn () => $this->importReadyRows($lockedForImport, $userId));
@@ -1564,6 +1638,17 @@ class EmployeeWorkbookImportService
         return $lockedImport->fresh();
     }
 
+    private function readyImportRowsCount(EmployeeImport $import): int
+    {
+        return $import->rows()->whereIn('status', self::READY_ROW_STATUSES)->count();
+    }
+
+    private function containsOnlyDuplicateRows(EmployeeImport $import): bool
+    {
+        return $import->rows()->exists()
+            && ! $import->rows()->where('status', '!=', 'duplicate')->exists();
+    }
+
     public function saveRowReview(EmployeeImport $import, EmployeeImportRow $row, array $correction, int $userId): void
     {
         if ($row->employee_import_id !== $import->id || $row->status === 'duplicate' || $row->status === 'imported') {
@@ -1635,13 +1720,20 @@ class EmployeeWorkbookImportService
                 'issues' => array_values(array_unique($issues)) ?: null,
             ]);
         }
+        $freshRows = $import->rows()->get();
+        $readyCount = $freshRows->whereIn('status', self::READY_ROW_STATUSES)->count();
+        $mappingIssuesRemain = $freshRows->contains(
+            fn (EmployeeImportRow $row) => $this->hasUnresolvedMappingIssues($row)
+        );
+        $nextStatus = $readyCount > 0
+            ? 'ready_for_import'
+            : ($mappingIssuesRemain ? 'mapping_required' : 'review_required');
+
         $import->update([
             'previewed_by' => $userId,
             'previewed_at' => now(),
             'review_count' => $needsReview,
-            'status' => $import->status === 'completed_with_errors' && $needsReview
-                ? 'completed_with_errors'
-                : 'ready_for_import',
+            'status' => $nextStatus,
         ]);
     }
 
@@ -1820,9 +1912,12 @@ class EmployeeWorkbookImportService
         $possibleNameMatches = $existing || ! $name
             ? []
             : $this->possibleEmployeeMatches($name);
-        if ($possibleNameMatches && empty($reviewEmployee['confirm_distinct_employee'])) {
+        $unconfirmedNameMatches = $possibleNameMatches && empty($reviewEmployee['confirm_distinct_employee']);
+        if ($unconfirmedNameMatches) {
             $numbers = collect($possibleNameMatches)->pluck('employee_no')->filter()->implode(', ');
             $issues[] = 'A current employee has the same normalized name'.($numbers !== '' ? " (employee number(s): {$numbers})" : '').'. Confirm this is a different person or correct the employee number.';
+        } else {
+            $possibleNameMatches = [];
         }
 
         $positionLevel = $reviewProfile['position_level'] ?? $this->displayByHeader($data, 'POSITION LEVEL');
@@ -2049,6 +2144,38 @@ class EmployeeWorkbookImportService
             ])
             ->values()
             ->all();
+    }
+
+    private function existingMayorForSourceRow(array $sourceData, string $format): ?User
+    {
+        $name = $format === 'plantilla'
+            ? [
+                'first_name' => trim((string) ($this->displayByHeader($sourceData, 'FIRST NAME') ?? '')),
+                'middle_name' => trim((string) ($this->displayByHeader($sourceData, 'MIDDLE NAME') ?? '')),
+                'last_name' => trim((string) ($this->displayByHeader($sourceData, 'LAST NAME') ?? '')),
+                'suffix' => '',
+            ]
+            : $this->parseName(trim((string) ($this->cellByHeader($sourceData, 'NAME')['display_value'] ?? '')));
+        if (! $name) {
+            return null;
+        }
+
+        $sourceName = $this->normalizeMatchValue(implode(' ', array_filter($name)));
+        if ($sourceName === '') {
+            return null;
+        }
+
+        $matches = User::query()
+            ->where('role', 'mayor')
+            ->with('employee')
+            ->get()
+            ->filter(function (User $mayor) use ($sourceName) {
+                return collect([$mayor->name, $mayor->employee?->full_name])
+                    ->filter()
+                    ->contains(fn (string $accountName) => $this->normalizeMatchValue($accountName) === $sourceName);
+            });
+
+        return $matches->count() === 1 ? $matches->first() : null;
     }
 
     private function extractSuffix(string $value): ?string

@@ -10,6 +10,7 @@ use App\Services\EmployeeWorkbookImportService;
 use Illuminate\Contracts\Auth\PasswordBroker;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
@@ -54,7 +55,67 @@ class EmployeeImportController extends Controller
 
     public function show(Request $request, EmployeeImport $employeeImport, EmployeeWorkbookImportService $importer): View
     {
-        $rows = $employeeImport->rows()->orderBy('source_row')->paginate(10);
+        $filters = $request->validate([
+            'row_status' => ['nullable', Rule::in([
+                'all', 'needs_attention', 'needs_review', 'awaiting_mapping', 'duplicate', 'failed',
+                'awaiting_validation', 'ready', 'ready_to_update', 'imported', 'updated',
+                'possible_duplicates',
+            ])],
+            'row_search' => ['nullable', 'string', 'max:100'],
+        ]);
+        $rowStatus = $filters['row_status'] ?? 'needs_attention';
+        $rowSearch = trim($filters['row_search'] ?? '');
+        $rowQuery = $employeeImport->rows()->orderBy('source_row');
+        $inMemoryFilter = $rowSearch !== '' || in_array($rowStatus, [
+            'possible_duplicates', 'awaiting_mapping', 'needs_review',
+        ], true);
+
+        if ($rowStatus === 'needs_attention') {
+            $rowQuery->whereIn('status', ['needs_review', 'duplicate', 'failed']);
+        } elseif ($rowStatus === 'awaiting_validation') {
+            $rowQuery->whereIn('status', ['unvalidated', 'existing_to_update']);
+        } elseif (in_array($rowStatus, ['needs_review', 'awaiting_mapping'], true)) {
+            $rowQuery->where('status', 'needs_review');
+        } elseif (in_array($rowStatus, ['duplicate', 'failed', 'ready', 'ready_to_update', 'imported', 'updated'], true)) {
+            $rowQuery->where('status', $rowStatus);
+        }
+
+        if ($inMemoryFilter) {
+            $filteredRows = $rowQuery->get();
+            if ($rowStatus === 'possible_duplicates') {
+                $filteredRows = $filteredRows->filter(
+                    fn (EmployeeImportRow $row) => ! empty($row->review_data['classification']['possible_name_matches'])
+                );
+            } elseif ($rowStatus === 'awaiting_mapping') {
+                $filteredRows = $filteredRows->filter(
+                    fn (EmployeeImportRow $row) => $importer->hasUnresolvedMappingIssues($row)
+                );
+            } elseif ($rowStatus === 'needs_review') {
+                $filteredRows = $filteredRows->filter(
+                    fn (EmployeeImportRow $row) => $importer->needsEmployeeCorrection($row)
+                );
+            }
+            if ($rowSearch !== '') {
+                $needle = mb_strtolower($rowSearch);
+                $filteredRows = $filteredRows->filter(function (EmployeeImportRow $row) use ($importer, $needle) {
+                    $name = collect($importer->parsedName($row) ?? [])->filter()->implode(' ');
+                    $source = collect($row->source_data)->pluck('display_value')->filter()->implode(' ');
+                    $searchable = mb_strtolower($row->source_row.' '.$name.' '.$source);
+
+                    return mb_strpos($searchable, $needle) !== false;
+                });
+            }
+            $page = max(1, LengthAwarePaginator::resolveCurrentPage());
+            $rows = new LengthAwarePaginator(
+                $filteredRows->forPage($page, 10)->values(),
+                $filteredRows->count(),
+                10,
+                $page,
+                ['path' => $request->url(), 'query' => $request->query()]
+            );
+        } else {
+            $rows = $rowQuery->paginate(10)->appends($request->query());
+        }
         $officeColumns = collect($importer->availableOfficeColumns($employeeImport))
             ->map(function (array $header) use ($importer, $employeeImport) {
                 $header['filled'] = $importer->officeValues($employeeImport, (int) $header['index'])->count();
@@ -85,6 +146,12 @@ class EmployeeImportController extends Controller
         $correctionDefaults = $rows->getCollection()->mapWithKeys(fn ($row) => [
             $row->id => $importer->correctionDefaults($row),
         ]);
+        $rowReviewStates = $rows->getCollection()->mapWithKeys(fn (EmployeeImportRow $row) => [
+            $row->id => [
+                'awaiting_mapping' => $importer->hasUnresolvedMappingIssues($row),
+                'needs_correction' => $importer->needsEmployeeCorrection($row),
+            ],
+        ]);
         $rows->getCollection()->load('reviewer');
 
         return view('employee-imports.show', [
@@ -92,6 +159,7 @@ class EmployeeImportController extends Controller
             'rows' => $rows,
             'parsedNames' => $parsedNames,
             'correctionDefaults' => $correctionDefaults,
+            'rowReviewStates' => $rowReviewStates,
             'officeColumns' => $officeColumns,
             'suggestedOfficeColumn' => $suggestedOfficeColumn,
             'ambiguousColumns' => $importer->ambiguousColumns($employeeImport),
@@ -106,6 +174,8 @@ class EmployeeImportController extends Controller
                 'mapping_required', 'ready_for_import', 'completed_with_errors', 'failed',
                 'pending_review', 'mapping_approved', 'review_required',
             ], true),
+            'rowStatus' => $rowStatus,
+            'rowSearch' => $rowSearch,
         ]);
     }
 
@@ -123,7 +193,7 @@ class EmployeeImportController extends Controller
             'new_departments' => ['nullable', 'array'],
             'new_departments.*.name' => ['nullable', 'string', 'max:150'],
             'new_departments.*.code' => ['nullable', 'string', 'max:20'],
-            'new_departments.*.authorize' => ['nullable', 'accepted'],
+            'new_departments.*.authorize' => ['nullable', 'boolean'],
             'position_map' => ['nullable', 'array'],
             'position_map.*' => ['nullable'],
             'new_positions' => ['nullable', 'array'],

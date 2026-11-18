@@ -129,7 +129,7 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertDatabaseCount('employee_import_mapping_events', 1);
         $this->assertDatabaseCount('employees', 0);
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
-            ->get(route('employee-imports.show', $import))
+            ->get(route('employee-imports.show', [$import, 'row_status' => 'all']))
             ->assertOk()
             ->assertSee('Ready to import')
             ->assertSee('Test')
@@ -237,6 +237,84 @@ class EmployeeWorkbookImportTest extends TestCase
 
         $this->assertDatabaseMissing('departments', ['name' => 'Unapproved Office']);
         $this->assertSame('mapping_required', $import->fresh()->status);
+    }
+
+    public function test_existing_department_selection_ignores_unchecked_unused_creation_fields(): void
+    {
+        $department = $this->officialDepartment();
+        $position = Position::create([
+            'department_id' => $department->id,
+            'title' => 'Import Test Position',
+        ]);
+        $import = $this->stage($this->workbookUpload());
+        $officeKey = hash('sha256', 'Office H source');
+        $positionKey = hash('sha256', "Office H source\0Import Test Position");
+
+        $this->putMapping($import, [
+            'office_source_column' => 8,
+            'department_map' => [$officeKey => $department->id],
+            'new_departments' => [$officeKey => [
+                'name' => 'Unused Department Form',
+                'code' => 'UNUSED',
+            ]],
+            'position_map' => [$positionKey => $position->id],
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $this->assertDatabaseMissing('departments', ['name' => 'Unused Department Form']);
+        $this->assertSame($department->id, $import->fresh()->field_mappings['department_map'][$officeKey]);
+    }
+
+    public function test_unvalidated_rows_are_not_counted_as_employee_corrections(): void
+    {
+        $import = $this->stage($this->workbookUpload());
+        $summary = app(EmployeeWorkbookImportService::class)->importSummary($import, 8);
+
+        $this->assertSame(1, $summary['awaiting_validation']);
+        $this->assertSame(0, $summary['corrections']);
+        $this->assertSame(0, $summary['mapping_blocked_records']);
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', [$import, 'row_status' => 'awaiting_validation']))
+            ->assertOk()
+            ->assertSee('Awaiting Validation')
+            ->assertDontSee('Records needing correction</span>');
+    }
+
+    public function test_existing_mayor_account_is_skipped_from_current_and_future_plantilla_imports(): void
+    {
+        $mayor = User::create([
+            'name' => 'ISIDRO TALOSIG CABADDU',
+            'email' => 'isidro.mayor@example.test',
+            'password' => 'TestAccount123!',
+            'role' => 'mayor',
+            'is_active' => true,
+        ]);
+        $usersBeforeImport = User::count();
+        $employeeName = [
+            12 => 'CABADDU',
+            13 => 'ISIDRO',
+            14 => 'TALOSIG',
+        ];
+
+        foreach (range(1, 2) as $batch) {
+            $import = $this->stage($this->plantillaWorkbookUpload(
+                office: 'HRMO/PESO',
+                firstEmployeeOverrides: $employeeName
+            ));
+            $row = $import->rows()->where('source_row', 4)->firstOrFail();
+
+            $this->assertSame('duplicate', $row->status);
+            $this->assertContains(
+                'This record matches the existing Mayor account and will be skipped to avoid creating a duplicate account.',
+                $row->issues
+            );
+            $this->assertSame(1, $import->skipped_count);
+        }
+
+        $this->assertSame($usersBeforeImport, User::count());
+        $this->assertSame('mayor', $mayor->fresh()->role);
+        $this->assertSame('ISIDRO TALOSIG CABADDU', $mayor->fresh()->name);
+        $this->assertDatabaseCount('employees', 0);
     }
 
     public function test_duplicate_plantilla_item_number_is_skipped_during_staging(): void
@@ -468,6 +546,16 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame('ready', $rows[0]->status);
         $this->assertSame('needs_review', $rows[1]->status);
         $this->assertSame($unmatchedOffice, $rows[1]->source_data[7]['display_value']);
+        $summary = app(EmployeeWorkbookImportService::class)->importSummary($import, 8);
+        $this->assertSame(1, $summary['mapping_blocked_records']);
+        $this->assertSame(0, $summary['corrections']);
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', [$import, 'office_column' => 8, 'row_status' => 'awaiting_mapping']))
+            ->assertOk()
+            ->assertSee('Awaiting Mapping')
+            ->assertSee($unmatchedOffice)
+            ->assertDontSee('Records needing correction</span>');
 
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
@@ -476,6 +564,68 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertDatabaseCount('employees', 1);
         $this->assertSame('completed_with_errors', $import->fresh()->status);
         $this->assertSame('needs_review', $rows[1]->fresh()->status);
+    }
+
+    public function test_mapping_incomplete_batch_never_displays_ready_or_imports_unvalidated_rows(): void
+    {
+        $import = $this->stage($this->workbookUpload(overrides: [
+            7 => 'Unlisted Department',
+            8 => 'Unlisted Position',
+        ]));
+        $office = 'Unlisted Department';
+        $positionKey = hash('sha256', $office."\0Unlisted Position");
+
+        $this->putMapping($import, [
+            'office_source_column' => 8,
+            'department_map' => [hash('sha256', $office) => ''],
+            'position_map' => [$positionKey => ''],
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $import->refresh();
+        $summary = app(EmployeeWorkbookImportService::class)->importSummary($import, 8);
+        $this->assertSame('mapping_required', $import->status);
+        $this->assertSame(0, $summary['valid']);
+        $this->assertSame(1, $summary['mapping_blocked_records']);
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', [$import, 'office_column' => 8]))
+            ->assertOk()
+            ->assertSee('Mapping Incomplete')
+            ->assertSee('There are no valid records ready to import.');
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
+            ->assertRedirect()
+            ->assertSessionHasErrors('mapping');
+
+        $this->assertDatabaseCount('employees', 0);
+    }
+
+    public function test_import_rechecks_eligibility_when_a_mapped_position_becomes_inactive(): void
+    {
+        $department = $this->officialDepartment();
+        $position = Position::create([
+            'department_id' => $department->id,
+            'title' => 'Import Test Position',
+        ]);
+        $import = $this->stage($this->workbookUpload());
+        $officeKey = hash('sha256', 'Office H source');
+        $positionKey = hash('sha256', "Office H source\0Import Test Position");
+
+        $this->putMapping($import, [
+            'office_source_column' => 8,
+            'department_map' => [$officeKey => $department->id],
+            'position_map' => [$positionKey => $position->id],
+        ])->assertRedirect()->assertSessionHasNoErrors();
+        $position->update(['is_active' => false]);
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
+            ->assertRedirect()
+            ->assertSessionHasErrors('import');
+
+        $this->assertSame('mapping_required', $import->fresh()->status);
+        $this->assertDatabaseCount('employees', 0);
     }
 
     public function test_position_matching_uses_the_confirmed_department_and_normalized_title(): void
@@ -556,6 +706,7 @@ class EmployeeWorkbookImportTest extends TestCase
         $row = $import->rows()->firstOrFail();
         $this->assertSame('needs_review', $row->status);
         $this->assertStringContainsString('same normalized name', implode(' ', $row->issues));
+        $this->assertSame(1, app(EmployeeWorkbookImportService::class)->importSummary($import, 8)['possible_duplicates']);
 
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->put(route('employee-imports.rows.review', [$import, $row]), [
@@ -572,6 +723,7 @@ class EmployeeWorkbookImportTest extends TestCase
             ])->assertRedirect();
 
         $this->assertSame('ready', $row->fresh()->status);
+        $this->assertSame(0, app(EmployeeWorkbookImportService::class)->importSummary($import, 8)['possible_duplicates']);
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
             ->assertRedirect();
@@ -1035,13 +1187,16 @@ class EmployeeWorkbookImportTest extends TestCase
             'position_map' => [$positionKey => $position->id],
         ])->assertRedirect();
 
-        $this->actingAs(User::where('role', 'admin')->firstOrFail())
-            ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
-            ->assertRedirect();
         $import->refresh();
         $row = $import->rows()->firstOrFail();
-        $this->assertSame('completed_with_errors', $import->status);
+        $this->assertSame('review_required', $import->status);
+        $this->assertSame('needs_review', $row->status);
         $this->assertSame('Unparseable', $row->source_data[1]['display_value']);
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', $import))
+            ->assertOk()
+            ->assertSee('Needs Attention')
+            ->assertSee('There are no valid records ready to import.');
 
         $reviewer = User::where('role', 'admin')->firstOrFail();
         $this->actingAs($reviewer)->put(route('employee-imports.rows.review', [$import, $row]), [
@@ -1224,7 +1379,8 @@ class EmployeeWorkbookImportTest extends TestCase
 
     private function plantillaWorkbookUpload(
         string $office = 'Human Resources Office',
-        bool $duplicateItemNumber = false
+        bool $duplicateItemNumber = false,
+        array $firstEmployeeOverrides = []
     ): UploadedFile {
         $headers = [
             'ORGANIZATIONAL UNIT (1)', 'ITEM NUMBER (2)', 'POSITION TITLE (3)',
@@ -1274,6 +1430,7 @@ class EmployeeWorkbookImportTest extends TestCase
                 null, null, 'Active', null, null, null, null, null,
             ],
         ];
+        $employeeRows[0] = array_replace($employeeRows[0], $firstEmployeeOverrides);
         if ($duplicateItemNumber) {
             $employeeRows[1][1] = $employeeRows[0][1];
         }

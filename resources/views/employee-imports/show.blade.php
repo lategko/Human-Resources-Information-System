@@ -13,54 +13,247 @@
     @if (session('success'))<div class="success-note">{{ session('success') }}</div>@endif
     @if (session('warning'))<div class="warning-note">{{ session('warning') }}</div>@endif
 
-    <section class="panel">
+    @php
+        $activeStep = !$import->field_mappings || $summary['awaiting_mapping']
+            ? 3
+            : (in_array($import->status, ['completed', 'completed_with_errors'], true)
+                ? 5
+                : (($summary['corrections'] || $summary['failed'] || $summary['possible_duplicates']) ? 4 : 5));
+        $statusLabel = match($import->status) {
+            'mapping_required' => 'Mapping Incomplete',
+            'pending_review' => ($summary['awaiting_mapping'] || $summary['mapping_pending']) ? 'Mapping Incomplete' : 'Validation Required',
+            'ready_for_import', 'mapping_approved' => $summary['valid'] > 0 ? 'Ready for Import' : 'No Valid Records Ready',
+            'importing' => 'Importing',
+            'completed' => 'Completed',
+            'completed_with_errors' => 'Completed with Errors',
+            'review_required' => $summary['valid'] > 0
+                ? 'Ready for Import'
+                : (($summary['awaiting_mapping'] || $summary['mapping_pending'])
+                    ? 'Mapping Incomplete'
+                    : (($summary['corrections'] || $summary['failed']) ? 'Needs Attention' : 'No Valid Records Ready')),
+            'failed' => 'Failed',
+            default => ucfirst(str_replace('_', ' ', $import->status)),
+        };
+        $attentionItems = [];
+        if ($summary['mapping_pending']) {
+            $attentionItems[] = [
+                'label' => 'Mappings need to be saved',
+                'count' => $summary['mapping_pending'],
+                'detail' => 'Confirm the department and position choices before validating employee rows.',
+                'href' => '#organizational-mapping',
+            ];
+        }
+        if ($summary['unmatched_department_count']) {
+            $attentionItems[] = [
+                'label' => 'Unmatched departments',
+                'count' => $summary['unmatched_department_count'],
+                'detail' => 'Choose an existing department or explicitly create an approved one.',
+                'href' => '#department-mappings',
+            ];
+        }
+        if ($summary['department_confirmation_count']) {
+            $attentionItems[] = [
+                'label' => 'Departments awaiting confirmation',
+                'count' => $summary['department_confirmation_count'],
+                'detail' => 'Review the suggestions and select the correct department.',
+                'href' => '#department-mappings',
+            ];
+        }
+        if ($summary['unmatched_position_count']) {
+            $attentionItems[] = [
+                'label' => 'Unmatched positions',
+                'count' => $summary['unmatched_position_count'],
+                'detail' => 'Choose a position in the confirmed department or create one from the reference.',
+                'href' => '#position-mappings',
+            ];
+        }
+        if ($summary['position_confirmation_count']) {
+            $attentionItems[] = [
+                'label' => 'Positions awaiting confirmation',
+                'count' => $summary['position_confirmation_count'],
+                'detail' => 'Review the suggestions; similar titles are not selected automatically.',
+                'href' => '#position-mappings',
+            ];
+        }
+        if ($summary['mapping_blocked_records']) {
+            $attentionItems[] = [
+                'label' => 'Employee records blocked by mappings',
+                'count' => $summary['mapping_blocked_records'],
+                'detail' => 'Resolve the department or position mapping, then review these affected records.',
+                'href' => request()->fullUrlWithQuery(['row_status' => 'awaiting_mapping', 'row_search' => null, 'page' => 1]).'#employee-corrections',
+            ];
+        }
+        if ($summary['awaiting_validation']) {
+            $attentionItems[] = [
+                'label' => 'Employee records awaiting validation',
+                'count' => $summary['awaiting_validation'],
+                'detail' => 'Save organizational mappings to validate these rows.',
+                'href' => request()->fullUrlWithQuery(['row_status' => 'awaiting_validation', 'row_search' => null, 'page' => 1]).'#employee-corrections',
+            ];
+        }
+        if ($summary['corrections']) {
+            $attentionItems[] = [
+                'label' => 'Employee records needing correction',
+                'count' => $summary['corrections'],
+                'detail' => 'Review the listed validation messages and correct only affected records.',
+                'href' => request()->fullUrlWithQuery(['row_status' => 'needs_review', 'row_search' => null, 'page' => 1]).'#employee-corrections',
+            ];
+        }
+        if ($summary['possible_duplicates']) {
+            $attentionItems[] = [
+                'label' => 'Possible duplicate employees',
+                'count' => $summary['possible_duplicates'],
+                'detail' => 'Compare the possible identity matches before confirming these rows.',
+                'href' => request()->fullUrlWithQuery(['row_status' => 'possible_duplicates', 'row_search' => null, 'page' => 1]).'#employee-corrections',
+            ];
+        }
+        if ($summary['duplicates']) {
+            $attentionItems[] = [
+                'label' => 'Duplicate records to skip',
+                'count' => $summary['duplicates'],
+                'detail' => 'These records will not create employees or accounts.',
+                'href' => request()->fullUrlWithQuery(['row_status' => 'duplicate', 'row_search' => null, 'page' => 1]).'#employee-corrections',
+            ];
+        }
+        if ($summary['failed']) {
+            $attentionItems[] = [
+                'label' => 'Validation or import errors',
+                'count' => $summary['failed'],
+                'detail' => 'Review the failure message before retrying this batch.',
+                'href' => request()->fullUrlWithQuery(['row_status' => 'failed', 'row_search' => null, 'page' => 1]).'#employee-corrections',
+            ];
+        }
+    @endphp
+
+    <nav class="import-progress" aria-label="Employee import progress">
+        <ol>
+            @foreach([
+                1 => ['Upload', route('employee-imports.index')],
+                2 => ['Analyze', '#analysis'],
+                3 => ['Match departments and positions', '#organizational-mapping'],
+                4 => ['Review records', '#employee-corrections'],
+                5 => ['Final review and import', '#final-review'],
+            ] as $step => [$label, $href])
+                <li class="{{ $step < $activeStep ? 'is-complete' : ($step === $activeStep ? 'is-current' : '') }}">
+                    <a href="{{ $href }}" @if($step === $activeStep) aria-current="step" @endif>
+                        <span>{{ $step }}</span>{{ $label }}
+                    </a>
+                </li>
+            @endforeach
+        </ol>
+    </nav>
+
+    <section class="panel needs-attention" aria-labelledby="needs-attention-title">
+        <div class="panel-heading">
+            <div>
+                <h2 id="needs-attention-title">Needs Attention</h2>
+                <p>Jump directly to mappings or employee records that need action.</p>
+            </div>
+        </div>
+        @if($attentionItems)
+            <div class="attention-grid">
+                @foreach($attentionItems as $item)
+                    <a class="attention-item" href="{{ $item['href'] }}">
+                        <span><b>{{ $item['count'] }}</b><strong>{{ $item['label'] }}</strong></span>
+                        <small>{{ $item['detail'] }}</small>
+                    </a>
+                @endforeach
+            </div>
+        @else
+            <p class="success-note">No further review is required for this import.</p>
+        @endif
+    </section>
+
+    <section class="panel" id="analysis">
         <div class="panel-heading">
             <div>
                 <h2>Step 2: Automatic analysis</h2>
-                <p>{{ $import->original_name }} · {{ $summary['plantilla_items'] ?: $summary['total'] }} plantilla item record(s), {{ $summary['total'] }} eligible employee row(s) on {{ $import->worksheet_name ?: 'the employee' }} worksheet (headers on row {{ $import->header_row ?: 1 }})</p>
+                <p>{{ $import->original_name }} · {{ $summary['total'] }} eligible employee row(s) on {{ $import->worksheet_name ?: 'the employee' }} worksheet (headers on row {{ $import->header_row ?: 1 }})</p>
                 @if($import->worksheet_names)
                     <details class="top-space"><summary>{{ count($import->worksheet_names) }} worksheets recognized</summary><p>{{ implode(' · ', $import->worksheet_names) }}</p></details>
                 @endif
             </div>
-            <span class="status-tag">{{ match($import->status) {
-                'mapping_required', 'pending_review' => 'Mapping Required',
-                'ready_for_import', 'mapping_approved' => 'Ready for Import',
-                'importing' => 'Importing',
-                'completed' => 'Completed',
-                'completed_with_errors', 'review_required' => 'Completed with Errors',
-                'failed' => 'Failed',
-                default => ucfirst(str_replace('_', ' ', $import->status)),
-            } }}</span>
+            <span class="status-tag">{{ $statusLabel }}</span>
         </div>
-        <div class="summary-grid">
-            <div class="summary-card"><b>{{ $summary['valid'] }}</b><span>Ready to import</span></div>
-            <div class="summary-card"><b>{{ $summary['vacancies'] }}</b><span>Vacant positions excluded</span></div>
-            <div class="summary-card"><b>{{ $summary['excluded_offices'] }}</b><span>PNP/BFP records excluded</span></div>
-            <div class="summary-card"><b>{{ $summary['new_records'] }}</b><span>New employee records</span></div>
-            <div class="summary-card"><b>{{ $summary['accounts_to_create'] }}</b><span>New accounts</span></div>
-            <div class="summary-card"><b>{{ $summary['existing_to_update'] }}</b><span>Existing employees to update</span></div>
-            <div class="summary-card"><b>{{ $summary['imported'] }}</b><span>Successfully imported</span></div>
-            <div class="summary-card"><b>{{ $summary['updated'] }}</b><span>Employee records updated</span></div>
-            <div class="summary-card"><b>{{ $summary['accounts_created'] }}</b><span>Accounts created</span></div>
-            <div class="summary-card"><b>{{ $summary['office_heads'] }}</b><span>Verified Office Heads</span></div>
-            <div class="summary-card"><b>{{ $summary['employees'] }}</b><span>Employee accounts</span></div>
-            <div class="summary-card"><b>{{ $summary['departments'] }}</b><span>Departments detected</span></div>
-            <div class="summary-card"><b>{{ $summary['matched_departments'] }}</b><span>Departments matched</span></div>
-            <div class="summary-card"><b>{{ $summary['unmatched_departments']->count() }}</b><span>Departments unmatched</span></div>
-            <div class="summary-card"><b>{{ $summary['matched_positions'] }}</b><span>Positions matched</span></div>
-            @if($summary['position_reference_count'] > 0)
-                <div class="summary-card"><b>{{ $summary['reference_position_matches'] }}</b><span>Titles in Positions reference ({{ $summary['position_reference_count'] }} entries)</span></div>
-            @endif
-            <div class="summary-card"><b>{{ $summary['unmatched_positions']->count() }}</b><span>Positions unmatched</span></div>
-            <div class="summary-card"><b>{{ $summary['duplicates'] }}</b><span>Duplicates to skip</span></div>
-            <div class="summary-card"><b>{{ $summary['corrections'] }}</b><span>Records to correct</span></div>
-            <div class="summary-card"><b>{{ $summary['failed'] }}</b><span>Failed records</span></div>
+        <div class="import-summary-grid">
+            <article class="import-summary-group">
+                <h3>Import Overview</h3>
+                <div class="summary-primary"><b>{{ $summary['valid'] }}</b><span>Ready to import</span></div>
+                <details>
+                    <summary>Record counts</summary>
+                    <ul class="summary-list">
+                        @if($summary['total'])<li>Total eligible records <b>{{ $summary['total'] }}</b></li>@endif
+                        @if($summary['new_records'])<li>New employees <b>{{ $summary['new_records'] }}</b></li>@endif
+                        @if($summary['existing_to_update'])<li>Existing employees to update <b>{{ $summary['existing_to_update'] }}</b></li>@endif
+                        @if($summary['awaiting_validation'])<li>Awaiting validation <b>{{ $summary['awaiting_validation'] }}</b></li>@endif
+                        @if(!$summary['total'])<li>No eligible employee records were detected.</li>@endif
+                    </ul>
+                </details>
+            </article>
+            <article class="import-summary-group">
+                <h3>Organizational Matching</h3>
+                @if($summary['departments'])
+                    <div class="summary-line"><span>Departments matched</span><b>{{ $summary['matched_departments'] }} / {{ $summary['departments'] }}</b></div>
+                @endif
+                @if($summary['positions_detected'])
+                    <div class="summary-line"><span>Positions matched</span><b>{{ $summary['matched_positions'] }} / {{ $summary['positions_detected'] }}</b></div>
+                @endif
+                <details>
+                    <summary>Matching details</summary>
+                    <ul class="summary-list">
+                        @if($summary['unmatched_department_count'])<li>Unmatched departments <b>{{ $summary['unmatched_department_count'] }}</b></li>@endif
+                        @if($summary['department_confirmation_count'])<li>Departments needing confirmation <b>{{ $summary['department_confirmation_count'] }}</b></li>@endif
+                        @if($summary['unmatched_position_count'])<li>Unmatched positions <b>{{ $summary['unmatched_position_count'] }}</b></li>@endif
+                        @if($summary['position_confirmation_count'])<li>Positions needing confirmation <b>{{ $summary['position_confirmation_count'] }}</b></li>@endif
+                        @if($summary['mapping_blocked_records'])<li>Employee records blocked by mappings <b>{{ $summary['mapping_blocked_records'] }}</b></li>@endif
+                        @if($summary['position_reference_count'])<li>Titles listed in Positions reference <b>{{ $summary['reference_position_matches'] }} / {{ $summary['position_reference_count'] }}</b></li>@endif
+                        @if(!$summary['departments'] && !$summary['positions_detected'])<li>Select an organizational unit column to analyze matches.</li>@endif
+                    </ul>
+                </details>
+            </article>
+            <article class="import-summary-group">
+                <h3>Data Quality</h3>
+                @if($summary['corrections'])
+                    <div class="summary-primary"><b>{{ $summary['corrections'] }}</b><span>Records needing correction</span></div>
+                @else
+                    <p class="summary-empty">No employee correction errors.</p>
+                @endif
+                <details>
+                    <summary>Quality details</summary>
+                    <ul class="summary-list">
+                        @if($summary['duplicates'])<li>Duplicate records to skip <b>{{ $summary['duplicates'] }}</b></li>@endif
+                        @if($summary['failed'])<li>Failed records <b>{{ $summary['failed'] }}</b></li>@endif
+                        @if($summary['vacancies'])<li>Vacant plantilla positions excluded <b>{{ $summary['vacancies'] }}</b></li>@endif
+                        @if($summary['excluded_offices'])<li>PNP/BFP records excluded <b>{{ $summary['excluded_offices'] }}</b></li>@endif
+                        @if(!$summary['duplicates'] && !$summary['failed'] && !$summary['vacancies'] && !$summary['excluded_offices'])<li>No additional data-quality information.</li>@endif
+                    </ul>
+                </details>
+            </article>
+            <article class="import-summary-group">
+                <h3>Import Results</h3>
+                @if($summary['imported'] || $summary['updated'])
+                    <div class="summary-primary"><b>{{ $summary['imported'] }}</b><span>Successfully imported</span></div>
+                    @if($summary['updated'])<div class="summary-line"><span>Employee records updated</span><b>{{ $summary['updated'] }}</b></div>@endif
+                @else
+                    <p class="summary-empty">No records have been imported yet.</p>
+                @endif
+                <details>
+                    <summary>Result details</summary>
+                    <ul class="summary-list">
+                        @if($summary['accounts_created'])<li>Accounts created <b>{{ $summary['accounts_created'] }}</b></li>@endif
+                        @if($summary['accounts_to_create'])<li>Accounts to create <b>{{ $summary['accounts_to_create'] }}</b></li>@endif
+                        @if($summary['remaining'])<li>Records remaining <b>{{ $summary['remaining'] }}</b></li>@endif
+                        @if($summary['duplicates'])<li>Duplicate records to skip <b>{{ $summary['duplicates'] }}</b></li>@endif
+                        @if(!$summary['accounts_created'] && !$summary['accounts_to_create'] && !$summary['remaining'] && !$summary['duplicates'])<li>No additional import results.</li>@endif
+                    </ul>
+                </details>
+            </article>
         </div>
         <p class="info-note top-space">Email is optional during import. Each new account receives a unique, randomly generated temporary credential and must complete secure password setup; HR can send an activation link after an email is added. Only HR-approved Office Head designations receive that role.</p>
     </section>
 
     @if($canEditMappings)
-        <section class="panel">
+        <section class="panel" id="organizational-mapping">
             <div class="panel-heading">
                 <div><h2>Step 3: Confirm automatic matches</h2><p>Choose the workbook’s OFFICE column for department / organizational unit names. Departments and positions are matched automatically; only exceptions need your attention.</p></div>
             </div>
@@ -89,7 +282,7 @@
                     <input type="hidden" name="employment_status" value="{{ $import->field_mappings['employment_status'] ?? 'Active' }}">
 
                     @if($officeValues->isNotEmpty())
-                        <h3>Departments</h3>
+                        <h3 id="department-mappings" class="import-anchor">Departments</h3>
                         <p class="muted">Each distinct office is matched against approved departments. A new department is added only when an admin explicitly authorizes expanding the approved list.</p>
                         @foreach($officeValues as $office)
                             @php
@@ -165,7 +358,7 @@
                     @endif
 
                     @if($positionPairs->isNotEmpty())
-                        <h3 class="top-space">Positions</h3>
+                        <h3 id="position-mappings" class="top-space import-anchor">Positions</h3>
                         <p class="muted">Existing positions are selected automatically. Unmatched titles can be linked to an existing position or explicitly added to that department.</p>
                         @foreach($positionPairs as $pair)
                             @php
@@ -261,38 +454,56 @@
         </section>
     @endif
 
-    @if($import->field_mappings && $import->status !== 'completed')
-        <section class="panel">
-            <div class="panel-heading">
-                <div><h2>Step 5: Confirm and import</h2><p>{{ $summary['ready_new'] }} new employee(s), {{ $summary['ready_updates'] }} existing employee(s) to update, and {{ $summary['accounts_to_create'] }} new account(s) are ready. Problem rows remain available for correction.</p></div>
-            </div>
-            @if($summary['valid'] > 0)
-                <form method="POST" action="{{ route('employee-imports.confirm', $import) }}" onsubmit="return confirm('Import {{ $summary['ready_new'] }} new employee(s), update {{ $summary['ready_updates'] }} existing employee(s), and create {{ $summary['accounts_to_create'] }} new account(s)?')">
-                    @csrf
-                    <input type="hidden" name="confirm_import" value="1">
-                    <button class="button button-primary">Confirm and import ready records</button>
-                </form>
-            @elseif($summary['duplicates'] > 0 && $summary['corrections'] === 0 && $summary['failed'] === 0)
-                <form method="POST" action="{{ route('employee-imports.confirm', $import) }}" onsubmit="return confirm('Finish this batch without importing any records? All detected records are duplicates.')">
-                    @csrf
-                    <input type="hidden" name="confirm_import" value="1">
-                    <button class="button button-secondary">Finish batch and skip duplicates</button>
-                </form>
-            @else
-                <p class="empty-note">There are no valid records ready to import. Correct the flagged records below and save your changes.</p>
-            @endif
-        </section>
-    @endif
-
-    <section class="panel">
-        <div class="panel-heading"><div><h2>Step 4: Validation and corrections</h2><p>Review unmatched departments, positions, missing details, and duplicate records.</p></div></div>
+    <section class="panel" id="employee-corrections">
+        <div class="panel-heading">
+        <div><h2>Step 4: Review employee records</h2><p>Valid rows do not need individual review. Use the filters to find corrections, possible duplicates, or specific source records.</p></div>
+        <a class="text-link" href="#needs-attention-title">Back to Needs Attention</a>
+        </div>
+        <form method="GET" action="{{ route('employee-imports.show', $import) }}" class="filter-bar import-row-filters">
+            @if($selectedOfficeColumn)<input type="hidden" name="office_column" value="{{ $selectedOfficeColumn }}">@endif
+            <label>Record status
+                <select name="row_status">
+                    @foreach([
+                        'needs_attention' => 'Needs attention',
+                        'all' => 'All records',
+                        'awaiting_validation' => 'Awaiting validation',
+                        'awaiting_mapping' => 'Awaiting department or position mapping',
+                        'needs_review' => 'Needs correction',
+                        'possible_duplicates' => 'Possible duplicate employees',
+                        'duplicate' => 'Duplicate records',
+                        'failed' => 'Failed records',
+                        'ready' => 'Ready to import',
+                        'ready_to_update' => 'Ready to update',
+                        'imported' => 'Imported',
+                        'updated' => 'Updated',
+                    ] as $value => $label)
+                        <option value="{{ $value }}" @selected($rowStatus === $value)>{{ $label }}</option>
+                    @endforeach
+                </select>
+            </label>
+            <label>Search employee or source values
+                <input type="search" name="row_search" value="{{ $rowSearch }}" maxlength="100" placeholder="Name, employee number, item number">
+            </label>
+            <button type="submit" class="button button-secondary">Filter records</button>
+        </form>
+        <p class="muted import-row-count">Showing {{ $rows->count() }} of {{ $rows->total() }} matching record(s) · {{ $summary['awaiting_validation'] }} awaiting validation · {{ $summary['corrections'] }} needing correction · {{ $summary['duplicates'] }} duplicates · {{ $summary['failed'] }} failed</p>
         @forelse($rows as $row)
-            <article class="application-row">
+            @php
+                $reviewState = $rowReviewStates[$row->id] ?? [];
+            @endphp
+            <article class="application-row" id="employee-row-{{ $row->id }}">
                 <span class="row-date">Row {{ $row->source_row }}</span>
                 <div class="row-main">
                     <b>{{ implode(' ', array_filter($parsedNames[$row->id] ?? [])) ?: 'Name needs review' }}</b>
                     <small>
-                        {{ $row->review_data['classification']['department'] ?? 'Department unresolved' }} · {{ $row->review_data['classification']['position'] ?? 'Position unresolved' }} · {{ ucfirst(str_replace('_', ' ', $row->status)) }}
+                        {{ $row->review_data['classification']['department'] ?? 'Department unresolved' }} · {{ $row->review_data['classification']['position'] ?? 'Position unresolved' }} ·
+                        @if($row->status === 'needs_review')
+                            {{ !empty($reviewState['awaiting_mapping']) && !empty($reviewState['needs_correction'])
+                                ? 'Needs Mapping and Correction'
+                                : (!empty($reviewState['awaiting_mapping']) ? 'Awaiting Mapping' : 'Needs Correction') }}
+                        @else
+                            {{ ucfirst(str_replace('_', ' ', $row->status)) }}
+                        @endif
                         @if(!empty($row->review_data['classification']['plantilla_item_no']))
                             · Item {{ $row->review_data['classification']['plantilla_item_no'] }}
                         @endif
@@ -338,21 +549,51 @@
                     @endif
                 </div>
                 <span class="status-tag">{{ match($row->status) {
-                    'unvalidated' => 'Awaiting Mapping',
-                    'existing_to_update' => 'Existing Employee',
+                    'unvalidated' => 'Awaiting Validation',
+                    'existing_to_update' => 'Awaiting Validation · Existing Employee',
                     'ready' => 'Ready to Import',
                     'ready_to_update' => 'Ready to Update',
-                    'needs_review' => 'Needs Correction',
+                    'needs_review' => !empty($reviewState['awaiting_mapping'])
+                        ? (!empty($reviewState['needs_correction']) ? 'Needs Mapping and Correction' : 'Awaiting Mapping')
+                        : 'Needs Correction',
                     'imported' => 'Imported',
                     'updated' => 'Updated',
-                    'duplicate' => 'Duplicate to Skip',
+                    'duplicate' => 'Duplicate · Will Be Skipped',
                     'failed' => 'Failed',
                     default => ucfirst(str_replace('_', ' ', $row->status)),
                 } }}</span>
             </article>
         @empty
-            <p class="empty-note">No employee records were found in this workbook.</p>
+            <p class="empty-note">No employee records match these filters.</p>
         @endforelse
         <div class="pagination-wrap">{{ $rows->links() }}</div>
     </section>
+
+    @if($import->field_mappings && $import->status !== 'completed')
+        <section class="panel" id="final-review">
+            <div class="panel-heading">
+                <div>
+                    <h2>Step 5: Final review and import</h2>
+                    <p>{{ $summary['ready_new'] }} new employee(s), {{ $summary['ready_updates'] }} existing employee(s) to update, {{ $summary['accounts_to_create'] }} account(s) to create, {{ $summary['duplicates'] }} duplicate(s) to skip, and {{ $summary['unresolved_records'] }} unresolved record(s).</p>
+                </div>
+            </div>
+            @if($summary['valid'] > 0)
+                <form method="POST" action="{{ route('employee-imports.confirm', $import) }}" onsubmit="if (!confirm('Import {{ $summary['ready_new'] }} new employee(s), update {{ $summary['ready_updates'] }} existing employee(s), and create {{ $summary['accounts_to_create'] }} new account(s)? Unresolved rows and duplicates will not be imported.')) return false; const button = this.querySelector('button'); button.disabled = true; button.textContent = 'Importing…';">
+                    @csrf
+                    <input type="hidden" name="confirm_import" value="1">
+                    <button class="button button-primary">Confirm and import ready records</button>
+                </form>
+            @elseif($summary['duplicates'] > 0 && $summary['corrections'] === 0 && $summary['failed'] === 0)
+                <form method="POST" action="{{ route('employee-imports.confirm', $import) }}" onsubmit="if (!confirm('Finish this batch without importing any records? All detected records are duplicates.')) return false; const button = this.querySelector('button'); button.disabled = true; button.textContent = 'Finishing batch…';">
+                    @csrf
+                    <input type="hidden" name="confirm_import" value="1">
+                    <button class="button button-secondary">Finish batch and skip duplicates</button>
+                </form>
+            @elseif($summary['awaiting_validation'] > 0)
+                <p class="empty-note">Save the organizational mappings to validate employee records before importing.</p>
+            @else
+                <p class="empty-note">There are no valid records ready to import. Resolve the flagged records above and save your changes.</p>
+            @endif
+        </section>
+    @endif
 @endsection
