@@ -74,6 +74,14 @@
             @else
                 <p class="alert alert-info">Add an email address above and save the account before sending a setup/reset link.</p>
             @endif
+            @if($user->isEmployee() && $user->is_active)
+                <hr>
+                <p>For an employee without email access, generate a random temporary password for secure handoff. It is shown once and must be changed after first sign-in.</p>
+                <form method="POST" action="{{ route('users.temporary-credential', $user) }}" onsubmit="return confirm('Create a new temporary password? The employee’s current password will stop working immediately.')">
+                    @csrf
+                    <button class="button button-secondary" type="submit">Generate one-time temporary password</button>
+                </form>
+            @endif
         </section>
     @endif
 @endsection

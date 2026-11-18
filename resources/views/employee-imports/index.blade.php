@@ -41,7 +41,7 @@
                             default => ucfirst(str_replace('_', ' ', $import->status)),
                         };
                     @endphp
-                    <span class="row-main"><b>{{ $import->original_name }}</b><small>{{ $import->worksheet_name ? $import->worksheet_name.' worksheet · ' : '' }}{{ $import->row_count }} total employee records{{ $import->excluded_rows_count ? ' · '.$import->excluded_rows_count.' non-employee rows excluded' : '' }} · {{ $import->imported_rows_count }} new · {{ $import->updated_rows_count }} updated · {{ $import->accounts_created_count }} accounts created · {{ $import->duplicate_rows_count }} duplicates skipped · {{ $import->correction_rows_count }} requiring correction · {{ $import->failed_rows_count }} failed</small></span>
+                    <span class="row-main"><b>{{ $import->original_name }}</b><small>{{ $import->worksheet_name ? $import->worksheet_name.' worksheet · ' : '' }}{{ $import->plantilla_item_count ?: $import->row_count }} plantilla item(s) · {{ $import->row_count }} employee row(s) eligible{{ $import->vacant_count ? ' · '.$import->vacant_count.' vacancies excluded' : '' }}{{ $import->excluded_office_count ? ' · '.$import->excluded_office_count.' PNP/BFP rows excluded' : '' }} · {{ $import->imported_rows_count }} new · {{ $import->updated_rows_count }} updated · {{ $import->accounts_created_count }} accounts created · {{ $import->duplicate_rows_count }} duplicates skipped · {{ $import->correction_rows_count }} requiring correction · {{ $import->failed_rows_count }} failed</small></span>
                     <span class="status-tag">{{ $statusLabel }}</span>
                 </a>
             @empty

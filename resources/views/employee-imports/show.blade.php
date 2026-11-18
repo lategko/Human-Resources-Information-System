@@ -17,7 +17,7 @@
         <div class="panel-heading">
             <div>
                 <h2>Step 2: Automatic analysis</h2>
-                <p>{{ $import->original_name }} · {{ $summary['total'] }} occupied employee rows detected on {{ $import->worksheet_name ?: 'the employee' }} worksheet (headers on row {{ $import->header_row ?: 1 }})</p>
+                <p>{{ $import->original_name }} · {{ $summary['plantilla_items'] ?: $summary['total'] }} plantilla item record(s), {{ $summary['total'] }} eligible employee row(s) on {{ $import->worksheet_name ?: 'the employee' }} worksheet (headers on row {{ $import->header_row ?: 1 }})</p>
                 @if($import->worksheet_names)
                     <details class="top-space"><summary>{{ count($import->worksheet_names) }} worksheets recognized</summary><p>{{ implode(' · ', $import->worksheet_names) }}</p></details>
                 @endif
@@ -34,6 +34,8 @@
         </div>
         <div class="summary-grid">
             <div class="summary-card"><b>{{ $summary['valid'] }}</b><span>Ready to import</span></div>
+            <div class="summary-card"><b>{{ $summary['vacancies'] }}</b><span>Vacant positions excluded</span></div>
+            <div class="summary-card"><b>{{ $summary['excluded_offices'] }}</b><span>PNP/BFP records excluded</span></div>
             <div class="summary-card"><b>{{ $summary['new_records'] }}</b><span>New employee records</span></div>
             <div class="summary-card"><b>{{ $summary['accounts_to_create'] }}</b><span>New accounts</span></div>
             <div class="summary-card"><b>{{ $summary['existing_to_update'] }}</b><span>Existing employees to update</span></div>
@@ -46,6 +48,9 @@
             <div class="summary-card"><b>{{ $summary['matched_departments'] }}</b><span>Departments matched</span></div>
             <div class="summary-card"><b>{{ $summary['unmatched_departments']->count() }}</b><span>Departments unmatched</span></div>
             <div class="summary-card"><b>{{ $summary['matched_positions'] }}</b><span>Positions matched</span></div>
+            @if($summary['position_reference_count'] > 0)
+                <div class="summary-card"><b>{{ $summary['reference_position_matches'] }}</b><span>Titles in Positions reference ({{ $summary['position_reference_count'] }} entries)</span></div>
+            @endif
             <div class="summary-card"><b>{{ $summary['unmatched_positions']->count() }}</b><span>Positions unmatched</span></div>
             <div class="summary-card"><b>{{ $summary['duplicates'] }}</b><span>Duplicates to skip</span></div>
             <div class="summary-card"><b>{{ $summary['corrections'] }}</b><span>Records to correct</span></div>
@@ -85,39 +90,75 @@
 
                     @if($officeValues->isNotEmpty())
                         <h3>Departments</h3>
-                        <p class="muted">Each distinct office is assigned automatically when it matches an active department. For an unmatched value, select an existing department or explicitly create one.</p>
+                        <p class="muted">Each distinct office is matched against approved departments. A new department is added only when an admin explicitly authorizes expanding the approved list.</p>
                         @foreach($officeValues as $office)
                             @php
                                 $key = hash('sha256', $office);
-                                $selectedDepartment = old("department_map.{$key}", $mappingSummary['department_map'][$key] ?? '');
-                                $matchedDepartment = $selectedDepartment !== 'create'
-                                    ? $departments->firstWhere('id', (int) $selectedDepartment)
-                                    : null;
+                                $autoDepartment = $mappingSummary['department_map'][$key] ?? '';
+                                $oldDepartment = old("department_map.{$key}");
+                                $selectedDepartment = $oldDepartment === null || ($oldDepartment === '' && $autoDepartment !== '')
+                                    ? $autoDepartment
+                                    : $oldDepartment;
+                                $matchedDepartment = $departments->firstWhere('id', (int) $selectedDepartment);
+                                $departmentMatch = $mappingSummary['department_matches'][$key] ?? [];
+                                $departmentSuggestions = $mappingSummary['department_suggestions'][$key] ?? [];
+                                $selectedDepartmentId = filter_var($selectedDepartment, FILTER_VALIDATE_INT);
+                                if ($selectedDepartmentId && $selectedDepartmentId !== (int) ($departmentMatch['department_id'] ?? 0)) {
+                                    $departmentMatch['status'] = 'Needs HR Confirmation';
+                                    $departmentMatch['reason'] = 'The selected department differs from the automatic match; save to confirm this choice';
+                                }
                             @endphp
-                            @if($matchedDepartment)
-                                <input type="hidden" name="department_map[{{ $key }}]" value="{{ $matchedDepartment->id }}">
-                            @else
-                            <label class="mapping-row">
-                                <span><b>{{ $office }}</b><small>{{ $matchedDepartment ? 'Matched: '.$matchedDepartment->name : 'Needs department assignment' }}</small></span>
-                                    <select name="department_map[{{ $key }}]">
-                                        <option value="">Choose a department</option>
-                                        @php $departmentSuggestions = $mappingSummary['department_suggestions'][$key] ?? []; @endphp
-                                        @if($departmentSuggestions)
-                                            <optgroup label="Suggested matches">
-                                                @foreach($departmentSuggestions as $suggestion)
-                                                    <option value="{{ $suggestion['id'] }}" @selected((string) $selectedDepartment === (string) $suggestion['id'])>{{ $suggestion['name'] }} ({{ $suggestion['score'] }}% match)</option>
-                                                @endforeach
-                                            </optgroup>
+                            <div class="mapping-row">
+                                <span>
+                                    <b>{{ $office }}</b>
+                                    <small>
+                                        {{ $selectedDepartment === 'create' ? 'Needs HR Confirmation' : ($departmentMatch['status'] ?? 'Unmatched') }}
+                                        · Matched HRIS department: {{ $matchedDepartment?->name ?? 'None' }}
+                                        @if($selectedDepartment === 'create')
+                                            · A new department will be created only after explicit authorization and saving.
+                                        @elseif(!empty($departmentMatch['reason']))
+                                            · {{ $departmentMatch['reason'] }}
                                         @endif
-                                        <optgroup label="All existing departments">
-                                            @foreach($departments as $department)
-                                                <option value="{{ $department->id }}" @selected((string) $selectedDepartment === (string) $department->id)>{{ $department->name }}{{ $department->code ? ' ('.$department->code.')' : '' }}</option>
+                                        @if(isset($departmentMatch['confidence'])) · {{ $departmentMatch['confidence'] }}% confidence @endif
+                                    </small>
+                                </span>
+                                <label>
+                                    <span class="sr-only">Department for {{ $office }}</span>
+                                    <select name="department_map[{{ $key }}]" onchange="document.getElementById('department-create-{{ $key }}')?.toggleAttribute('open', this.value === 'create')">
+                                    <option value="">Needs HR confirmation — no department selected</option>
+                                    @if($departmentSuggestions)
+                                        <optgroup label="Possible matches — HR confirmation required">
+                                            @foreach($departmentSuggestions as $suggestion)
+                                                <option value="{{ $suggestion['id'] }}" @selected((string) $selectedDepartment === (string) $suggestion['id'])>{{ $suggestion['name'] }} ({{ $suggestion['score'] }}% similarity)</option>
                                             @endforeach
                                         </optgroup>
-                                        <option value="create" @selected($selectedDepartment === 'create')>Create department named “{{ $office }}”</option>
+                                    @endif
+                                    <optgroup label="All existing approved departments">
+                                        @foreach($departments as $department)
+                                            <option value="{{ $department->id }}" @selected((string) $selectedDepartment === (string) $department->id)>{{ $department->name }}{{ $department->code ? ' ('.$department->code.')' : '' }}</option>
+                                        @endforeach
+                                    </optgroup>
+                                    @if(empty($departmentMatch['department_id']))
+                                        <option value="create" @selected($selectedDepartment === 'create')>+ Create New Department</option>
+                                    @endif
                                     </select>
-                            </label>
-                            @endif
+                                </label>
+                                @if(empty($departmentMatch['department_id']) || $selectedDepartment === 'create')
+                                    <details id="department-create-{{ $key }}" class="mapping-create" @if($selectedDepartment === 'create' || old("new_departments.{$key}.name") !== null) open @endif>
+                                        <summary>Create New Department</summary>
+                                        <p class="muted">This department will become an approved import target. Department descriptions are not supported by the current database schema.</p>
+                                        <div class="form-grid top-space">
+                                            <label>Department name<input name="new_departments[{{ $key }}][name]" maxlength="150" value="{{ old("new_departments.{$key}.name", $office) }}"></label>
+                                            <label>Department code (optional)<input name="new_departments[{{ $key }}][code]" maxlength="20" value="{{ old("new_departments.{$key}.code") }}"></label>
+                                            <label class="field-span"><span><input type="checkbox" name="new_departments[{{ $key }}][authorize]" value="1" @checked(old("new_departments.{$key}.authorize"))> I explicitly authorize adding this department to the approved import list.</span></label>
+                                        </div>
+                                        @error("new_departments.{$key}.name")<small class="form-error">{{ $message }}</small>@enderror
+                                        @error("new_departments.{$key}.code")<small class="form-error">{{ $message }}</small>@enderror
+                                        @error("new_departments.{$key}.authorize")<small class="form-error">{{ $message }}</small>@enderror
+                                    </details>
+                                @endif
+                                @error("department_map.{$key}")<small class="form-error">{{ $message }}</small>@enderror
+                            </div>
                         @endforeach
                     @else
                         <p class="empty-note">No office values were found in this column. Select the column containing employee department names before saving.</p>
@@ -129,44 +170,86 @@
                         @foreach($positionPairs as $pair)
                             @php
                                 $key = hash('sha256', $pair['office']."\0".$pair['position']);
-                                $selectedPosition = old("position_map.{$key}", $mappingSummary['position_map'][$key] ?? '');
+                                $autoPosition = $mappingSummary['position_map'][$key] ?? '';
+                                $oldPosition = old("position_map.{$key}");
+                                $selectedPosition = $oldPosition === null || ($oldPosition === '' && $autoPosition !== '')
+                                    ? $autoPosition
+                                    : $oldPosition;
                                 $departmentKey = hash('sha256', $pair['office']);
-                                $departmentId = old("department_map.{$departmentKey}", $mappingSummary['department_map'][$departmentKey] ?? null);
+                                $autoDepartmentId = $mappingSummary['department_map'][$departmentKey] ?? null;
+                                $oldDepartmentId = old("department_map.{$departmentKey}");
+                                $departmentId = $oldDepartmentId === null || ($oldDepartmentId === '' && $autoDepartmentId !== null)
+                                    ? $autoDepartmentId
+                                    : $oldDepartmentId;
                                 $departmentId = filter_var($departmentId, FILTER_VALIDATE_INT) ?: null;
-                                $positionCandidates = $positions->filter(fn($position) => !$position->department_id || (int)$position->department_id === (int)$departmentId);
+                                $departmentWillBeCreated = $oldDepartmentId === 'create';
+                                $positionCandidates = $departmentWillBeCreated
+                                    ? $positions->take(0)
+                                    : $positions->filter(fn($position) => !$departmentId || !$position->department_id || (int)$position->department_id === (int)$departmentId);
                                 $matchedPosition = $selectedPosition !== 'create'
                                     ? $positionCandidates->firstWhere('id', (int) $selectedPosition)
                                     : null;
-                                $positionSuggestions = $mappingSummary['position_suggestions'][$key] ?? [];
+                                $positionSuggestions = $departmentWillBeCreated ? [] : ($mappingSummary['position_suggestions'][$key] ?? []);
+                                $positionMatch = $mappingSummary['position_matches'][$key] ?? [];
                                 $suggestedPositionIds = collect($positionSuggestions)->pluck('id')->all();
+                                $selectedPositionId = filter_var($selectedPosition, FILTER_VALIDATE_INT);
+                                if ($selectedPositionId && $selectedPositionId !== (int) ($positionMatch['position_id'] ?? 0)) {
+                                    $positionMatch['status'] = 'Needs HR Confirmation';
+                                    $positionMatch['reason'] = 'The selected position differs from the automatic match; save to confirm this choice';
+                                }
                             @endphp
-                            @if($matchedPosition)
-                                <input type="hidden" name="position_map[{{ $key }}]" value="{{ $matchedPosition->id }}">
-                            @else
-                            <label class="mapping-row">
-                                <span><b>{{ $pair['position'] }}</b><small>{{ $pair['office'] }} · {{ $matchedPosition ? 'Matched: '.$matchedPosition->title : 'Needs position assignment' }}</small></span>
-                                    <select name="position_map[{{ $key }}]">
-                                        <option value="">Choose a position</option>
-                                        @if($positionSuggestions)
-                                            <optgroup label="Suggested matches">
-                                                @foreach($positionSuggestions as $suggestion)
-                                                    @if($positionCandidates->contains('id', $suggestion['id']))
-                                                        <option value="{{ $suggestion['id'] }}" @selected((string) $selectedPosition === (string) $suggestion['id'])>{{ $suggestion['title'] }} ({{ $suggestion['score'] }}% match)</option>
-                                                    @endif
-                                                @endforeach
-                                            </optgroup>
-                                        @endif
-                                        <optgroup label="All existing positions">
-                                            @foreach($positionCandidates->reject(fn($position) => in_array($position->id, $suggestedPositionIds, true)) as $position)
-                                                <option value="{{ $position->id }}" @selected((string) $selectedPosition === (string) $position->id)>{{ $position->title }}</option>
+                            <div class="mapping-row">
+                                <span>
+                                    <b>{{ $pair['position'] }}</b>
+                                    <small>
+                                        {{ $pair['office'] }} · {{ $positionMatch['status'] ?? 'Unmatched' }}
+                                        · Matched HRIS position: {{ $matchedPosition?->title ?? 'None' }}
+                                        @if(!empty($positionMatch['reason'])) · {{ $positionMatch['reason'] }}@endif
+                                        @if(isset($positionMatch['confidence'])) · {{ $positionMatch['confidence'] }}% confidence @endif
+                                        @if($import->position_reference_count > 0) · {{ !empty($mappingSummary['reference_positions'][$key]) ? 'Listed on Positions worksheet' : 'Not found in Positions worksheet' }}@endif
+                                        @if(count($pair['salary_grades'] ?? []) > 1) · Workbook has multiple salary grades: {{ implode(', ', $pair['salary_grades']) }}@endif
+                                    </small>
+                                </span>
+                                <label>
+                                    <span class="sr-only">Position for {{ $pair['position'] }} in {{ $pair['office'] }}</span>
+                                    <select name="position_map[{{ $key }}]" onchange="document.getElementById('position-create-{{ $key }}')?.toggleAttribute('open', this.value === 'create')">
+                                    <option value="">Needs HR confirmation — no position selected</option>
+                                    @if($positionSuggestions)
+                                        <optgroup label="Possible matches — HR confirmation required">
+                                            @foreach($positionSuggestions as $suggestion)
+                                                @if($positionCandidates->contains('id', $suggestion['id']))
+                                                    <option value="{{ $suggestion['id'] }}" @selected((string) $selectedPosition === (string) $suggestion['id'])>{{ $suggestion['title'] }} — {{ $suggestion['department'] ?? 'Any department' }} ({{ $suggestion['score'] }}% similarity)</option>
+                                                @endif
                                             @endforeach
                                         </optgroup>
-                                        @if($departmentId)
-                                            <option value="create" @selected($selectedPosition === 'create')>Create position “{{ $pair['position'] }}”</option>
-                                        @endif
+                                    @endif
+                                    <optgroup label="{{ $departmentId ? 'Existing positions valid for this department' : 'Existing positions — confirm department association' }}">
+                                        @foreach($positionCandidates->reject(fn($position) => in_array($position->id, $suggestedPositionIds, true)) as $position)
+                                            <option value="{{ $position->id }}" @selected((string) $selectedPosition === (string) $position->id)>{{ $position->title }} — {{ $position->department?->name ?? 'Any department' }}</option>
+                                        @endforeach
+                                    </optgroup>
+                                    @if(empty($positionMatch['has_exact_match']) && ($import->position_reference_count === 0 || !empty($mappingSummary['reference_positions'][$key])))
+                                        <option value="create" @selected($selectedPosition === 'create')>Create position “{{ $pair['position'] }}”</option>
+                                    @endif
                                     </select>
-                            </label>
-                            @endif
+                                </label>
+                                @if(empty($positionMatch['has_exact_match']) && ($import->position_reference_count === 0 || !empty($mappingSummary['reference_positions'][$key])))
+                                    <details id="position-create-{{ $key }}" class="mapping-create" @if($selectedPosition === 'create' || old("new_positions.{$key}.title") !== null) open @endif>
+                                        <summary>Create New Position</summary>
+                                        <p class="muted">
+                                            Department: {{ $departmentWillBeCreated ? 'the new department above' : ($departments->firstWhere('id', $departmentId)?->name ?? 'select an existing department or create one above') }}.
+                                            Status: Active (required for this import). Plantilla item numbers and employment classifications remain on employee records; neither is a field on the current positions table. Remarks are not supported by the current positions schema.
+                                        </p>
+                                        <div class="form-grid top-space">
+                                            <label>Position title<input name="new_positions[{{ $key }}][title]" maxlength="150" value="{{ old("new_positions.{$key}.title", $pair['position']) }}"></label>
+                                            <label>Salary grade<input name="new_positions[{{ $key }}][salary_grade]" maxlength="10" value="{{ old("new_positions.{$key}.salary_grade", $pair['salary_grade'] ?? '') }}"></label>
+                                        </div>
+                                        @error("new_positions.{$key}.title")<small class="form-error">{{ $message }}</small>@enderror
+                                        @error("new_positions.{$key}.salary_grade")<small class="form-error">{{ $message }}</small>@enderror
+                                    </details>
+                                @endif
+                                @error("position_map.{$key}")<small class="form-error">{{ $message }}</small>@enderror
+                            </div>
                         @endforeach
                     @endif
                     @error('office_source_column')<p class="form-error">{{ $message }}</p>@enderror

@@ -130,6 +130,7 @@ Route::middleware(['auth', 'active', 'account.setup'])->group(function () {
         Route::get('/users/{user}/edit', [UserController::class, 'edit'])->name('users.edit');
         Route::put('/users/{user}', [UserController::class, 'update'])->name('users.update');
         Route::post('/users/{user}/activation-link', [UserController::class, 'sendActivationLink'])->name('users.activation-link');
+        Route::post('/users/{user}/temporary-credential', [UserController::class, 'generateTemporaryCredential'])->name('users.temporary-credential');
     });
 
     Route::get('/notifications', [NotificationController::class, 'index'])->name('notifications.index');

@@ -1348,6 +1348,30 @@ tbody tr:last-child td {
     display: grid;
     gap: 4px;
 }
+.mapping-create {
+    grid-column: 1/-1;
+    padding: 10px 12px;
+    border: 1px solid #e2e8ed;
+    border-radius: 6px;
+    background: #fbfcfd;
+}
+.mapping-create summary {
+    color: #355d7a;
+    font-size: 11px;
+    font-weight: 700;
+}
+.mapping-create .form-grid {
+    margin-bottom: 8px;
+}
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    clip-path: inset(50%);
+}
 @media (max-width: 600px) {
     .mapping-row {
         grid-template-columns: 1fr;

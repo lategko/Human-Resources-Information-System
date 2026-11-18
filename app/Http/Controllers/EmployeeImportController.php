@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Department;
 use App\Models\EmployeeImport;
 use App\Models\EmployeeImportRow;
 use App\Models\Position;
@@ -101,8 +100,8 @@ class EmployeeImportController extends Controller
             'positionPairs' => $positionPairs,
             'mappingSummary' => $mappingSummary,
             'summary' => $summary,
-            'departments' => Department::where('is_active', true)->orderBy('name')->get(),
-            'positions' => Position::where('is_active', true)->orderBy('title')->get(),
+            'departments' => $importer->officialDepartments(),
+            'positions' => Position::with('department')->where('is_active', true)->orderBy('title')->get(),
             'canEditMappings' => in_array($employeeImport->status, [
                 'mapping_required', 'ready_for_import', 'completed_with_errors', 'failed',
                 'pending_review', 'mapping_approved', 'review_required',
@@ -121,8 +120,15 @@ class EmployeeImportController extends Controller
             'employment_status' => ['nullable', Rule::in(['Active', 'On Leave', 'Separated', 'Retired'])],
             'department_map' => ['nullable', 'array'],
             'department_map.*' => ['nullable'],
+            'new_departments' => ['nullable', 'array'],
+            'new_departments.*.name' => ['nullable', 'string', 'max:150'],
+            'new_departments.*.code' => ['nullable', 'string', 'max:20'],
+            'new_departments.*.authorize' => ['nullable', 'accepted'],
             'position_map' => ['nullable', 'array'],
             'position_map.*' => ['nullable'],
+            'new_positions' => ['nullable', 'array'],
+            'new_positions.*.title' => ['nullable', 'string', 'max:150'],
+            'new_positions.*.salary_grade' => ['nullable', 'string', 'max:10'],
         ]);
 
         $importer->saveMapping($employeeImport, $data, $request->user()->id);

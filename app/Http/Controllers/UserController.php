@@ -10,6 +10,7 @@ use App\Services\EmployeeUsernameGenerator;
 use Illuminate\Contracts\Auth\PasswordBroker;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
@@ -81,7 +82,13 @@ class UserController extends Controller
             $user = User::create([
                 'name' => $this->accountName($data),
                 'username' => filled($data['username'] ?? null) ? $data['username'] : ($employee
-                    ? $usernameGenerator->generate($employee->full_name, $employee->employee_no)
+                    ? $usernameGenerator->generateForNameParts(
+                        $employee->first_name,
+                        $employee->middle_name,
+                        $employee->last_name,
+                        $employee->suffix,
+                        $employee->employee_no
+                    )
                     : null),
                 'email' => $data['email'] ?? null,
                 'role' => $data['role'],
@@ -244,6 +251,40 @@ class UserController extends Controller
         return back()->with('success', 'A secure password setup/reset link was sent to the registered email address.');
     }
 
+    public function generateTemporaryCredential(Request $request, User $user, AuditLogger $auditLogger): Response
+    {
+        $this->authorizeAccountManagement($request->user(), $user);
+        abort_unless($user->isEmployee() && $user->employee()->exists() && $user->is_active, 403);
+
+        $temporaryPassword = Str::random(40);
+        DB::transaction(function () use ($user, $temporaryPassword): void {
+            $lockedUser = User::query()->lockForUpdate()->findOrFail($user->id);
+            abort_unless($lockedUser->isEmployee() && $lockedUser->employee()->exists() && $lockedUser->is_active, 403);
+            $lockedUser->password = $temporaryPassword;
+            $lockedUser->must_change_password = true;
+            $lockedUser->account_setup_completed = false;
+            $lockedUser->setRememberToken(Str::random(60));
+            $lockedUser->saveOrFail();
+
+            if (Schema::hasTable('sessions')) {
+                DB::table('sessions')->where('user_id', $lockedUser->id)->delete();
+            }
+        });
+
+        $auditLogger->record('user.temporary_credential_generated', $user, [
+            'employee_id' => $user->employee->id,
+        ]);
+
+        return response()->view('users.temporary-credential', [
+            'user' => $user->load('employee'),
+            'temporaryPassword' => $temporaryPassword,
+        ])->withHeaders([
+            'Cache-Control' => 'private, no-store, max-age=0',
+            'Pragma' => 'no-cache',
+            'Referrer-Policy' => 'no-referrer',
+        ]);
+    }
+
     private function validated(Request $request, ?User $user = null): array
     {
         $request->merge([
@@ -315,9 +356,13 @@ class UserController extends Controller
         return $data;
     }
 
-    private function allowedRoles(User $actor, ?User $target = null): array
+    private function allowedRoles(?User $actor = null, ?User $target = null): array
     {
-        return User::VALID_ROLES;
+        return array_values(array_filter(
+            User::VALID_ROLES,
+            fn (string $role) => $role !== 'admin'
+                || ($actor?->isAdministrator() && $target?->role === 'admin')
+        ));
     }
 
     private function authorizeAccountManagement(User $actor, User $target): void

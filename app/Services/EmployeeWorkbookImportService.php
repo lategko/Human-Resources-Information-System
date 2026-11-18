@@ -20,10 +20,10 @@ use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 use PhpOffice\PhpSpreadsheet\IOFactory;
-use PhpOffice\PhpSpreadsheet\Reader\Exception;
 use PhpOffice\PhpSpreadsheet\Reader\Xls;
 use PhpOffice\PhpSpreadsheet\Reader\Xlsx;
 use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
 
 class EmployeeWorkbookImportService
 {
@@ -93,19 +93,45 @@ class EmployeeWorkbookImportService
                     'row_count' => count($analysis['rows']),
                     'source_row_count' => $analysis['source_row_count'],
                     'excluded_rows_count' => $analysis['excluded_rows_count'],
+                    'plantilla_item_count' => $analysis['plantilla_item_count'],
+                    'vacant_count' => $analysis['vacant_count'],
+                    'excluded_office_count' => $analysis['excluded_office_count'],
+                    'excluded_records' => $analysis['excluded_records'],
+                    'position_reference_count' => count($analysis['position_reference_titles']),
+                    'position_reference_titles' => $analysis['position_reference_titles'],
                 ]);
                 $seenEmployeeNos = [];
                 $seenIdentityHashes = [];
+                $seenPlantillaItems = [];
+                $existingPlantillaItemOwners = $analysis['format'] === 'plantilla'
+                    ? EmployeeServiceProfile::query()
+                        ->whereNotNull('plantilla_item_no')
+                        ->get(['employee_id', 'plantilla_item_no'])
+                        ->groupBy(fn (EmployeeServiceProfile $profile) => $this->normalizeMatchValue((string) $profile->plantilla_item_no))
+                        ->map(fn (Collection $profiles) => $profiles->pluck('employee_id')->all())
+                        ->all()
+                    : [];
                 $duplicateCount = 0;
                 $reviewCount = 0;
 
                 foreach ($analysis['rows'] as $sourceRow) {
                     $sourceData = $sourceRow['data'];
                     $identity = $sourceRow['identity'];
+                    $itemNumberKey = $analysis['format'] === 'plantilla'
+                        ? $this->normalizeMatchValue((string) ($identity['item_number'] ?? ''))
+                        : '';
                     $employeeNumber = $analysis['format'] === 'plantilla'
                         ? ''
                         : trim((string) ($this->cellByHeader($sourceData, 'NO.')['display_value'] ?? ''));
                     $issues = $identity['error'] ? [$identity['error']] : [];
+                    $duplicatePlantillaItem = $itemNumberKey !== '' && isset($seenPlantillaItems[$itemNumberKey]);
+                    if ($itemNumberKey !== '') {
+                        if ($duplicatePlantillaItem) {
+                            $issues[] = 'Duplicate plantilla item number within this workbook.';
+                        } else {
+                            $seenPlantillaItems[$itemNumberKey] = true;
+                        }
+                    }
                     $existingEmployee = null;
                     if ($employeeNumber === '') {
                         if ($analysis['format'] === 'legacy') {
@@ -140,6 +166,12 @@ class EmployeeWorkbookImportService
                         && ! in_array('This employee number belongs to a protected Admin account. Imports cannot change that employee or account.', $issues, true)) {
                         $issues[] = 'This employee number belongs to a protected Admin account. Imports cannot change that employee or account.';
                     }
+                    if ($itemNumberKey !== '') {
+                        $itemOwners = $existingPlantillaItemOwners[$itemNumberKey] ?? [];
+                        if ($itemOwners && ! in_array($existingEmployee?->id, $itemOwners, true)) {
+                            $issues[] = 'This plantilla item number is already assigned to another employee.';
+                        }
+                    }
                     if ($analysis['format'] === 'legacy'
                         && trim((string) ($this->cellByHeader($sourceData, 'NAME')['display_value'] ?? '')) === '') {
                         $issues[] = 'Employee name is missing.';
@@ -151,6 +183,7 @@ class EmployeeWorkbookImportService
                     }
                     $status = in_array('Duplicate employee reference number within this workbook.', $issues, true)
                         || in_array('The same source identity appears more than once in this workbook.', $issues, true)
+                        || $duplicatePlantillaItem
                         || $existingEmployee?->trashed()
                         || $existingEmployee?->user?->role === 'admin'
                         ? 'duplicate'
@@ -189,7 +222,7 @@ class EmployeeWorkbookImportService
         return $import->fresh('rows');
     }
 
-    private function analyzeWorkbook(\PhpOffice\PhpSpreadsheet\Spreadsheet $spreadsheet): array
+    private function analyzeWorkbook(Spreadsheet $spreadsheet): array
     {
         $sheets = $spreadsheet->getAllSheets();
         $worksheetNames = array_map(fn ($sheet) => $sheet->getTitle(), $sheets);
@@ -309,6 +342,10 @@ class EmployeeWorkbookImportService
         }
 
         $rows = [];
+        $plantillaItemCount = 0;
+        $vacantCount = 0;
+        $excludedOfficeCount = 0;
+        $excludedRecords = [];
         $sourceRowCount = max(0, $bounds['max_row'] - $detected['header_row']);
         for ($rowNumber = $detected['header_row'] + 1; $rowNumber <= $bounds['max_row']; $rowNumber++) {
             $sourceData = [];
@@ -349,10 +386,45 @@ class EmployeeWorkbookImportService
             if (! $hasValue) {
                 continue;
             }
-            if ($detected['format'] === 'plantilla'
-                && (trim((string) ($this->cellByHeader($sourceData, 'LAST NAME')['display_value'] ?? '')) === ''
-                    || trim((string) ($this->cellByHeader($sourceData, 'FIRST NAME')['display_value'] ?? '')) === '')) {
-                continue;
+            if ($detected['format'] === 'plantilla') {
+                $itemNumber = trim((string) ($this->cellByHeader($sourceData, 'ITEM NUMBER')['display_value'] ?? ''));
+                $hasName = trim((string) ($this->cellByHeader($sourceData, 'LAST NAME')['display_value'] ?? '')) !== ''
+                    || trim((string) ($this->cellByHeader($sourceData, 'FIRST NAME')['display_value'] ?? '')) !== '';
+                if ($itemNumber === '' && ! $hasName) {
+                    continue;
+                }
+
+                if ($itemNumber !== '') {
+                    $plantillaItemCount++;
+                    $office = trim((string) ($this->cellByHeader($sourceData, 'OFFICE')['display_value'] ?? ''));
+                    $position = trim((string) ($this->cellByHeader($sourceData, 'LATEST POSITION')['display_value'] ?? ''));
+
+                    if ($this->isExcludedOffice($office)) {
+                        $excludedOfficeCount++;
+                        $excludedRecords[] = [
+                            'source_row' => $rowNumber,
+                            'type' => 'excluded_office',
+                            'item_number' => $itemNumber,
+                            'office' => $office,
+                            'position' => $position,
+                        ];
+
+                        continue;
+                    }
+
+                    if ($this->isVacantPlantillaRow($sourceData)) {
+                        $vacantCount++;
+                        $excludedRecords[] = [
+                            'source_row' => $rowNumber,
+                            'type' => 'vacant',
+                            'item_number' => $itemNumber,
+                            'office' => $office,
+                            'position' => $position,
+                        ];
+
+                        continue;
+                    }
+                }
             }
 
             $rows[] = ['source_row' => $rowNumber, 'data' => $sourceData];
@@ -362,7 +434,7 @@ class EmployeeWorkbookImportService
                 'file' => 'The employee worksheet contains more than '.self::MAX_ROWS.' occupied employee records.',
             ]);
         }
-        if ($rows === []) {
+        if ($rows === [] && ($detected['format'] !== 'plantilla' || $plantillaItemCount === 0)) {
             throw ValidationException::withMessages(['file' => 'No occupied employee records with complete names were found in the recognized worksheet.']);
         }
 
@@ -375,6 +447,8 @@ class EmployeeWorkbookImportService
             ], $rows);
         }
 
+        $positionReferenceTitles = $this->positionReferenceTitles($spreadsheet);
+
         return [
             'format' => $detected['format'],
             'worksheet_name' => $detected['worksheet_name'],
@@ -383,8 +457,53 @@ class EmployeeWorkbookImportService
             'headers' => $headers,
             'rows' => $rows,
             'source_row_count' => $sourceRowCount,
-            'excluded_rows_count' => max(0, $sourceRowCount - count($rows)),
+            'excluded_rows_count' => count($excludedRecords),
+            'plantilla_item_count' => $plantillaItemCount,
+            'vacant_count' => $vacantCount,
+            'excluded_office_count' => $excludedOfficeCount,
+            'excluded_records' => $excludedRecords,
+            'position_reference_titles' => $positionReferenceTitles,
         ];
+    }
+
+    private function isVacantPlantillaRow(array $sourceData): bool
+    {
+        foreach ($sourceData as $cell) {
+            if (preg_match('/\bVACANT\b/i', (string) ($cell['display_value'] ?? ''))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function isExcludedOffice(string $office): bool
+    {
+        $normalized = $this->normalizeMatchValue($office);
+
+        return collect(config('hris.employee_import.excluded_department_aliases', []))
+            ->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalized);
+    }
+
+    private function positionReferenceTitles(Spreadsheet $spreadsheet): array
+    {
+        $sheet = collect($spreadsheet->getAllSheets())
+            ->first(fn ($worksheet) => $this->normalizeMatchValue($worksheet->getTitle()) === 'POSITIONS');
+        if (! $sheet) {
+            return [];
+        }
+
+        $titles = [];
+        foreach ($sheet->getRowIterator() as $row) {
+            foreach ($row->getCellIterator() as $cell) {
+                $title = trim((string) $cell->getFormattedValue());
+                if ($title !== '') {
+                    $titles[] = $title;
+                }
+            }
+        }
+
+        return $titles;
     }
 
     private function worksheetBounds($sheet): array
@@ -457,7 +576,7 @@ class EmployeeWorkbookImportService
             } elseif ($tin !== '' && ($identifierCounts['TIN'][$tin] ?? 0) === 1) {
                 $identityType = 'tin';
                 $identityValue = 'TIN:'.$tin;
-            } elseif ($itemNumber !== '') {
+            } elseif ($itemNumber !== '' && $lastName !== '' && $firstName !== '') {
                 $identityType = $birthDate ? 'item_name_dob' : 'item_name';
                 $identityValue = implode(':', [
                     'PLANTILLA',
@@ -476,7 +595,7 @@ class EmployeeWorkbookImportService
                 'type' => $identityType,
                 'item_number' => $itemNumber ?: null,
                 'error' => $identityValue === null
-                    ? 'A plantilla item number is missing, so a safe re-import identity cannot be generated.'
+                    ? 'A unique GSIS BP number, TIN, or complete name and plantilla item number is required to safely match this record.'
                     : null,
             ];
             $row['identity'] = $identity;
@@ -539,57 +658,61 @@ class EmployeeWorkbookImportService
     public function positionPairs(EmployeeImport $import, int $officeColumn): Collection
     {
         $positionColumn = $this->headerColumn($import, 'LATEST POSITION');
+        $salaryGradeHeader = collect($import->source_headers)->first(
+            fn (array $header) => ($header['canonical_label'] ?? $this->canonicalHeader((string) ($header['label'] ?? '')))
+                === $this->canonicalHeader('SALARY GRADE')
+        );
+        $salaryGradeColumn = $salaryGradeHeader ? (int) $salaryGradeHeader['index'] : null;
 
-        return $import->rows()->get()->map(function (EmployeeImportRow $row) use ($officeColumn, $positionColumn) {
+        return $import->rows()->get()->map(function (EmployeeImportRow $row) use ($officeColumn, $positionColumn, $salaryGradeColumn) {
             return [
                 'office' => trim((string) ($this->cellByColumn($row->source_data, $officeColumn)['display_value'] ?? '')),
                 'position' => trim((string) ($this->cellByColumn($row->source_data, $positionColumn)['display_value'] ?? '')),
+                'salary_grade' => $salaryGradeColumn
+                    ? trim((string) ($this->cellByColumn($row->source_data, $salaryGradeColumn)['display_value'] ?? ''))
+                    : '',
             ];
         })->filter(fn (array $pair) => $pair['office'] !== '' && $pair['position'] !== '')
-            ->unique(fn (array $pair) => hash('sha256', $pair['office']."\0".$pair['position']))
+            ->groupBy(fn (array $pair) => hash('sha256', $pair['office']."\0".$pair['position']))
+            ->map(function (Collection $pairs) {
+                $grades = $pairs->pluck('salary_grade')->filter()->unique()->values();
+                $pair = $pairs->first();
+                $pair['salary_grade'] = $grades->count() === 1 ? $grades->first() : '';
+                $pair['salary_grades'] = $grades->all();
+
+                return $pair;
+            })
             ->sortBy(fn (array $pair) => $pair['office'].' '.$pair['position'])
             ->values();
     }
 
     public function suggestedDepartmentMap(EmployeeImport $import, int $officeColumn): array
     {
-        $departments = Department::query()->where('is_active', true)->get();
-        $aliases = collect(config('hris.employee_import.department_aliases', []))
-            ->mapWithKeys(fn (string $target, string $alias) => [$this->normalizeMatchValue($alias) => $target]);
+        $departments = $this->officialDepartments();
 
-        return $this->officeValues($import, $officeColumn)->mapWithKeys(function (string $office) use ($departments, $aliases) {
-            $lookup = $aliases->get($this->normalizeMatchValue($office), $office);
-            $normalized = $this->normalizeMatchValue($lookup);
-            $officeNormalized = $this->normalizeMatchValue($office);
-            $matches = $departments->filter(fn (Department $department) => $this->normalizeMatchValue($department->code ?? '') === $normalized
-                || $this->normalizeMatchValue($department->name) === $normalized
-                || collect($department->aliases ?? [])->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $officeNormalized));
+        return $this->officeValues($import, $officeColumn)->mapWithKeys(function (string $office) use ($departments) {
+            $match = $this->departmentMatch($office, $departments);
 
-            return $matches->count() === 1
-                ? [hash('sha256', $office) => $matches->first()->id]
+            return $match['department_id']
+                ? [hash('sha256', $office) => $match['department_id']]
                 : [];
         })->all();
     }
 
-    public function suggestedPositionMap(EmployeeImport $import, int $officeColumn, array $departmentMap): array
-    {
-        $positions = Position::query()->where('is_active', true)->get();
+    public function suggestedPositionMap(
+        EmployeeImport $import,
+        int $officeColumn,
+        array $departmentMap,
+        ?Collection $positions = null
+    ): array {
+        $positions ??= $this->activePositions();
 
-        return $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($positions, $departmentMap) {
+        return $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($departmentMap, $positions) {
             $departmentId = $departmentMap[hash('sha256', $pair['office'])] ?? null;
-            $normalizedTitle = $this->normalizeMatchValue($pair['position']);
-            $candidates = $positions->filter(fn (Position $position) => (
-                $this->normalizeMatchValue($position->title) === $normalizedTitle
-                || collect($position->aliases ?? [])->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalizedTitle)
-            ) && ($position->department_id === null || (int) $position->department_id === (int) $departmentId));
-
-            if ($departmentId && $candidates->where('department_id', $departmentId)->count() === 1) {
-                $candidates = $candidates->where('department_id', $departmentId);
-            }
-
+            $match = $this->positionMatch($pair, filter_var($departmentId, FILTER_VALIDATE_INT) ?: null, $positions);
             $key = hash('sha256', $pair['office']."\0".$pair['position']);
 
-            return $candidates->count() === 1 ? [$key => $candidates->first()->id] : [];
+            return $match['position_id'] ? [$key => $match['position_id']] : [];
         })->all();
     }
 
@@ -600,7 +723,7 @@ class EmployeeWorkbookImportService
             return [];
         }
 
-        return Department::query()->where('is_active', true)->get()
+        return $this->officialDepartments()
             ->map(function (Department $department) use ($normalized) {
                 $score = collect([$department->name, $department->code, ...($department->aliases ?? [])])
                     ->filter()
@@ -616,26 +739,187 @@ class EmployeeWorkbookImportService
             ->all();
     }
 
-    public function positionSuggestions(string $title, ?int $departmentId): array
+    private function departmentMatch(string $office, Collection $departments): array
+    {
+        $normalized = $this->normalizeMatchValue($office);
+        $directMatches = $departments->filter(fn (Department $department) => (
+            $this->normalizeMatchValue($department->name) === $normalized
+            || $this->normalizeMatchValue($department->code ?? '') === $normalized
+        ));
+        $configuredAliases = collect(config('hris.employee_import.department_aliases', []))
+            ->filter(fn (string $target, string $alias) => $this->normalizeMatchValue($alias) === $normalized)
+            ->values();
+        $aliasMatches = $departments->filter(function (Department $department) use ($normalized, $configuredAliases) {
+            $databaseAliasMatches = collect($department->aliases ?? [])
+                ->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalized);
+            $configuredAliasMatches = $configuredAliases->contains(
+                fn (string $target) => $this->normalizeMatchValue($department->name) === $this->normalizeMatchValue($target)
+                    || $this->normalizeMatchValue($department->code ?? '') === $this->normalizeMatchValue($target)
+            );
+
+            return $databaseAliasMatches || $configuredAliasMatches;
+        });
+        $candidateDepartments = $directMatches->merge($aliasMatches)->unique('id')->values();
+
+        if ($directMatches->count() === 1 && $candidateDepartments->count() === 1) {
+            $department = $directMatches->first();
+
+            return [
+                'department_id' => $department->id,
+                'department_name' => $department->name,
+                'status' => 'Automatically Matched',
+                'reason' => 'Normalized department name or code match',
+                'confidence' => 100,
+                'suggestions' => [],
+                'has_exact_match' => true,
+            ];
+        }
+
+        if ($directMatches->isEmpty() && $aliasMatches->count() === 1) {
+            $department = $aliasMatches->first();
+
+            return [
+                'department_id' => $department->id,
+                'department_name' => $department->name,
+                'status' => 'Matched by Approved Alias',
+                'reason' => 'Matches a configured or HR-approved department alias',
+                'confidence' => 100,
+                'suggestions' => [],
+                'has_exact_match' => true,
+            ];
+        }
+
+        if ($candidateDepartments->isNotEmpty()) {
+            $suggestions = $candidateDepartments->map(fn (Department $department) => [
+                'id' => $department->id,
+                'name' => $department->name,
+                'score' => 100,
+            ])->all();
+
+            return [
+                'department_id' => null,
+                'department_name' => null,
+                'status' => 'Needs HR Confirmation',
+                'reason' => 'More than one existing department matches this name',
+                'confidence' => null,
+                'suggestions' => $suggestions,
+                'has_exact_match' => true,
+            ];
+        }
+
+        $suggestions = $this->departmentSuggestions($office);
+
+        return [
+            'department_id' => null,
+            'department_name' => null,
+            'status' => $suggestions ? 'Needs HR Confirmation' : 'Unmatched',
+            'reason' => $suggestions
+                ? 'Possible matches are suggestions only and require HR confirmation'
+                : 'No normalized name, approved alias, or sufficiently similar department was found',
+            'confidence' => null,
+            'suggestions' => $suggestions,
+            'has_exact_match' => false,
+        ];
+    }
+
+    private function positionMatch(array $pair, ?int $departmentId, ?Collection $positions = null): array
+    {
+        $positions ??= $this->activePositions();
+        if (! $departmentId) {
+            $suggestions = $this->positionSuggestions($pair['position'], null, $positions);
+
+            return [
+                'position_id' => null,
+                'position_title' => null,
+                'status' => 'Needs HR Confirmation',
+                'reason' => 'Confirm the department before matching its position',
+                'confidence' => null,
+                'suggestions' => $suggestions,
+                'has_exact_match' => false,
+            ];
+        }
+
+        $normalizedTitle = $this->normalizeMatchValue($pair['position']);
+        $eligiblePositions = $positions
+            ->filter(fn (Position $position) => $position->department_id === null
+                || (int) $position->department_id === $departmentId);
+        $candidatePositions = $eligiblePositions->filter(fn (Position $position) => (
+            $this->normalizeMatchValue($position->title) === $normalizedTitle
+            || collect($position->aliases ?? [])
+                ->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalizedTitle)
+        ));
+        $departmentPositions = $candidatePositions->where('department_id', $departmentId);
+        if ($departmentPositions->isNotEmpty()) {
+            $candidatePositions = $departmentPositions;
+        }
+        $candidatePositions = $candidatePositions->unique('id')->values();
+
+        if ($candidatePositions->count() === 1) {
+            $position = $candidatePositions->first();
+            $isTitleMatch = $this->normalizeMatchValue($position->title) === $normalizedTitle;
+
+            return [
+                'position_id' => $position->id,
+                'position_title' => $position->title,
+                'status' => $isTitleMatch ? 'Automatically Matched' : 'Matched by Approved Alias',
+                'reason' => $isTitleMatch
+                    ? 'Normalized position title in the confirmed department'
+                    : 'Matches an existing HR-approved position alias in the confirmed department',
+                'confidence' => 100,
+                'suggestions' => [],
+                'has_exact_match' => true,
+            ];
+        }
+
+        $suggestions = $candidatePositions->isNotEmpty()
+            ? $candidatePositions->map(fn (Position $position) => [
+                'id' => $position->id,
+                'title' => $position->title,
+                'department' => $position->department?->name ?? 'Any department',
+                'score' => 100,
+            ])->all()
+            : $this->positionSuggestions($pair['position'], $departmentId, $positions);
+        $ambiguousExactMatches = $candidatePositions->isNotEmpty();
+
+        return [
+            'position_id' => null,
+            'position_title' => null,
+            'status' => $suggestions ? 'Needs HR Confirmation' : 'Unmatched',
+            'reason' => $ambiguousExactMatches
+                ? 'Multiple existing positions match within the confirmed department'
+                : ($suggestions
+                    ? 'Possible matches are suggestions only and require HR confirmation'
+                    : 'No existing position or approved alias matches this title in the confirmed department'),
+            'confidence' => null,
+            'suggestions' => $suggestions,
+            'has_exact_match' => $ambiguousExactMatches,
+        ];
+    }
+
+    public function positionSuggestions(string $title, ?int $departmentId, ?Collection $positions = null): array
     {
         $normalized = $this->normalizeMatchValue($title);
         if ($normalized === '') {
             return [];
         }
 
-        return Position::query()->where('is_active', true)
-            ->where(function ($query) use ($departmentId) {
-                $query->whereNull('department_id');
-                if ($departmentId) {
-                    $query->orWhere('department_id', $departmentId);
-                }
-            })->get()
+        $positions ??= $this->activePositions();
+
+        return $positions
+            ->filter(fn (Position $position) => ! $departmentId
+                || ! $position->department_id
+                || (int) $position->department_id === $departmentId)
             ->map(function (Position $position) use ($normalized) {
                 $score = collect([$position->title, ...($position->aliases ?? [])])
                     ->map(fn (string $candidate) => $this->matchScore($normalized, $candidate))
                     ->max() ?? 0;
 
-                return ['id' => $position->id, 'title' => $position->title, 'score' => $score];
+                return [
+                    'id' => $position->id,
+                    'title' => $position->title,
+                    'department' => $position->department?->name ?? 'Any department',
+                    'score' => $score,
+                ];
             })
             ->filter(fn (array $candidate) => $candidate['score'] >= 55)
             ->sortByDesc('score')
@@ -654,28 +938,71 @@ class EmployeeWorkbookImportService
                 'position_map' => [],
                 'department_suggestions' => [],
                 'position_suggestions' => [],
+                'department_matches' => [],
+                'position_matches' => [],
+                'reference_positions' => [],
             ];
         }
 
+        $activePositions = $this->activePositions();
         $departmentMap = array_replace(
             $this->suggestedDepartmentMap($import, $officeColumn),
             $import->field_mappings['department_map'] ?? []
         );
         $positionMap = array_replace(
-            $this->suggestedPositionMap($import, $officeColumn, $departmentMap),
+            $this->suggestedPositionMap($import, $officeColumn, $departmentMap, $activePositions),
             $import->field_mappings['position_map'] ?? []
         );
-        $departmentSuggestions = $this->officeValues($import, $officeColumn)->mapWithKeys(
-            fn (string $office) => [hash('sha256', $office) => $this->departmentSuggestions($office)]
-        )->all();
-        $positionSuggestions = $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($departmentMap) {
-            $departmentId = filter_var(
-                $departmentMap[hash('sha256', $pair['office'])] ?? null,
-                FILTER_VALIDATE_INT
-            );
+        $approvedDepartments = $this->officialDepartments();
+        $departmentMatches = $this->officeValues($import, $officeColumn)->mapWithKeys(function (string $office) use ($departmentMap, $approvedDepartments) {
+            $key = hash('sha256', $office);
+            $match = $this->departmentMatch($office, $approvedDepartments);
+            $selectedId = filter_var($departmentMap[$key] ?? null, FILTER_VALIDATE_INT);
+            if ($selectedId && $selectedId !== (int) ($match['department_id'] ?? 0)) {
+                $selectedDepartment = $approvedDepartments->firstWhere('id', $selectedId);
+                $match = [
+                    'department_id' => $selectedDepartment?->id,
+                    'department_name' => $selectedDepartment?->name,
+                    'status' => 'Matched by Approved Alias',
+                    'reason' => 'This source value has a saved HR-approved department mapping',
+                    'confidence' => 100,
+                    'suggestions' => [],
+                    'has_exact_match' => false,
+                ];
+            }
+
+            return [$key => $match];
+        })->all();
+        $departmentSuggestions = collect($departmentMatches)
+            ->map(fn (array $match) => $match['suggestions'])
+            ->all();
+        $positionMatches = $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($departmentMap, $positionMap, $activePositions) {
+            $key = hash('sha256', $pair['office']."\0".$pair['position']);
+            $departmentId = filter_var($departmentMap[hash('sha256', $pair['office'])] ?? null, FILTER_VALIDATE_INT);
+            $match = $this->positionMatch($pair, $departmentId ?: null, $activePositions);
+            $selectedId = filter_var($positionMap[$key] ?? null, FILTER_VALIDATE_INT);
+            if ($selectedId && $selectedId !== (int) ($match['position_id'] ?? 0)) {
+                $selectedPosition = Position::query()->with('department')->find($selectedId);
+                $match = [
+                    'position_id' => $selectedPosition?->id,
+                    'position_title' => $selectedPosition?->title,
+                    'status' => 'Matched by Approved Alias',
+                    'reason' => 'This source title has a saved HR-approved position mapping',
+                    'confidence' => 100,
+                    'suggestions' => [],
+                    'has_exact_match' => false,
+                ];
+            }
+
+            return [$key => $match];
+        })->all();
+        $positionSuggestions = collect($positionMatches)
+            ->map(fn (array $match) => $match['suggestions'])
+            ->all();
+        $referencePositions = $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($import) {
             $key = hash('sha256', $pair['office']."\0".$pair['position']);
 
-            return [$key => $this->positionSuggestions($pair['position'], $departmentId ?: null)];
+            return [$key => $this->isPositionInReference($import, $pair['position'])];
         })->all();
 
         return [
@@ -689,15 +1016,52 @@ class EmployeeWorkbookImportService
             'position_map' => $positionMap,
             'department_suggestions' => $departmentSuggestions,
             'position_suggestions' => $positionSuggestions,
+            'department_matches' => $departmentMatches,
+            'position_matches' => $positionMatches,
+            'reference_positions' => $referencePositions,
         ];
+    }
+
+    private function activePositions(): Collection
+    {
+        return Position::query()->where('is_active', true)->with('department')->get();
+    }
+
+    public function officialDepartments(): Collection
+    {
+        $approvedNames = collect(config('hris.employee_import.official_departments', []))
+            ->flatMap(fn (array $department) => [$department['name'], $department['code']])
+            ->merge(array_keys(config('hris.employee_import.department_aliases', [])))
+            ->map(fn (string $name) => $this->normalizeMatchValue($name))
+            ->filter()
+            ->unique()
+            ->all();
+
+        return Department::query()->where('is_active', true)->get()
+            ->filter(function (Department $department) use ($approvedNames) {
+                return ! empty($department->aliases)
+                    || collect([$department->name, $department->code])
+                        ->filter()
+                        ->contains(fn (string $value) => in_array($this->normalizeMatchValue($value), $approvedNames, true));
+            })
+            ->sortBy('name')
+            ->values();
+    }
+
+    private function isPositionInReference(EmployeeImport $import, string $title): bool
+    {
+        $normalized = $this->normalizeMatchValue($title);
+
+        return $normalized !== '' && collect($import->position_reference_titles ?? [])
+            ->contains(fn (string $reference) => $this->normalizeMatchValue($reference) === $normalized);
     }
 
     public function importSummary(EmployeeImport $import, ?int $officeColumn): array
     {
         $rows = $import->rows()->get();
         $mappingSummary = $this->mappingSummary($import, $officeColumn);
-        $mappedDepartments = count(array_unique(array_values($mappingSummary['department_map'])));
-        $mappedPositions = count(array_unique(array_values($mappingSummary['position_map'])));
+        $mappedDepartments = count($mappingSummary['department_map']);
+        $mappedPositions = count($mappingSummary['position_map']);
         $readyNew = $rows->where('status', 'ready')->count();
         $readyUpdates = $rows->where('status', 'ready_to_update')->count();
 
@@ -723,6 +1087,11 @@ class EmployeeWorkbookImportService
                 && $row->status !== 'duplicate')->count(),
             'departments' => $officeColumn ? $this->officeValues($import, $officeColumn)->count() : 0,
             'matched_positions' => $mappedPositions,
+            'position_reference_count' => (int) $import->position_reference_count,
+            'reference_position_matches' => count(array_filter($mappingSummary['reference_positions'])),
+            'plantilla_items' => (int) $import->plantilla_item_count,
+            'vacancies' => (int) $import->vacant_count,
+            'excluded_offices' => (int) $import->excluded_office_count,
             'unmatched_departments' => $mappingSummary['departments'],
             'unmatched_positions' => $mappingSummary['positions'],
             'duplicates' => $rows->where('status', 'duplicate')->count(),
@@ -754,20 +1123,36 @@ class EmployeeWorkbookImportService
             $this->suggestedDepartmentMap($import, $officeColumn),
             $mapping['department_map'] ?? []
         );
+        $approvedDepartmentIds = $this->officialDepartments()->modelKeys();
         foreach ($this->officeValues($import, $officeColumn) as $value) {
             $key = hash('sha256', $value);
             $selectedDepartment = $departments[$key] ?? null;
+            if ($selectedDepartment === null || $selectedDepartment === '') {
+                continue;
+            }
             if ($selectedDepartment === 'create') {
-                $department = $this->createDepartmentFromOffice($value);
+                $department = $this->createDepartmentFromSource(
+                    $value,
+                    $mapping['new_departments'][$key] ?? []
+                );
                 $departments[$key] = $department->id;
+                $approvedDepartmentIds[] = $department->id;
+
+                foreach ($this->officeValues($import, $officeColumn) as $equivalentOffice) {
+                    if ($this->normalizeMatchValue($equivalentOffice) === $this->normalizeMatchValue($value)) {
+                        $departments[hash('sha256', $equivalentOffice)] = $department->id;
+                    }
+                }
 
                 continue;
             }
             $departmentId = filter_var($selectedDepartment, FILTER_VALIDATE_INT);
-            $department = $departmentId ? Department::query()->where('is_active', true)->find($departmentId) : null;
+            $department = $departmentId && in_array($departmentId, $approvedDepartmentIds, true)
+                ? Department::query()->where('is_active', true)->find($departmentId)
+                : null;
             if (! $department) {
                 throw ValidationException::withMessages([
-                    "department_map.{$key}" => "Select an existing department or confirm creating a department for \"{$value}\".",
+                    "department_map.{$key}" => 'Select an approved active department, or explicitly authorize creating a new department in this import.',
                 ]);
             }
         }
@@ -778,15 +1163,32 @@ class EmployeeWorkbookImportService
         );
         foreach ($this->positionPairs($import, $officeColumn) as $pair) {
             $key = hash('sha256', $pair['office']."\0".$pair['position']);
-            if (($positions[$key] ?? null) === 'create') {
-                $position = $this->createPositionFromSource($pair['position'], (int) $departments[hash('sha256', $pair['office'])]);
+            $departmentId = filter_var($departments[hash('sha256', $pair['office'])] ?? null, FILTER_VALIDATE_INT);
+            if (! $departmentId) {
+                continue;
+            }
+            $selectedPosition = $positions[$key] ?? null;
+            if ($selectedPosition === null || $selectedPosition === '') {
+                continue;
+            }
+            if ($selectedPosition === 'create') {
+                if ($import->position_reference_count > 0 && ! $this->isPositionInReference($import, $pair['position'])) {
+                    throw ValidationException::withMessages([
+                        "position_map.{$key}" => "The title \"{$pair['position']}\" is not listed on the workbook's official Positions worksheet.",
+                    ]);
+                }
+                $position = $this->createPositionFromSource(
+                    $pair['position'],
+                    $departmentId,
+                    $mapping['new_positions'][$key] ?? [],
+                    $key
+                );
                 $positions[$key] = $position->id;
 
                 continue;
             }
             $positionId = filter_var($positions[$key] ?? null, FILTER_VALIDATE_INT);
             $position = $positionId ? Position::query()->where('is_active', true)->find($positionId) : null;
-            $departmentId = (int) $departments[hash('sha256', $pair['office'])];
             if (! $position || ($position->department_id && (int) $position->department_id !== $departmentId)) {
                 throw ValidationException::withMessages([
                     "position_map.{$key}" => "Select an existing position or confirm creating \"{$pair['position']}\" in its mapped department.",
@@ -802,14 +1204,20 @@ class EmployeeWorkbookImportService
             'employment_status' => $employmentStatus,
             'date_source_column' => null,
             'date_target' => 'source_only',
-            'department_map' => array_intersect_key($departments, array_fill_keys(
-                $this->officeValues($import, $officeColumn)->map(fn (string $value) => hash('sha256', $value))->all(),
-                true
-            )),
-            'position_map' => array_intersect_key($positions, array_fill_keys(
-                $this->positionPairs($import, $officeColumn)->map(fn (array $pair) => hash('sha256', $pair['office']."\0".$pair['position']))->all(),
-                true
-            )),
+            'department_map' => array_filter(
+                array_intersect_key($departments, array_fill_keys(
+                    $this->officeValues($import, $officeColumn)->map(fn (string $value) => hash('sha256', $value))->all(),
+                    true
+                )),
+                fn ($departmentId) => filter_var($departmentId, FILTER_VALIDATE_INT) !== false
+            ),
+            'position_map' => array_filter(
+                array_intersect_key($positions, array_fill_keys(
+                    $this->positionPairs($import, $officeColumn)->map(fn (array $pair) => hash('sha256', $pair['office']."\0".$pair['position']))->all(),
+                    true
+                )),
+                fn ($positionId) => filter_var($positionId, FILTER_VALIDATE_INT) !== false
+            ),
         ];
 
         DB::transaction(function () use ($import, $approvedMapping, $userId) {
@@ -837,7 +1245,10 @@ class EmployeeWorkbookImportService
     {
         $officeColumn = (int) $mapping['office_source_column'];
         foreach ($this->officeValues($import, $officeColumn) as $office) {
-            $departmentId = (int) $mapping['department_map'][hash('sha256', $office)];
+            $departmentId = filter_var($mapping['department_map'][hash('sha256', $office)] ?? null, FILTER_VALIDATE_INT);
+            if (! $departmentId) {
+                continue;
+            }
             $department = Department::query()->lockForUpdate()->findOrFail($departmentId);
             $normalized = $this->normalizeMatchValue($office);
             if ($normalized === $this->normalizeMatchValue($department->name)
@@ -853,12 +1264,12 @@ class EmployeeWorkbookImportService
                 : null;
             $conflict = ($configuredDepartment && (int) $configuredDepartment->id !== (int) $department->id)
                 || Department::query()->where('id', '!=', $department->id)->get()->contains(
-                fn (Department $candidate) => $this->normalizeMatchValue($candidate->name) === $normalized
-                    || $this->normalizeMatchValue($candidate->code ?? '') === $normalized
-                    || collect($candidate->aliases ?? [])->contains(
-                        fn (string $alias) => $this->normalizeMatchValue($alias) === $normalized
-                    )
-            );
+                    fn (Department $candidate) => $this->normalizeMatchValue($candidate->name) === $normalized
+                        || $this->normalizeMatchValue($candidate->code ?? '') === $normalized
+                        || collect($candidate->aliases ?? [])->contains(
+                            fn (string $alias) => $this->normalizeMatchValue($alias) === $normalized
+                        )
+                );
             if ($conflict) {
                 throw ValidationException::withMessages([
                     'department_map' => "The office value \"{$office}\" conflicts with another department name or approved alias.",
@@ -874,13 +1285,20 @@ class EmployeeWorkbookImportService
 
         foreach ($this->positionPairs($import, $officeColumn) as $pair) {
             $key = hash('sha256', $pair['office']."\0".$pair['position']);
-            $position = Position::query()->lockForUpdate()->findOrFail((int) $mapping['position_map'][$key]);
+            $positionId = filter_var($mapping['position_map'][$key] ?? null, FILTER_VALIDATE_INT);
+            if (! $positionId) {
+                continue;
+            }
+            $position = Position::query()->lockForUpdate()->findOrFail($positionId);
             $normalized = $this->normalizeMatchValue($pair['position']);
             if ($normalized === $this->normalizeMatchValue($position->title)) {
                 continue;
             }
 
-            $departmentId = (int) $mapping['department_map'][hash('sha256', $pair['office'])];
+            $departmentId = filter_var($mapping['department_map'][hash('sha256', $pair['office'])] ?? null, FILTER_VALIDATE_INT);
+            if (! $departmentId) {
+                continue;
+            }
             $conflict = Position::query()
                 ->where('id', '!=', $position->id)
                 ->where(function ($query) use ($departmentId, $position) {
@@ -952,6 +1370,15 @@ class EmployeeWorkbookImportService
     {
         $lockedImport = EmployeeImport::query()->lockForUpdate()->findOrFail($import->id);
         $mapping = $lockedImport->field_mappings;
+        $plantillaItemOwners = ($mapping['source_format'] ?? null) === 'plantilla'
+            ? EmployeeServiceProfile::query()
+                ->whereNotNull('plantilla_item_no')
+                ->lockForUpdate()
+                ->get(['employee_id', 'plantilla_item_no'])
+                ->groupBy(fn (EmployeeServiceProfile $profile) => $this->normalizeMatchValue((string) $profile->plantilla_item_no))
+                ->map(fn (Collection $profiles) => $profiles->pluck('employee_id')->all())
+                ->all()
+            : [];
         foreach ($lockedImport->rows()->whereIn('status', ['ready', 'ready_to_update', 'pending_review'])->orderBy('source_row')->lockForUpdate()->get() as $row) {
             $prepared = $this->prepareEmployeeData($row, $mapping);
             if ($prepared['issues']) {
@@ -975,6 +1402,17 @@ class EmployeeWorkbookImportService
                 $row->update([
                     'status' => 'duplicate',
                     'issues' => ['This employee number belongs to a protected Admin account. The employee and account were not changed.'],
+                ]);
+
+                continue;
+            }
+            $itemNumber = trim((string) ($prepared['profile']['plantilla_item_no'] ?? ''));
+            $itemNumberKey = $this->normalizeMatchValue($itemNumber);
+            $itemOwners = $itemNumberKey !== '' ? ($plantillaItemOwners[$itemNumberKey] ?? []) : [];
+            if ($itemOwners && ! in_array($employee?->id, $itemOwners, true)) {
+                $row->update([
+                    'status' => 'needs_review',
+                    'issues' => ['This plantilla item number is already assigned to another employee. Review the current assignment before importing.'],
                 ]);
 
                 continue;
@@ -1021,7 +1459,13 @@ class EmployeeWorkbookImportService
             if (! $user) {
                 $user = User::create([
                     'name' => $employee->full_name,
-                    'username' => $this->usernameGenerator->generate($employee->full_name, $employee->employee_no),
+                    'username' => $this->usernameGenerator->generateForNameParts(
+                        $employee->first_name,
+                        $employee->middle_name,
+                        $employee->last_name,
+                        $employee->suffix,
+                        $employee->employee_no
+                    ),
                     'email' => $prepared['employee']['email'],
                     'password' => Str::random(64),
                     'must_change_password' => true,
@@ -1056,6 +1500,12 @@ class EmployeeWorkbookImportService
                 );
             } else {
                 EmployeeServiceProfile::create($prepared['profile']);
+            }
+            if ($itemNumberKey !== '') {
+                $plantillaItemOwners[$itemNumberKey] = array_values(array_unique([
+                    ...$itemOwners,
+                    $employee->id,
+                ]));
             }
 
             foreach ($prepared['history'] as $history) {
@@ -1415,7 +1865,7 @@ class EmployeeWorkbookImportService
             $issues[] = 'Nature of appointment is missing or exceeds the supported length.';
         }
         $department = $departmentId ? Department::find($departmentId) : null;
-        $role = $linkedUser?->role ?? $this->classifyRole($positionValue, $department, (int) $positionId);
+        $role = $linkedUser?->role ?? 'employee';
         if ($role === 'office_head' && $department?->head_user_id
             && (int) $department->head_user_id !== (int) ($linkedUser?->id ?? 0)) {
             $issues[] = 'This department already has an assigned Office Head; confirm the correct assignment before importing another.';
@@ -1643,27 +2093,6 @@ class EmployeeWorkbookImportService
         };
     }
 
-    private function classifyRole(string $positionTitle, ?Department $department, ?int $positionId = null): string
-    {
-        $officeHeadDesignations = collect(config('hris.employee_import.office_head_designations', []))
-            ->map(fn (string $designation) => $this->normalizeMatchValue($designation));
-        $normalizedTitle = $this->normalizeMatchValue($positionTitle);
-        $approvedPosition = $positionId
-            ? Position::query()->whereKey($positionId)
-                ->where('is_office_head_designation', true)
-                ->where(function ($query) use ($department) {
-                    $query->whereNull('department_id');
-                    if ($department) {
-                        $query->orWhere('department_id', $department->id);
-                    }
-                })->exists()
-            : false;
-        $verifiedDesignation = $approvedPosition
-            || $officeHeadDesignations->contains($normalizedTitle);
-
-        return $verifiedDesignation && $department ? 'office_head' : 'employee';
-    }
-
     private function generateInternalEmployeeNumber(): string
     {
         do {
@@ -1689,54 +2118,178 @@ class EmployeeWorkbookImportService
         return mb_strtoupper(preg_replace('/[^[:alnum:]]+/u', '', trim($value)));
     }
 
-    private function createDepartmentFromOffice(string $office): Department
+    private function createDepartmentFromSource(string $sourceOffice, array $newDepartment): Department
     {
-        $name = mb_substr(trim($office), 0, 150);
-        $normalized = $this->normalizeMatchValue($name);
-        $matches = Department::query()->get()->filter(fn (Department $department) => $this->normalizeMatchValue($department->name) === $normalized
-            || $this->normalizeMatchValue($department->code ?? '') === $normalized
-            || collect($department->aliases ?? [])->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalized));
-        if ($matches->count() > 1) {
-            throw ValidationException::withMessages(['department_map' => "The office value \"{$office}\" matches multiple departments. Choose the correct existing department."]);
+        $name = trim((string) ($newDepartment['name'] ?? ''));
+        $code = trim((string) ($newDepartment['code'] ?? ''));
+        $key = hash('sha256', $sourceOffice);
+
+        if ($name === '' || mb_strlen($name) > 150) {
+            throw ValidationException::withMessages([
+                "new_departments.{$key}.name" => 'Enter a department name of no more than 150 characters.',
+            ]);
         }
-        if ($existing = $matches->first()) {
-            if (! $existing->is_active) {
-                throw ValidationException::withMessages(['department_map' => "The existing department \"{$name}\" is inactive. Activate it or choose another department."]);
+        if (empty($newDepartment['authorize']) || ! in_array((string) $newDepartment['authorize'], ['1', 'true', 'on'], true)) {
+            throw ValidationException::withMessages([
+                "new_departments.{$key}.authorize" => 'Explicit authorization is required to add a department beyond the approved list.',
+            ]);
+        }
+        if (mb_strlen($code) > 20) {
+            throw ValidationException::withMessages([
+                "new_departments.{$key}.code" => 'The department code cannot exceed 20 characters.',
+            ]);
+        }
+
+        $normalizedSource = $this->normalizeMatchValue($sourceOffice);
+        $normalizedName = $this->normalizeMatchValue($name);
+        $normalizedCode = $this->normalizeMatchValue($code);
+        if ($normalizedName === '') {
+            throw ValidationException::withMessages([
+                "new_departments.{$key}.name" => 'Enter a valid department name.',
+            ]);
+        }
+
+        $allDepartments = Department::query()->lockForUpdate()->get();
+        $sourceMatches = $allDepartments->filter(fn (Department $department) => (
+            $this->normalizeMatchValue($department->name) === $normalizedSource
+            || $this->normalizeMatchValue($department->code ?? '') === $normalizedSource
+            || collect($department->aliases ?? [])->contains(
+                fn (string $alias) => $this->normalizeMatchValue($alias) === $normalizedSource
+            )
+        ));
+        if ($sourceMatches->count() > 1) {
+            throw ValidationException::withMessages([
+                "department_map.{$key}" => 'The source office already matches multiple departments. Choose the correct existing department instead.',
+            ]);
+        }
+
+        $sameName = $allDepartments->filter(fn (Department $department) => (
+            $this->normalizeMatchValue($department->name) === $normalizedName
+            || $this->normalizeMatchValue($department->code ?? '') === $normalizedName
+        ));
+        if ($sourceMatches->isNotEmpty()) {
+            $department = $sourceMatches->first();
+        } elseif ($sameName->count() === 1) {
+            $department = $sameName->first();
+        } elseif ($sameName->count() > 1) {
+            throw ValidationException::withMessages([
+                "new_departments.{$key}.name" => 'This name matches multiple existing departments. Select an existing department instead.',
+            ]);
+        } else {
+            $department = null;
+        }
+
+        if (! $department && $allDepartments->contains(
+            fn (Department $candidate) => collect($candidate->aliases ?? [])
+                ->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalizedName)
+        )) {
+            throw ValidationException::withMessages([
+                "new_departments.{$key}.name" => 'This name is already an approved alias for an existing department. Select that department instead.',
+            ]);
+        }
+
+        if ($department && ! $department->is_active) {
+            throw ValidationException::withMessages([
+                "department_map.{$key}" => 'The matching department is inactive. Reactivate it or select another department.',
+            ]);
+        }
+
+        if ($normalizedCode !== '') {
+            $codeOwner = $allDepartments->first(fn (Department $candidate) => (
+                $this->normalizeMatchValue($candidate->code ?? '') === $normalizedCode
+            ));
+            if ($codeOwner && (! $department || $codeOwner->id !== $department->id)) {
+                throw ValidationException::withMessages([
+                    "new_departments.{$key}.code" => 'This department code is already assigned to another department.',
+                ]);
             }
-
-            return $existing;
+            if (! $codeOwner && $allDepartments->contains(fn (Department $candidate) => (
+                (! $department || (int) $candidate->id !== (int) $department->id)
+                && (
+                    $this->normalizeMatchValue($candidate->name) === $normalizedCode
+                    || collect($candidate->aliases ?? [])
+                        ->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalizedCode)
+                )
+            ))) {
+                throw ValidationException::withMessages([
+                    "new_departments.{$key}.code" => 'This department code conflicts with another department name or approved alias.',
+                ]);
+            }
         }
 
-        $code = mb_strlen($office) <= 20 ? mb_strtoupper(trim($office)) : null;
-        if ($code && Department::query()->whereRaw('LOWER(code) = ?', [mb_strtolower($code)])->exists()) {
-            $code = null;
+        if (! $department) {
+            $department = Department::create([
+                'name' => $name,
+                'code' => $code !== '' ? $code : null,
+                'aliases' => [$sourceOffice],
+                'is_active' => true,
+            ]);
+        } else {
+            $aliases = $department->aliases ?? [];
+            if (! collect($aliases)->contains(
+                fn (string $alias) => $this->normalizeMatchValue($alias) === $normalizedSource
+            ) && $this->normalizeMatchValue($department->name) !== $normalizedSource
+                && $this->normalizeMatchValue($department->code ?? '') !== $normalizedSource) {
+                $aliases[] = $sourceOffice;
+                $department->update(['aliases' => array_values($aliases)]);
+            }
         }
 
-        return Department::create(['name' => $name, 'code' => $code, 'is_active' => true]);
+        return $department;
     }
 
-    private function createPositionFromSource(string $title, int $departmentId): Position
-    {
-        $normalized = $this->normalizeMatchValue($title);
-        $matches = Position::query()->where('department_id', $departmentId)->get()
-            ->filter(fn (Position $position) => $this->normalizeMatchValue($position->title) === $normalized
-                || collect($position->aliases ?? [])->contains(fn (string $alias) => $this->normalizeMatchValue($alias) === $normalized));
+    private function createPositionFromSource(
+        string $sourceTitle,
+        int $departmentId,
+        array $newPosition,
+        string $key
+    ): Position {
+        $title = trim((string) ($newPosition['title'] ?? $sourceTitle));
+        $salaryGrade = trim((string) ($newPosition['salary_grade'] ?? ''));
+        if ($title === '' || mb_strlen($title) > 150) {
+            throw ValidationException::withMessages([
+                "new_positions.{$key}.title" => 'Enter a position title of no more than 150 characters.',
+            ]);
+        }
+        if (mb_strlen($salaryGrade) > 10) {
+            throw ValidationException::withMessages([
+                "new_positions.{$key}.salary_grade" => 'The salary grade cannot exceed 10 characters.',
+            ]);
+        }
+
+        Department::query()->lockForUpdate()->findOrFail($departmentId);
+        $normalizedSource = $this->normalizeMatchValue($sourceTitle);
+        $normalizedTitle = $this->normalizeMatchValue($title);
+        $matches = Position::query()->where(function ($query) use ($departmentId) {
+            $query->where('department_id', $departmentId)->orWhereNull('department_id');
+        })->get()
+            ->filter(fn (Position $position) => (
+                $this->normalizeMatchValue($position->title) === $normalizedSource
+                || $this->normalizeMatchValue($position->title) === $normalizedTitle
+                || collect($position->aliases ?? [])->contains(
+                    fn (string $alias) => in_array($this->normalizeMatchValue($alias), [$normalizedSource, $normalizedTitle], true)
+                )
+            ));
         if ($matches->count() > 1) {
-            throw ValidationException::withMessages(['position_map' => "The source title \"{$title}\" matches multiple positions. Choose the correct existing position."]);
+            throw ValidationException::withMessages(['position_map' => "The source title \"{$sourceTitle}\" matches multiple positions. Choose the correct existing position."]);
         }
         if ($existing = $matches->first()) {
             if (! $existing->is_active) {
-                throw ValidationException::withMessages(['position_map' => "The existing position \"{$title}\" is inactive. Activate it or choose another position."]);
+                throw ValidationException::withMessages(['position_map' => "The existing position \"{$sourceTitle}\" is inactive. Activate it or choose another position."]);
             }
 
             return $existing;
         }
 
-        if (mb_strlen(trim($title)) > 150) {
-            throw ValidationException::withMessages(['position_map' => 'The source position title is too long to create. Correct it or map it to an existing position.']);
-        }
+        $aliases = $normalizedSource !== $normalizedTitle ? [$sourceTitle] : [];
 
-        return Position::create(['title' => trim($title), 'department_id' => $departmentId, 'is_active' => true]);
+        return Position::create([
+            'title' => $title,
+            'department_id' => $departmentId,
+            'salary_grade' => $salaryGrade !== '' ? $salaryGrade : null,
+            'aliases' => $aliases,
+            'is_active' => true,
+        ]);
     }
 
     private function dateValue(?array $cell): ?string

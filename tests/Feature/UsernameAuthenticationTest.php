@@ -196,14 +196,94 @@ class UsernameAuthenticationTest extends TestCase
         Notification::assertSentTo($user, ResetPassword::class);
     }
 
+    public function test_hr_can_reveal_a_one_time_temporary_password_without_persisting_plaintext(): void
+    {
+        $admin = $this->createUser('hr@example.test', 'hr.admin', 'admin');
+        $user = $this->createUser(null, 'employee.no.email', 'employee', [
+            'must_change_password' => true,
+            'account_setup_completed' => false,
+        ]);
+        $department = Department::create(['name' => 'Temporary Credential Office']);
+        Employee::create([
+            'user_id' => $user->id,
+            'department_id' => $department->id,
+            'employee_no' => 'EMP-TEMP-1',
+            'first_name' => 'Temporary',
+            'last_name' => 'Employee',
+        ]);
+
+        $response = $this->actingAs($admin)
+            ->post(route('users.temporary-credential', $user));
+
+        $response->assertOk()
+            ->assertHeader('Cache-Control', 'max-age=0, no-store, private')
+            ->assertViewHas('temporaryPassword', function (string $temporaryPassword) use ($user): bool {
+                $this->assertGreaterThanOrEqual(32, strlen($temporaryPassword));
+                $this->assertTrue(Hash::check($temporaryPassword, $user->fresh()->password));
+
+                return true;
+            });
+
+        $user->refresh();
+        $this->assertTrue($user->must_change_password);
+        $this->assertFalse($user->account_setup_completed);
+        $this->assertSame('employee', $user->role);
+    }
+
+    public function test_temporary_credentials_cannot_be_generated_for_non_employee_accounts(): void
+    {
+        $admin = $this->createUser('hr@example.test', 'hr.admin', 'admin');
+        $otherAdmin = $this->createUser('another-admin@example.test', 'another.admin', 'admin');
+        $originalPassword = $otherAdmin->password;
+
+        $this->actingAs($admin)
+            ->post(route('users.temporary-credential', $otherAdmin))
+            ->assertForbidden();
+
+        $this->assertSame($originalPassword, $otherAdmin->fresh()->password);
+    }
+
     public function test_username_generation_appends_employee_number_for_duplicate_names(): void
     {
-        $this->createUser(null, 'juan.dela.cruz', 'employee');
+        $this->createUser(null, 'juan.delacruz', 'employee');
 
         $username = app(EmployeeUsernameGenerator::class)
             ->generate('Juan Dela Cruz', 'EMP-001');
 
-        $this->assertSame('juan.dela.cruz.emp.001', $username);
+        $this->assertSame('juan.delacruz2', $username);
+    }
+
+    public function test_username_generation_preserves_middle_names_and_suffixes(): void
+    {
+        $username = app(EmployeeUsernameGenerator::class)->generateForNameParts(
+            'Juan',
+            'M.',
+            'Dela Cruz',
+            'Jr.',
+            'EMP-002'
+        );
+
+        $this->assertSame('juan.m.delacruz.jr', $username);
+    }
+
+    public function test_administrator_cannot_create_a_second_system_administrator(): void
+    {
+        $admin = $this->createUser('hr-admin@example.test', 'hr.admin', 'admin');
+
+        $this->actingAs($admin)->post(route('users.store'), [
+            'name' => 'Second Administrator',
+            'first_name' => 'Second',
+            'last_name' => 'Administrator',
+            'email' => 'second.admin@example.test',
+            'username' => 'second.admin',
+            'role' => 'admin',
+            'password' => 'SecurePassword123!',
+            'password_confirmation' => 'SecurePassword123!',
+            'is_active' => 1,
+        ])->assertSessionHasErrors('role');
+
+        $this->assertDatabaseCount('users', 1);
+        $this->assertSame(1, User::query()->where('role', 'admin')->count());
     }
 
     public function test_duplicate_usernames_and_emails_are_rejected_after_normalization(): void

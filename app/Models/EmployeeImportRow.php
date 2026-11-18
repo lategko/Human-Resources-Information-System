@@ -22,7 +22,7 @@ class EmployeeImportRow extends Model
     protected function casts(): array
     {
         return [
-            'source_data' => 'array',
+            'source_data' => 'encrypted:array',
             'review_data' => 'array',
             'issues' => 'array',
             'reviewed_at' => 'datetime',

@@ -195,7 +195,7 @@ class AccountAccessTest extends TestCase
         $this->assertFalse($admin->canFinalApprove());
     }
 
-    public function test_admin_role_changes_preserve_employee_links_and_can_assign_employee_role(): void
+    public function test_admin_role_changes_prevent_a_second_administrator_and_preserve_employee_links(): void
     {
         $department = Department::create(['name' => 'Human Resources']);
         $adminActor = User::factory()->create(['role' => 'admin', 'is_active' => true]);
@@ -220,8 +220,8 @@ class AccountAccessTest extends TestCase
             'email' => $employeeUser->email,
             'role' => 'admin',
             'is_active' => 1,
-        ])->assertRedirect();
-        $this->assertSame('admin', $employeeUser->fresh()->role);
+        ])->assertSessionHasErrors('role');
+        $this->assertSame('employee', $employeeUser->fresh()->role);
         $this->assertSame($employee->id, $employeeUser->fresh()->employee->id);
 
         $this->put(route('users.update', $admin), [
@@ -290,16 +290,17 @@ class AccountAccessTest extends TestCase
         ]);
 
         $this->actingAs($admin)->put(route('users.update', $account), [
-            'name' => 'Updated Admin',
+            'name' => $account->name,
             'email' => 'updated-admin@example.test',
-            'role' => 'admin',
+            'role' => 'employee',
+            'employee_id' => $employee->id,
             'is_active' => 1,
         ])->assertRedirect(route('users.index'));
 
         $this->assertDatabaseHas('users', [
             'id' => $account->id,
             'email' => 'updated-admin@example.test',
-            'role' => 'admin',
+            'role' => 'employee',
         ]);
         $this->assertSame($account->id, $employee->fresh()->user_id);
         $this->assertSame(1, User::where('email', 'updated-admin@example.test')->count());

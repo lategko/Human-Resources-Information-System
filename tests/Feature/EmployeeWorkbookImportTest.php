@@ -9,17 +9,21 @@ use App\Models\EmployeeImport;
 use App\Models\EmployeeServiceProfile;
 use App\Models\Position;
 use App\Models\User;
-use App\Services\EmployeeWorkbookImportService;
 use App\Services\EmployeeUsernameGenerator;
+use App\Services\EmployeeWorkbookImportService;
 use Illuminate\Auth\Notifications\ResetPassword;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Storage;
+use PhpOffice\PhpSpreadsheet\Cell\DataValidation;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xls;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use Tests\TestCase;
@@ -53,7 +57,9 @@ class EmployeeWorkbookImportTest extends TestCase
 
         $import = EmployeeImport::firstOrFail();
         $row = $import->rows()->firstOrFail();
+        $storedSourceData = DB::table('employee_import_rows')->where('id', $row->id)->value('source_data');
         $this->assertSame('mapping_required', $import->status);
+        $this->assertStringNotContainsString('Test', $storedSourceData);
         $this->assertCount(28, $import->source_headers);
         $this->assertSame('OFFICE', $import->source_headers[7]['label']);
         $this->assertSame('OFFICE', $import->source_headers[18]['label']);
@@ -66,7 +72,7 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->actingAs($hrmo)->get(route('employee-imports.index'))
             ->assertOk()
             ->assertSee('Mapping Required')
-            ->assertSee('1 total')
+            ->assertSee('1 plantilla item(s)')
             ->assertSee('0 duplicates skipped');
         $this->actingAs($hrmo)->get(route('employee-imports.show', $import))
             ->assertOk()
@@ -75,7 +81,7 @@ class EmployeeWorkbookImportTest extends TestCase
             ->assertSee('Column H — OFFICE')
             ->assertSee('Column S — OFFICE')
             ->assertSee('Office H source')
-            ->assertSee('Needs department assignment');
+            ->assertSee('Unmatched');
         $this->actingAs($hrmo)->get(route('employee-imports.show', [$import, 'office_column' => 8]))
             ->assertOk()
             ->assertSee('name="office_source_column" value="8"', false)
@@ -92,7 +98,7 @@ class EmployeeWorkbookImportTest extends TestCase
 
     public function test_admin_approves_mappings_and_imports_valid_names_without_individual_review(): void
     {
-        $department = Department::create(['name' => 'Import Test Office', 'code' => 'IMP']);
+        $department = $this->officialDepartment();
         $position = Position::create([
             'department_id' => $department->id,
             'title' => 'Import Test Position',
@@ -165,33 +171,111 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertDatabaseCount('employees', 1);
     }
 
-    public function test_exact_department_position_and_hr_confirmed_office_head_designation_are_matched_automatically(): void
+    public function test_admin_can_create_department_and_position_from_mapping_and_reuse_them_later(): void
     {
-        $department = Department::create(['name' => 'Office H source', 'code' => 'OHS']);
+        $admin = User::where('role', 'admin')->firstOrFail();
+        $import = $this->stage($this->workbookUpload());
+        $officeKey = hash('sha256', 'Office H source');
+        $positionKey = hash('sha256', "Office H source\0Import Test Position");
+
+        $this->actingAs($admin)->get(route('employee-imports.show', $import))
+            ->assertOk()
+            ->assertSee('+ Create New Department')
+            ->assertSee('Create position');
+
+        $this->putMapping($import, [
+            'office_source_column' => 8,
+            'department_map' => [$officeKey => 'create'],
+            'new_departments' => [$officeKey => [
+                'name' => 'Import Test Office',
+                'code' => 'IMPOFF',
+                'authorize' => '1',
+            ]],
+            'position_map' => [$positionKey => 'create'],
+            'new_positions' => [$positionKey => [
+                'title' => 'Import Test Position',
+                'salary_grade' => '12',
+            ]],
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $department = Department::where('name', 'Import Test Office')->firstOrFail();
+        $position = Position::where('department_id', $department->id)
+            ->where('title', 'Import Test Position')
+            ->firstOrFail();
+        $this->assertSame('12', $position->salary_grade);
+        $this->assertContains('Office H source', $department->aliases);
+        $this->assertTrue(app(EmployeeWorkbookImportService::class)->officialDepartments()->contains('id', $department->id));
+        $this->assertSame($department->id, $import->fresh()->field_mappings['department_map'][$officeKey]);
+        $this->assertSame($position->id, $import->fresh()->field_mappings['position_map'][$positionKey]);
+        $this->assertDatabaseCount('employees', 0);
+        $this->assertDatabaseCount('employee_service_profiles', 0);
+
+        $reimport = $this->stage($this->workbookUpload());
+        $summary = app(EmployeeWorkbookImportService::class)->mappingSummary($reimport, 8);
+        $this->assertSame($department->id, $summary['department_map'][$officeKey]);
+        $this->assertSame($position->id, $summary['position_map'][$positionKey]);
+
+        $this->actingAs($admin)->get(route('employee-imports.show', $reimport))
+            ->assertOk()
+            ->assertSee('Import Test Office')
+            ->assertSee('Import Test Position');
+    }
+
+    public function test_new_department_requires_explicit_approval_and_does_not_create_on_failure(): void
+    {
+        $import = $this->stage($this->workbookUpload());
+        $officeKey = hash('sha256', 'Office H source');
+
+        $this->putMapping($import, [
+            'office_source_column' => 8,
+            'department_map' => [$officeKey => 'create'],
+            'new_departments' => [$officeKey => [
+                'name' => 'Unapproved Office',
+                'code' => 'NOAUTH',
+            ]],
+        ])->assertSessionHasErrors("new_departments.{$officeKey}.authorize");
+
+        $this->assertDatabaseMissing('departments', ['name' => 'Unapproved Office']);
+        $this->assertSame('mapping_required', $import->fresh()->status);
+    }
+
+    public function test_duplicate_plantilla_item_number_is_skipped_during_staging(): void
+    {
+        $import = $this->stage($this->plantillaWorkbookUpload(duplicateItemNumber: true));
+
+        $rows = $import->rows()->orderBy('source_row')->get();
+        $this->assertSame('duplicate', $rows[1]->status);
+        $this->assertContains('Duplicate plantilla item number within this workbook.', $rows[1]->issues);
+        $this->assertSame(1, $import->skipped_count);
+    }
+
+    public function test_office_head_designations_never_elevate_an_imported_employee_role(): void
+    {
+        $department = $this->officialDepartment();
         Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
         config(['hris.employee_import.office_head_designations' => ['Import Test Position']]);
-        $import = $this->stage($this->workbookUpload());
+        $import = $this->stage($this->workbookUpload(overrides: [7 => 'HRMO/PESO']));
         Notification::fake();
 
         $this->putMapping($import, ['office_source_column' => 8])->assertRedirect();
         $import->refresh();
         $row = $import->rows()->firstOrFail();
         $this->assertSame('ready', $row->status);
-        $this->assertSame('office_head', $row->review_data['classification']['role']);
+        $this->assertSame('employee', $row->review_data['classification']['role']);
 
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
             ->assertRedirect();
 
         $employee = Employee::where('employee_no', 'IMP-0001')->firstOrFail();
-        $this->assertSame('office_head', $employee->user->role);
-        $this->assertSame($employee->user_id, $department->fresh()->head_user_id);
+        $this->assertSame('employee', $employee->user->role);
+        $this->assertNull($department->fresh()->head_user_id);
         Notification::assertSentTo($employee->user, ResetPassword::class);
     }
 
     public function test_hr_approved_department_and_position_aliases_are_reused_for_later_batches(): void
     {
-        $department = Department::create(['name' => 'Human Resources Office', 'code' => 'HRO']);
+        $department = $this->officialDepartment();
         $position = Position::create(['department_id' => $department->id, 'title' => 'Personnel Officer']);
         $office = 'Office H source';
         $sourcePosition = 'Import Test Position';
@@ -202,7 +286,7 @@ class EmployeeWorkbookImportTest extends TestCase
             'position_map' => [hash('sha256', $office."\0".$sourcePosition) => $position->id],
         ])->assertRedirect();
 
-        $this->assertSame([$office], $department->fresh()->aliases);
+        $this->assertContains($office, $department->fresh()->aliases);
         $this->assertSame([$sourcePosition], $position->fresh()->aliases);
 
         $nextImport = $this->stage($this->workbookUpload());
@@ -214,53 +298,251 @@ class EmployeeWorkbookImportTest extends TestCase
         $summary = $importer->mappingSummary($nextImport, 8);
         $this->assertCount(0, $summary['departments']);
         $this->assertCount(0, $summary['positions']);
+        $this->assertSame('Matched by Approved Alias', $summary['department_matches'][hash('sha256', $office)]['status']);
+        $this->assertSame('Matched by Approved Alias', $summary['position_matches'][hash('sha256', $office."\0".$sourcePosition)]['status']);
     }
 
     public function test_mapping_screen_suggests_close_existing_department_and_position_matches(): void
     {
-        Department::create(['name' => 'Office H source', 'code' => 'OHS']);
+        $this->officialDepartment();
         Position::create(['title' => 'Import Test Position']);
         $import = $this->stage($this->workbookUpload(overrides: [
-            7 => 'Office H sorce',
+            7 => 'HRMO/PES0',
             8 => 'Import Test Positon',
         ]));
         $summary = app(EmployeeWorkbookImportService::class)->mappingSummary($import, 8);
-        $this->assertNotEmpty($summary['department_suggestions'][hash('sha256', 'Office H sorce')]);
-        $this->assertNotEmpty($summary['position_suggestions'][hash('sha256', "Office H sorce\0Import Test Positon")]);
+        $this->assertNotEmpty($summary['department_suggestions'][hash('sha256', 'HRMO/PES0')]);
+        $this->assertNotEmpty($summary['position_suggestions'][hash('sha256', "HRMO/PES0\0Import Test Positon")]);
 
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->get(route('employee-imports.show', [$import, 'office_column' => 8]))
             ->assertOk()
-            ->assertSee('Suggested matches')
-            ->assertSee('Office H source')
+            ->assertSee('Possible matches — HR confirmation required')
+            ->assertSee('HRMO/PESO')
             ->assertSee('Import Test Position');
+    }
+
+    public function test_normalized_department_names_and_configured_aliases_auto_match_with_reasons(): void
+    {
+        $department = $this->officialDepartment();
+        $import = $this->stage($this->workbookUpload(overrides: [7 => '  hrmo - peso  ']));
+        $importer = app(EmployeeWorkbookImportService::class);
+        $key = hash('sha256', 'hrmo - peso');
+
+        $this->assertSame($department->id, $importer->suggestedDepartmentMap($import, 8)[$key]);
+        $details = $importer->mappingSummary($import, 8)['department_matches'][$key];
+        $this->assertSame('Automatically Matched', $details['status']);
+        $this->assertSame('HRMO/PESO', $details['department_name']);
+
+        $aliasImport = $this->stage($this->workbookUpload(overrides: [7 => 'Human Resources Management Office']));
+        $aliasKey = hash('sha256', 'Human Resources Management Office');
+        $aliasDetails = $importer->mappingSummary($aliasImport, 8)['department_matches'][$aliasKey];
+
+        $this->assertSame($department->id, $importer->suggestedDepartmentMap($aliasImport, 8)[$aliasKey]);
+        $this->assertSame('Matched by Approved Alias', $aliasDetails['status']);
+    }
+
+    public function test_unapproved_mayor_and_vice_mayor_office_values_are_not_auto_assigned(): void
+    {
+        $this->officialDepartment();
+        $offices = [
+            'MAYOR’S OFFICE (EXECUTIVE)',
+            'MAYOR’S OFFICE (MENRO)',
+            'VICE-MAYOR’S OFFICE',
+        ];
+        $importer = app(EmployeeWorkbookImportService::class);
+
+        foreach ($offices as $office) {
+            $import = $this->stage($this->workbookUpload(overrides: [7 => $office]));
+            $key = hash('sha256', $office);
+            $summary = $importer->mappingSummary($import, 8);
+
+            $this->assertArrayNotHasKey($key, $summary['department_map'], $office);
+            $this->assertContains($summary['department_matches'][$key]['status'], [
+                'Needs HR Confirmation',
+                'Unmatched',
+            ]);
+        }
+    }
+
+    public function test_official_workbook_columns_and_department_values_are_recognized(): void
+    {
+        $path = $this->actualOfficialWorkbookPath();
+        if (! $path) {
+            $this->markTestSkipped('The supplied official workbook is not available in private import storage.');
+        }
+
+        $import = $this->stage(UploadedFile::fake()->createWithContent(
+            'REVISED-TEMPLATE_HRMO-AND-PLANTILLA-with-guide-in-excel(1).xlsx',
+            file_get_contents($path)
+        ));
+        $importer = app(EmployeeWorkbookImportService::class);
+        $departmentMap = $importer->suggestedDepartmentMap($import, 1);
+        $expectedDepartments = [
+            'MAYOR’S OFFICE (PESO)' => 'HRMO/PESO',
+            'MAYOR’S OFFICE (LOCAL DISASTER RISK REDUCTION MANAGEMENT)' => 'MDRRMO',
+            'SANGGUNIANG BAYAN OFFICE' => 'SBO',
+            'SECRETARY TO THE SANGGUNIAN' => 'SBO',
+            "MUNICIPAL PLANNING & DEVELOPMENT COORDINATOR'S OFFICE" => 'MPDO',
+            "MUNICIPAL ASSESSOR'S OFFICE" => 'MASO',
+            "MUNICIPAL CIVIL REGISTRAR'S OFFICE" => 'MCRO',
+            'MUNICIPAL BUDGET OFFICE' => 'MBO',
+            'MUNICIPAL TREASURY OFFICE' => 'MTO',
+            "MUNICIPAL ACCOUNTANT'S OFFICE" => 'OMA',
+            "MUNICIPAL ENGINEER'S OFFICE" => 'MEO',
+            'MUNICIPAL HEALTH OFFICE' => 'MHO',
+            'MUNICIPAL AGRICULTURE OFFICE' => 'MAO',
+            'MUNICIPAL SOCIAL WELFARE AND DEVELOPMENT OFFICE' => 'MSWDO',
+            'GENERAL SERVICES OFFICE' => 'GSO',
+            "MAYOR'S OFFICE (ECONOMIC ENTERPRISE)" => 'EEO',
+        ];
+
+        $this->assertSame('PLANTILLA', $import->worksheet_name);
+        $this->assertSame(2, $import->header_row);
+        $this->assertSame('ORGANIZATIONAL UNIT (1)', $import->source_headers[0]['label']);
+        $this->assertSame('ITEM NUMBER (2)', $import->source_headers[1]['label']);
+        $this->assertSame('POSITION TITLE (3)', $import->source_headers[2]['label']);
+        $this->assertSame(159, $import->plantilla_item_count);
+        $this->assertSame(127, $import->rows()->count());
+        $this->assertSame(32, $import->vacant_count);
+        $this->assertSame(2802, $import->position_reference_count);
+
+        foreach ($expectedDepartments as $office => $code) {
+            $department = Department::where('code', $code)->firstOrFail();
+            $this->assertSame($department->id, $departmentMap[hash('sha256', $office)] ?? null, $office);
+        }
+
+        $summary = $importer->mappingSummary($import, 1);
+        foreach ([
+            'MAYOR’S OFFICE (EXECUTIVE)',
+            'MAYOR’S OFFICE (MENRO)',
+            'VICE-MAYOR’S OFFICE',
+        ] as $unresolvedOffice) {
+            $this->assertArrayNotHasKey(hash('sha256', $unresolvedOffice), $departmentMap, $unresolvedOffice);
+            $this->assertContains($summary['department_matches'][hash('sha256', $unresolvedOffice)]['status'], [
+                'Needs HR Confirmation',
+                'Unmatched',
+            ]);
+        }
+
+        $eeo = Department::where('code', 'EEO')->firstOrFail();
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', [$import, 'office_column' => 1]))
+            ->assertOk()
+            ->assertSee("MAYOR'S OFFICE (ECONOMIC ENTERPRISE)")
+            ->assertSee('Matched by Approved Alias')
+            ->assertSee('value="'.$eeo->id.'" selected', false);
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->put(route('employee-imports.mapping', $import), ['office_source_column' => 1])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+        $this->assertSame(
+            $eeo->id,
+            $import->fresh()->field_mappings['department_map'][hash('sha256', "MAYOR'S OFFICE (ECONOMIC ENTERPRISE)")]
+        );
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', [$import, 'office_column' => 1]))
+            ->assertOk()
+            ->assertSee('value="'.$eeo->id.'" selected', false);
+    }
+
+    public function test_partial_department_mapping_revalidates_only_records_with_valid_assignments(): void
+    {
+        $department = $this->officialDepartment();
+        Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
+        $unmatchedOffice = "MAYOR'S OFFICE (MENRO)";
+        $import = $this->stage($this->workbookUpload(
+            overrides: [7 => 'HRMO / PESO'],
+            extraRows: [[0 => 'IMP-0002', 1 => 'Second, Person', 7 => $unmatchedOffice]]
+        ));
+        $unmatchedKey = hash('sha256', $unmatchedOffice);
+
+        $this->putMapping($import, [
+            'office_source_column' => 8,
+            'department_map' => [$unmatchedKey => ''],
+        ])->assertRedirect();
+
+        $import->refresh();
+        $rows = $import->rows()->orderBy('source_row')->get();
+        $this->assertSame('ready', $rows[0]->status);
+        $this->assertSame('needs_review', $rows[1]->status);
+        $this->assertSame($unmatchedOffice, $rows[1]->source_data[7]['display_value']);
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
+            ->assertRedirect();
+
+        $this->assertDatabaseCount('employees', 1);
+        $this->assertSame('completed_with_errors', $import->fresh()->status);
+        $this->assertSame('needs_review', $rows[1]->fresh()->status);
+    }
+
+    public function test_position_matching_uses_the_confirmed_department_and_normalized_title(): void
+    {
+        $department = $this->officialDepartment();
+        $otherDepartment = Department::create(['name' => 'Other Approved Office']);
+        $expectedPosition = Position::create(['department_id' => $department->id, 'title' => 'HR Officer']);
+        Position::create(['department_id' => $otherDepartment->id, 'title' => 'HR Officer']);
+        Position::create(['title' => 'HR Officer']);
+        $import = $this->stage($this->workbookUpload(overrides: [
+            7 => 'HRMO / PESO',
+            8 => 'hr officer!',
+        ]));
+        $importer = app(EmployeeWorkbookImportService::class);
+        $departmentMap = $importer->suggestedDepartmentMap($import, 8);
+        $positionKey = hash('sha256', "HRMO / PESO\0hr officer!");
+        $summary = $importer->mappingSummary($import, 8);
+
+        $this->assertSame($expectedPosition->id, $importer->suggestedPositionMap($import, 8, $departmentMap)[$positionKey]);
+        $this->assertSame('Automatically Matched', $summary['position_matches'][$positionKey]['status']);
+    }
+
+    public function test_creating_a_position_reuses_an_existing_unassigned_position(): void
+    {
+        $department = $this->officialDepartment();
+        $position = Position::create(['title' => 'Existing Shared Position']);
+        $import = $this->stage($this->workbookUpload(overrides: [
+            7 => 'HRMO/PESO',
+            8 => 'Existing Shared Position',
+        ]));
+        $positionKey = hash('sha256', "HRMO/PESO\0Existing Shared Position");
+
+        $this->putMapping($import, [
+            'office_source_column' => 8,
+            'position_map' => [$positionKey => 'create'],
+        ])->assertRedirect();
+
+        $this->assertSame(1, Position::where('title', 'Existing Shared Position')->count());
+        $this->assertSame($position->id, $import->fresh()->field_mappings['position_map'][$positionKey]);
+        $this->assertSame($department->id, $import->fresh()->field_mappings['department_map'][hash('sha256', 'HRMO/PESO')]);
     }
 
     public function test_position_directory_can_mark_an_hr_approved_office_head_designation(): void
     {
         config(['hris.employee_import.office_head_designations' => []]);
-        $department = Department::create(['name' => 'Office H source', 'code' => 'OHS']);
+        $department = $this->officialDepartment();
         $position = Position::create([
             'department_id' => $department->id,
             'title' => 'Office Director',
             'is_office_head_designation' => true,
         ]);
-        $import = $this->stage($this->workbookUpload(overrides: [8 => $position->title]));
+        $import = $this->stage($this->workbookUpload(overrides: [7 => 'HRMO/PESO', 8 => $position->title]));
         $this->putMapping($import, ['office_source_column' => 8])->assertRedirect();
 
-        $this->assertSame('office_head', $import->rows()->firstOrFail()->review_data['classification']['role']);
+        $this->assertSame('employee', $import->rows()->firstOrFail()->review_data['classification']['role']);
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
             ->assertRedirect();
 
         $employee = Employee::where('employee_no', 'IMP-0001')->firstOrFail();
-        $this->assertSame('office_head', $employee->user->role);
-        $this->assertSame($employee->user_id, $department->fresh()->head_user_id);
+        $this->assertSame('employee', $employee->user->role);
+        $this->assertNull($department->fresh()->head_user_id);
     }
 
     public function test_normalized_name_matches_require_confirmation_before_creating_a_second_employee(): void
     {
-        $department = Department::create(['name' => 'Office H source', 'code' => 'OHS']);
+        $department = $this->officialDepartment();
         Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
         Employee::create([
             'department_id' => $department->id,
@@ -298,7 +580,7 @@ class EmployeeWorkbookImportTest extends TestCase
 
     public function test_failed_account_creation_rolls_back_employee_and_account_inserts(): void
     {
-        $department = Department::create(['name' => 'Office H source', 'code' => 'OHS']);
+        $department = $this->officialDepartment();
         Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
         User::create([
             'name' => 'Existing Username',
@@ -313,7 +595,7 @@ class EmployeeWorkbookImportTest extends TestCase
         $import->refresh();
         $initialUserCount = User::count();
         $usernameGenerator = \Mockery::mock(EmployeeUsernameGenerator::class);
-        $usernameGenerator->shouldReceive('generate')->once()->andReturn('test.person');
+        $usernameGenerator->shouldReceive('generateForNameParts')->once()->andReturn('test.person');
         $this->app->instance(EmployeeUsernameGenerator::class, $usernameGenerator);
 
         try {
@@ -334,7 +616,7 @@ class EmployeeWorkbookImportTest extends TestCase
 
     public function test_plantilla_worksheet_detects_row_two_headers_excludes_vacancies_and_reimports_idempotently(): void
     {
-        $department = Department::create(['name' => 'Human Resources Office', 'code' => 'HRO']);
+        $department = $this->officialDepartment();
         Position::create(['department_id' => $department->id, 'title' => 'HR Officer']);
         $file = $this->plantillaWorkbookUpload();
         $import = $this->stage($file);
@@ -345,7 +627,10 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertCount(35, $import->source_headers);
         $this->assertSame(2, $import->row_count);
         $this->assertSame(4, $import->source_row_count);
-        $this->assertSame(2, $import->excluded_rows_count);
+        $this->assertSame(1, $import->excluded_rows_count);
+        $this->assertSame(3, $import->plantilla_item_count);
+        $this->assertSame(1, $import->vacant_count);
+        $this->assertSame(2, $import->position_reference_count);
         $this->assertSame([4, 6], $import->rows()->orderBy('source_row')->pluck('source_row')->all());
         $this->assertSame(['JUAN', 'M.', 'DELA CRUZ', null], array_values($this->app
             ->make(EmployeeWorkbookImportService::class)
@@ -399,9 +684,36 @@ class EmployeeWorkbookImportTest extends TestCase
         }
     }
 
+    public function test_official_department_structure_has_exactly_sixteen_offices_and_excludes_pnp_and_bfp(): void
+    {
+        $officialNames = collect(config('hris.employee_import.official_departments'))
+            ->pluck('name')
+            ->all();
+
+        $this->assertCount(16, $officialNames);
+        $this->assertSame(16, Department::query()->whereIn('name', $officialNames)->count());
+        $this->assertFalse(Department::query()->whereIn('code', ['PNP', 'BFP'])->exists());
+    }
+
+    public function test_plantilla_records_for_pnp_and_bfp_are_excluded_from_employee_imports(): void
+    {
+        foreach (['PNP', 'PHILIPPINE NATIONAL POLICE', 'BFP', 'BUREAU OF FIRE PROTECTION'] as $office) {
+            $import = $this->stage($this->plantillaWorkbookUpload($office));
+
+            $this->assertSame(3, $import->plantilla_item_count);
+            $this->assertSame(1, $import->vacant_count);
+            $this->assertSame(2, $import->excluded_office_count);
+            $this->assertSame(3, $import->excluded_rows_count);
+            $this->assertSame(0, $import->rows()->count());
+            $this->assertDatabaseCount('employees', 0);
+            $this->assertDatabaseMissing('departments', ['code' => 'PNP']);
+            $this->assertDatabaseMissing('departments', ['code' => 'BFP']);
+        }
+    }
+
     public function test_missing_source_email_does_not_block_employee_or_account_creation(): void
     {
-        $department = Department::create(['name' => 'Office H source', 'code' => 'OHS']);
+        $department = $this->officialDepartment();
         $position = Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
         $import = $this->stage($this->workbookUpload(includeEmail: false));
         $this->putMapping($import, [
@@ -491,7 +803,7 @@ class EmployeeWorkbookImportTest extends TestCase
 
     public function test_valid_rows_import_while_problematic_rows_can_be_corrected_and_resumed(): void
     {
-        $department = Department::create(['name' => 'Mixed Import Office', 'code' => 'MIX']);
+        $department = $this->officialDepartment();
         $position = Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
         $import = $this->stage($this->workbookUpload('Good, Employee', [], [
             [0 => 'IMP-0002', 1 => 'Needs, Correction', 3 => '', 5 => ''],
@@ -550,7 +862,7 @@ class EmployeeWorkbookImportTest extends TestCase
 
     public function test_existing_employees_are_updated_and_non_hr_roles_cannot_run_imports(): void
     {
-        $department = Department::create(['name' => 'Existing Office', 'code' => 'EX']);
+        $department = $this->officialDepartment();
         $position = Position::create(['department_id' => $department->id, 'title' => 'Existing Position']);
         $existing = Employee::create([
             'department_id' => $department->id,
@@ -623,7 +935,7 @@ class EmployeeWorkbookImportTest extends TestCase
 
     public function test_import_skips_protected_admin_accounts_without_modifying_employee_or_login_data(): void
     {
-        $department = Department::create(['name' => 'Office H source', 'code' => 'OHS']);
+        $department = $this->officialDepartment();
         $position = Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
         $user = User::create([
             'name' => 'Protected Administrator',
@@ -667,7 +979,7 @@ class EmployeeWorkbookImportTest extends TestCase
 
     public function test_workbook_employment_status_is_normalized_and_unsupported_values_need_correction(): void
     {
-        $department = Department::create(['name' => 'Office H source', 'code' => 'OHS']);
+        $department = $this->officialDepartment();
         Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
         $import = $this->stage($this->workbookUpload(
             extraRows: [[0 => 'IMP-0002', 28 => 'Employment Pending']],
@@ -689,7 +1001,7 @@ class EmployeeWorkbookImportTest extends TestCase
 
     public function test_duplicate_employee_numbers_inside_a_workbook_are_skipped_once(): void
     {
-        $department = Department::create(['name' => 'Office H source', 'code' => 'OHS']);
+        $department = $this->officialDepartment();
         Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
         $import = $this->stage($this->workbookUpload(extraRows: [[1 => 'Second, Person']]));
         $this->assertSame(
@@ -709,7 +1021,7 @@ class EmployeeWorkbookImportTest extends TestCase
 
     public function test_hrmo_can_review_an_individual_name_without_changing_original_source_data(): void
     {
-        $department = Department::create(['name' => 'Manual Review Office', 'code' => 'MR']);
+        $department = $this->officialDepartment();
         $position = Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
         $import = $this->stage($this->workbookUpload('Unparseable'));
         $officeKey = hash('sha256', 'Office H source');
@@ -782,8 +1094,43 @@ class EmployeeWorkbookImportTest extends TestCase
 
     private function putMapping(EmployeeImport $import, array $data)
     {
+        if (isset($data['office_source_column']) && ! isset($data['department_map'])) {
+            $departmentId = $this->officialDepartment()->id;
+            $data['department_map'] = app(EmployeeWorkbookImportService::class)
+                ->officeValues($import, (int) $data['office_source_column'])
+                ->mapWithKeys(fn (string $office) => [hash('sha256', $office) => $departmentId])
+                ->all();
+        }
+
         return $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->put(route('employee-imports.mapping', $import), $data);
+    }
+
+    private function actualOfficialWorkbookPath(): ?string
+    {
+        foreach (glob(storage_path('app/private/employee-imports/*.xlsx')) ?: [] as $path) {
+            $reader = IOFactory::createReaderForFile($path);
+            $reader->setReadDataOnly(true);
+            $workbook = $reader->load($path);
+            $plantilla = $workbook->getSheetByName('PLANTILLA');
+            $isOfficialWorkbook = $plantilla
+                && $workbook->getSheetByName('HRMO')
+                && $workbook->getSheetByName('Positions')
+                && $plantilla->getCell('A2')->getFormattedValue() === 'ORGANIZATIONAL UNIT (1)'
+                && $plantilla->getCell('B2')->getFormattedValue() === 'ITEM NUMBER (2)'
+                && $plantilla->getCell('C2')->getFormattedValue() === 'POSITION TITLE (3)';
+            $workbook->disconnectWorksheets();
+            if ($isOfficialWorkbook) {
+                return $path;
+            }
+        }
+
+        return null;
+    }
+
+    private function officialDepartment(): Department
+    {
+        return Department::query()->where('code', 'HRMO/PESO')->firstOrFail();
     }
 
     private function stage(UploadedFile $file): EmployeeImport
@@ -875,8 +1222,10 @@ class EmployeeWorkbookImportTest extends TestCase
         return UploadedFile::fake()->createWithContent("employee-test.{$extension}", $content);
     }
 
-    private function plantillaWorkbookUpload(): UploadedFile
-    {
+    private function plantillaWorkbookUpload(
+        string $office = 'Human Resources Office',
+        bool $duplicateItemNumber = false
+    ): UploadedFile {
         $headers = [
             'ORGANIZATIONAL UNIT (1)', 'ITEM NUMBER (2)', 'POSITION TITLE (3)',
             'SALARY GRADE (4)', 'AUTHORIZED SALARY (5)', 'ACTUAL SALARY (6)',
@@ -907,21 +1256,27 @@ class EmployeeWorkbookImportTest extends TestCase
         $vacantRow = array_fill(0, count($headers), null);
         $vacantRow[0] = 'Human Resources Office';
         $vacantRow[1] = 'VACANT-003';
-        $vacantRow[2] = 'Vacant Position';
+        $vacantRow[2] = 'HR Officer';
+        $vacantRow[12] = 'VACANT';
+        $vacantRow[13] = 'VACANT';
+        $vacantRow[14] = 'VACANT';
         $employeeRows = [
             [
-                'Human Resources Office', 'HR-001', 'HR Officer', '10', '1000', '1000', '1',
+                $office, 'HR-001', 'HR Officer', '10', '1000', '1000', '1',
                 'TIN-001', '2018-01-02', null, null, '1', 'DELA CRUZ', 'JUAN', 'M.',
                 'M', '1985-03-04', null, null, 'Bachelor', 'P', '2020-06-07',
                 null, null, 'Active', null, null, null, null, 'GSIS-001',
             ],
             [
-                'Human Resources Office', 'HR-002', 'HR Officer', '10', '1000', '1000', '1',
+                $office, 'HR-002', 'HR Officer', '10', '1000', '1000', '1',
                 null, '2019-02-03', null, null, '1', 'SANTOS', 'ANA', null,
                 'F', '1990-04-05', null, null, 'Bachelor', 'E', '2021-07-08',
                 null, null, 'Active', null, null, null, null, null,
             ],
         ];
+        if ($duplicateItemNumber) {
+            $employeeRows[1][1] = $employeeRows[0][1];
+        }
 
         foreach ([3 => $sectionRow, 4 => $employeeRows[0], 5 => $vacantRow, 6 => $employeeRows[1]] as $rowNumber => $values) {
             foreach ($values as $index => $value) {
@@ -935,7 +1290,7 @@ class EmployeeWorkbookImportTest extends TestCase
             $plantilla->getStyle("Q{$rowNumber}")->getNumberFormat()->setFormatCode('mm/dd/yyyy');
             $plantilla->setCellValue("R{$rowNumber}", '=DATEDIF(Q'.$rowNumber.',TODAY(),"Y")');
         }
-        $plantilla->getCell('P4')->getDataValidation()->setType(\PhpOffice\PhpSpreadsheet\Cell\DataValidation::TYPE_LIST);
+        $plantilla->getCell('P4')->getDataValidation()->setType(DataValidation::TYPE_LIST);
         $plantilla->getCell('P4')->getDataValidation()->setFormula1('"M,F"');
 
         foreach ([
@@ -948,9 +1303,12 @@ class EmployeeWorkbookImportTest extends TestCase
         ] as $title) {
             $reference = $spreadsheet->createSheet();
             $reference->setTitle($title);
-            $reference->setCellValue('A1', 'Reference information');
+            $reference->setCellValue('A1', $title === 'Positions' ? 'HR Officer' : 'Reference information');
+            if ($title === 'Positions') {
+                $reference->setCellValue('A2', 'Other official position');
+            }
         }
-        $spreadsheet->getSheetByName('Eligibilities')->setSheetState(\PhpOffice\PhpSpreadsheet\Worksheet\Worksheet::SHEETSTATE_HIDDEN);
+        $spreadsheet->getSheetByName('Eligibilities')->setSheetState(Worksheet::SHEETSTATE_HIDDEN);
         $spreadsheet->setActiveSheetIndex(0);
 
         $temporaryPath = tempnam(sys_get_temp_dir(), 'hris-plantilla-test-');
