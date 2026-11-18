@@ -863,6 +863,53 @@ class EmployeeWorkbookImportService
             $candidatePositions = $departmentPositions;
         }
         $candidatePositions = $candidatePositions->unique('id')->values();
+        $sourceSalaryGrades = collect($pair['salary_grades'] ?? [])
+            ->map(fn ($grade) => trim((string) $grade))
+            ->filter()
+            ->unique()
+            ->values();
+        $sourceSalaryGrade = $sourceSalaryGrades->count() === 1
+            ? $sourceSalaryGrades->first()
+            : trim((string) ($pair['salary_grade'] ?? ''));
+
+        if ($candidatePositions->count() > 1 && $sourceSalaryGrade !== ''
+            && $candidatePositions->every(fn (Position $position) => trim((string) $position->salary_grade) !== '')) {
+            $matchingSalaryGrades = $candidatePositions->filter(
+                fn (Position $position) => $this->normalizeMatchValue((string) $position->salary_grade)
+                    === $this->normalizeMatchValue($sourceSalaryGrade)
+            );
+            if ($matchingSalaryGrades->count() === 1) {
+                $candidatePositions = $matchingSalaryGrades->values();
+            }
+        }
+
+        $salaryGradeMismatch = $candidatePositions->count() === 1
+            && $sourceSalaryGrade !== ''
+            && trim((string) $candidatePositions->first()->salary_grade) !== ''
+            && $this->normalizeMatchValue($sourceSalaryGrade)
+                !== $this->normalizeMatchValue((string) $candidatePositions->first()->salary_grade);
+
+        if ($candidatePositions->isNotEmpty() && ($sourceSalaryGrades->count() > 1 || $salaryGradeMismatch)) {
+            $position = $candidatePositions->first();
+
+            return [
+                'position_id' => null,
+                'position_title' => null,
+                'status' => 'Needs HR Confirmation',
+                'reason' => $sourceSalaryGrades->count() > 1
+                    ? 'Workbook records show multiple salary grades for this position'
+                    : "Workbook salary grade {$sourceSalaryGrade} conflicts with the HRIS position salary grade {$position->salary_grade}",
+                'confidence' => null,
+                'suggestions' => $candidatePositions->map(fn (Position $candidate) => [
+                    'id' => $candidate->id,
+                    'title' => $candidate->title,
+                    'department' => $candidate->department?->name ?? 'Any department',
+                    'salary_grade' => $candidate->salary_grade,
+                    'score' => 100,
+                ])->all(),
+                'has_exact_match' => true,
+            ];
+        }
 
         if ($candidatePositions->count() === 1) {
             $position = $candidatePositions->first();
@@ -886,6 +933,7 @@ class EmployeeWorkbookImportService
                 'id' => $position->id,
                 'title' => $position->title,
                 'department' => $position->department?->name ?? 'Any department',
+                'salary_grade' => $position->salary_grade,
                 'score' => 100,
             ])->all()
             : $this->positionSuggestions($pair['position'], $departmentId, $positions);
@@ -928,6 +976,7 @@ class EmployeeWorkbookImportService
                     'id' => $position->id,
                     'title' => $position->title,
                     'department' => $position->department?->name ?? 'Any department',
+                    'salary_grade' => $position->salary_grade,
                     'score' => $score,
                 ];
             })

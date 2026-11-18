@@ -359,7 +359,7 @@
 
                     @if($positionPairs->isNotEmpty())
                         <h3 id="position-mappings" class="top-space import-anchor">Positions</h3>
-                        <p class="muted">Existing positions are selected automatically. Unmatched titles can be linked to an existing position or explicitly added to that department.</p>
+                        <p class="muted">Active HRIS position records available for matching: {{ $positions->count() }}. Existing positions are selected automatically. Unmatched titles can be linked to an existing position or explicitly added to that department after HR review.</p>
                         @foreach($positionPairs as $pair)
                             @php
                                 $key = hash('sha256', $pair['office']."\0".$pair['position']);
@@ -411,7 +411,7 @@
                                         <optgroup label="Possible matches — HR confirmation required">
                                             @foreach($positionSuggestions as $suggestion)
                                                 @if($positionCandidates->contains('id', $suggestion['id']))
-                                                    <option value="{{ $suggestion['id'] }}" @selected((string) $selectedPosition === (string) $suggestion['id'])>{{ $suggestion['title'] }} — {{ $suggestion['department'] ?? 'Any department' }} ({{ $suggestion['score'] }}% similarity)</option>
+                                                    <option value="{{ $suggestion['id'] }}" @selected((string) $selectedPosition === (string) $suggestion['id'])>{{ $suggestion['title'] }} — {{ $suggestion['department'] ?? 'Any department' }}@if(!empty($suggestion['salary_grade'])) — SG {{ $suggestion['salary_grade'] }}@endif ({{ $suggestion['score'] }}% similarity)</option>
                                                 @endif
                                             @endforeach
                                         </optgroup>

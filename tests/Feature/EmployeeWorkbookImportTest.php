@@ -648,6 +648,49 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame('Automatically Matched', $summary['position_matches'][$positionKey]['status']);
     }
 
+    public function test_position_matching_requires_hr_confirmation_for_conflicting_salary_grades(): void
+    {
+        $department = $this->officialDepartment();
+        $position = Position::create([
+            'department_id' => $department->id,
+            'title' => 'HR Officer',
+            'salary_grade' => '11',
+        ]);
+        $import = $this->stage($this->plantillaWorkbookUpload(office: 'HRMO/PESO'));
+        $importer = app(EmployeeWorkbookImportService::class);
+        $positionKey = hash('sha256', "HRMO/PESO\0HR Officer");
+        $summary = $importer->mappingSummary($import, 1);
+
+        $this->assertCount(1, $importer->positionPairs($import, 1));
+        $this->assertArrayNotHasKey($positionKey, $summary['position_map']);
+        $this->assertSame('Needs HR Confirmation', $summary['position_matches'][$positionKey]['status']);
+        $this->assertStringContainsString('salary grade 10', $summary['position_matches'][$positionKey]['reason']);
+        $this->assertStringContainsString('salary grade 11', $summary['position_matches'][$positionKey]['reason']);
+        $this->assertSame($position->id, $summary['position_suggestions'][$positionKey][0]['id']);
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', [$import, 'office_column' => 1]))
+            ->assertOk()
+            ->assertSee('salary grade 10')
+            ->assertSee('salary grade 11')
+            ->assertSee('SG 11');
+
+        $position->update(['salary_grade' => '10']);
+        $matchedSummary = $importer->mappingSummary($import, 1);
+        $this->assertSame($position->id, $matchedSummary['position_map'][$positionKey]);
+
+        $conflictingImport = $this->stage($this->plantillaWorkbookUpload(
+            office: 'HRMO/PESO',
+            firstEmployeeOverrides: [3 => '12']
+        ));
+        $conflictingSummary = $importer->mappingSummary($conflictingImport, 1);
+        $this->assertArrayNotHasKey($positionKey, $conflictingSummary['position_map']);
+        $this->assertSame(
+            'Workbook records show multiple salary grades for this position',
+            $conflictingSummary['position_matches'][$positionKey]['reason']
+        );
+    }
+
     public function test_creating_a_position_reuses_an_existing_unassigned_position(): void
     {
         $department = $this->officialDepartment();
