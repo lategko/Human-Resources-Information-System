@@ -15,6 +15,7 @@ use DateTimeImmutable;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -36,6 +37,8 @@ class EmployeeWorkbookImportService
     private const HEADER_SCAN_ROWS = 10;
 
     private const READY_ROW_STATUSES = ['ready', 'ready_to_update'];
+
+    private const IMPORT_BATCH_SIZE = 50;
 
     public function __construct(private readonly EmployeeUsernameGenerator $usernameGenerator) {}
 
@@ -507,13 +510,27 @@ class EmployeeWorkbookImportService
         foreach ($sheet->getRowIterator() as $row) {
             foreach ($row->getCellIterator() as $cell) {
                 $title = trim((string) $cell->getFormattedValue());
-                if ($title !== '') {
+                if ($this->isPositionReferenceTitle($title)) {
                     $titles[] = $title;
                 }
             }
         }
 
         return $titles;
+    }
+
+    private function isPositionReferenceTitle(string $title): bool
+    {
+        $normalized = $this->normalizeMatchValue($title);
+        if ($normalized === '' || mb_strlen($title) > 150 || preg_match('/[\r\n]/u', $title)) {
+            return false;
+        }
+
+        return ! in_array($normalized, [
+            'POSITION', 'POSITIONS', 'POSITIONTITLE', 'OFFICIALPOSITIONS', 'REFERENCE',
+            'REFERENCEINFORMATION', 'INSTRUCTION', 'INSTRUCTIONS', 'NOTES',
+        ], true)
+            && ! preg_match('/^(NOTE|INSTRUCTIONS?|PLEASE|SELECT|DO NOT)\b/iu', trim($title));
     }
 
     private function worksheetBounds($sheet): array
@@ -675,12 +692,18 @@ class EmployeeWorkbookImportService
         $salaryGradeColumn = $salaryGradeHeader ? (int) $salaryGradeHeader['index'] : null;
 
         return $import->rows()->get()->map(function (EmployeeImportRow $row) use ($officeColumn, $positionColumn, $salaryGradeColumn) {
+            $name = $this->parsedName($row);
+
             return [
                 'office' => trim((string) ($this->cellByColumn($row->source_data, $officeColumn)['display_value'] ?? '')),
                 'position' => trim((string) ($this->cellByColumn($row->source_data, $positionColumn)['display_value'] ?? '')),
                 'salary_grade' => $salaryGradeColumn
                     ? trim((string) ($this->cellByColumn($row->source_data, $salaryGradeColumn)['display_value'] ?? ''))
                     : '',
+                'affected_records' => [[
+                    'source_row' => $row->source_row,
+                    'name' => collect($name ?? [])->filter()->implode(' ') ?: 'Name needs review',
+                ]],
             ];
         })->filter(fn (array $pair) => $pair['office'] !== '' && $pair['position'] !== '')
             ->groupBy(fn (array $pair) => hash('sha256', $pair['office']."\0".$pair['position']))
@@ -689,6 +712,10 @@ class EmployeeWorkbookImportService
                 $pair = $pairs->first();
                 $pair['salary_grade'] = $grades->count() === 1 ? $grades->first() : '';
                 $pair['salary_grades'] = $grades->all();
+                $pair['affected_records'] = $pairs
+                    ->flatMap(fn (array $candidate) => $candidate['affected_records'])
+                    ->values()
+                    ->all();
 
                 return $pair;
             })
@@ -713,13 +740,20 @@ class EmployeeWorkbookImportService
         EmployeeImport $import,
         int $officeColumn,
         array $departmentMap,
-        ?Collection $positions = null
+        ?Collection $positions = null,
+        ?array $referenceCatalog = null
     ): array {
         $positions ??= $this->activePositions();
+        $referenceCatalog ??= $this->normalizedPositionReferenceCatalog($import->position_reference_titles ?? []);
 
-        return $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($departmentMap, $positions) {
+        return $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($departmentMap, $positions, $referenceCatalog) {
             $departmentId = $departmentMap[hash('sha256', $pair['office'])] ?? null;
-            $match = $this->positionMatch($pair, filter_var($departmentId, FILTER_VALIDATE_INT) ?: null, $positions);
+            $match = $this->positionMatch(
+                $pair,
+                filter_var($departmentId, FILTER_VALIDATE_INT) ?: null,
+                $positions,
+                $referenceCatalog
+            );
             $key = hash('sha256', $pair['office']."\0".$pair['position']);
 
             return $match['position_id'] ? [$key => $match['position_id']] : [];
@@ -832,8 +866,12 @@ class EmployeeWorkbookImportService
         ];
     }
 
-    private function positionMatch(array $pair, ?int $departmentId, ?Collection $positions = null): array
-    {
+    private function positionMatch(
+        array $pair,
+        ?int $departmentId,
+        ?Collection $positions = null,
+        array $referenceCatalog = []
+    ): array {
         $positions ??= $this->activePositions();
         if (! $departmentId) {
             $suggestions = $this->positionSuggestions($pair['position'], null, $positions);
@@ -928,6 +966,22 @@ class EmployeeWorkbookImportService
             ];
         }
 
+        $referenceTitle = $sourceSalaryGrades->count() <= 1
+            ? $this->positionReferenceTitle($pair['position'], $referenceCatalog)
+            : null;
+        if ($candidatePositions->isEmpty() && $referenceTitle !== null) {
+            return [
+                'position_id' => null,
+                'position_title' => $referenceTitle,
+                'status' => 'Official Reference Match',
+                'reason' => 'The title is listed in the official Positions worksheet and can be added to the confirmed department',
+                'confidence' => 100,
+                'suggestions' => [],
+                'has_exact_match' => false,
+                'reference_title' => $referenceTitle,
+            ];
+        }
+
         $suggestions = $candidatePositions->isNotEmpty()
             ? $candidatePositions->map(fn (Position $position) => [
                 'id' => $position->id,
@@ -945,13 +999,36 @@ class EmployeeWorkbookImportService
             'status' => $suggestions ? 'Needs HR Confirmation' : 'Unmatched',
             'reason' => $ambiguousExactMatches
                 ? 'Multiple existing positions match within the confirmed department'
-                : ($suggestions
+                : ($sourceSalaryGrades->count() > 1
+                    ? 'Workbook records show multiple salary grades for this position'
+                    : ($suggestions
                     ? 'Possible matches are suggestions only and require HR confirmation'
-                    : 'No existing position or approved alias matches this title in the confirmed department'),
+                    : 'No existing position, approved alias, or official reference title matches this title in the confirmed department')),
             'confidence' => null,
             'suggestions' => $suggestions,
             'has_exact_match' => $ambiguousExactMatches,
         ];
+    }
+
+    private function positionReferenceTitle(string $title, array $referenceCatalog): ?string
+    {
+        $normalized = $this->normalizeMatchValue($title);
+
+        return $normalized !== '' ? ($referenceCatalog[$normalized] ?? null) : null;
+    }
+
+    private function normalizedPositionReferenceCatalog(array $referenceTitles): array
+    {
+        $catalog = [];
+        foreach ($referenceTitles as $reference) {
+            if (! is_string($reference) || ! $this->isPositionReferenceTitle($reference)) {
+                continue;
+            }
+            $normalized = $this->normalizeMatchValue($reference);
+            $catalog[$normalized] ??= $reference;
+        }
+
+        return $catalog;
     }
 
     public function positionSuggestions(string $title, ?int $departmentId, ?Collection $positions = null): array
@@ -1004,12 +1081,13 @@ class EmployeeWorkbookImportService
         }
 
         $activePositions = $this->activePositions();
+        $referenceCatalog = $this->normalizedPositionReferenceCatalog($import->position_reference_titles ?? []);
         $departmentMap = array_replace(
             $this->suggestedDepartmentMap($import, $officeColumn),
             $import->field_mappings['department_map'] ?? []
         );
         $positionMap = array_replace(
-            $this->suggestedPositionMap($import, $officeColumn, $departmentMap, $activePositions),
+            $this->suggestedPositionMap($import, $officeColumn, $departmentMap, $activePositions, $referenceCatalog),
             $import->field_mappings['position_map'] ?? []
         );
         $approvedDepartments = $this->officialDepartments();
@@ -1035,10 +1113,15 @@ class EmployeeWorkbookImportService
         $departmentSuggestions = collect($departmentMatches)
             ->map(fn (array $match) => $match['suggestions'])
             ->all();
-        $positionMatches = $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($departmentMap, $positionMap, $activePositions) {
+        $positionMatches = $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($import, $departmentMap, $positionMap, $activePositions, $referenceCatalog) {
             $key = hash('sha256', $pair['office']."\0".$pair['position']);
             $departmentId = filter_var($departmentMap[hash('sha256', $pair['office'])] ?? null, FILTER_VALIDATE_INT);
-            $match = $this->positionMatch($pair, $departmentId ?: null, $activePositions);
+            $match = $this->positionMatch(
+                $pair,
+                $departmentId ?: null,
+                $activePositions,
+                $referenceCatalog
+            );
             $selectedId = filter_var($positionMap[$key] ?? null, FILTER_VALIDATE_INT);
             if ($selectedId && $selectedId !== (int) ($match['position_id'] ?? 0)) {
                 $selectedPosition = Position::query()->with('department')->find($selectedId);
@@ -1052,24 +1135,56 @@ class EmployeeWorkbookImportService
                     'has_exact_match' => false,
                 ];
             }
+            $createdPositionId = filter_var(
+                $import->field_mappings['created_position_map'][$key] ?? null,
+                FILTER_VALIDATE_INT
+            );
+            if ($selectedId && $createdPositionId === $selectedId) {
+                $match['status'] = 'Automatically Matched – Newly Created HRIS Position';
+                $match['reason'] = 'Created during this import and automatically applied to every affected employee record';
+            }
+            $match['affected_records'] = $pair['affected_records'];
 
             return [$key => $match];
         })->all();
         $positionSuggestions = collect($positionMatches)
             ->map(fn (array $match) => $match['suggestions'])
             ->all();
-        $referencePositions = $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($import) {
+        $referencePositions = $this->positionPairs($import, $officeColumn)->mapWithKeys(function (array $pair) use ($referenceCatalog) {
             $key = hash('sha256', $pair['office']."\0".$pair['position']);
 
-            return [$key => $this->isPositionInReference($import, $pair['position'])];
+            return [$key => isset($referenceCatalog[$this->normalizeMatchValue($pair['position'])])];
         })->all();
+        $officeRecords = $import->rows()->get()->groupBy(
+            fn (EmployeeImportRow $row) => trim((string) ($this->cellByColumn($row->source_data, $officeColumn)['display_value'] ?? ''))
+        );
+        foreach ($departmentMatches as $key => &$match) {
+            $office = $this->officeValues($import, $officeColumn)->first(
+                fn (string $value) => hash('sha256', $value) === $key
+            );
+            $match['affected_records'] = $officeRecords->get($office, collect())
+                ->map(function (EmployeeImportRow $row) {
+                    $name = $this->parsedName($row);
+
+                    return [
+                        'source_row' => $row->source_row,
+                        'name' => collect($name ?? [])->filter()->implode(' ') ?: 'Name needs review',
+                    ];
+                })->values()->all();
+        }
+        unset($match);
 
         return [
             'departments' => $this->officeValues($import, $officeColumn)
                 ->filter(fn (string $office) => empty($departmentMap[hash('sha256', $office)]))
                 ->values(),
             'positions' => $this->positionPairs($import, $officeColumn)
-                ->filter(fn (array $pair) => empty($positionMap[hash('sha256', $pair['office']."\0".$pair['position'])]))
+                ->filter(function (array $pair) use ($positionMap, $positionMatches) {
+                    $key = hash('sha256', $pair['office']."\0".$pair['position']);
+
+                    return empty($positionMap[$key])
+                        && ($positionMatches[$key]['status'] ?? null) !== 'Official Reference Match';
+                })
                 ->values(),
             'department_map' => $departmentMap,
             'position_map' => $positionMap,
@@ -1111,8 +1226,8 @@ class EmployeeWorkbookImportService
     {
         $normalized = $this->normalizeMatchValue($title);
 
-        return $normalized !== '' && collect($import->position_reference_titles ?? [])
-            ->contains(fn (string $reference) => $this->normalizeMatchValue($reference) === $normalized);
+        return $normalized !== ''
+            && isset($this->normalizedPositionReferenceCatalog($import->position_reference_titles ?? [])[$normalized]);
     }
 
     public function importSummary(EmployeeImport $import, ?int $officeColumn): array
@@ -1140,11 +1255,25 @@ class EmployeeWorkbookImportService
         $unmatchedPositionCount = $positionMatchStatuses->get('Unmatched', 0);
         $positionConfirmationCount = $positionMatchStatuses->get('Needs HR Confirmation', 0);
         $mappingBlockedRows = $rows->filter(fn (EmployeeImportRow $row) => $this->hasUnresolvedMappingIssues($row));
+        $ambiguousPositionCount = collect($mappingSummary['position_matches'])
+            ->filter(fn (array $match) => $match['status'] === 'Needs HR Confirmation'
+                && (! empty($match['has_exact_match'])
+                    || str_contains($match['reason'] ?? '', 'multiple salary grades')))
+            ->count();
+        $departmentBlockedRows = $rows->filter(fn (EmployeeImportRow $row) => collect($row->issues ?? [])
+            ->contains(fn (string $issue) => str_contains($issue, 'has no approved department mapping.')
+                || $issue === 'The mapped department is no longer active.'));
+        $positionBlockedRows = $rows->filter(fn (EmployeeImportRow $row) => collect($row->issues ?? [])
+            ->contains(fn (string $issue) => $issue === 'Latest position has no approved position mapping.'
+                || $issue === 'The mapped position is no longer active or does not match the department.'));
 
         return [
             'total' => $import->row_count,
             'valid' => $validatedRows->count(),
+            'importable' => $validatedRows->count(),
             'awaiting_mapping' => $mappingSummary['departments']->count() + $mappingSummary['positions']->count(),
+            'awaiting_department_mapping' => $departmentBlockedRows->count(),
+            'awaiting_position_mapping' => $positionBlockedRows->count(),
             'mapping_pending' => $import->field_mappings ? 0 : 1,
             'awaiting_validation' => $statusCounts->get('unvalidated', 0)
                 + $statusCounts->get('existing_to_update', 0),
@@ -1157,12 +1286,18 @@ class EmployeeWorkbookImportService
             'new_records' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['action'] ?? 'create') === 'create'
                 && ! in_array($row->status, ['duplicate', 'failed'], true))->count(),
             'accounts_to_create' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['account_action'] ?? 'create') === 'create'
-                && in_array($row->status, ['unvalidated', 'existing_to_update', 'ready', 'ready_to_update'], true))->count(),
+                && in_array($row->status, self::READY_ROW_STATUSES, true))->count(),
             'existing_to_update' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['action'] ?? null) === 'update'
                 && ! in_array($row->status, ['duplicate', 'failed'], true))->count(),
             'imported' => $rows->where('status', 'imported')->count(),
             'updated' => $rows->where('status', 'updated')->count(),
             'accounts_created' => (int) $import->accounts_created_count,
+            'pending_setup_links' => $rows->filter(
+                fn (EmployeeImportRow $row) => in_array($row->status, ['imported', 'updated'], true)
+                    && ($row->review_data['import_result']['account_created'] ?? false)
+                    && empty($row->review_data['import_result']['setup_link_sent_at'])
+                    && empty($row->review_data['import_result']['setup_link_status'])
+            )->count(),
             'failed' => $rows->where('status', 'failed')->count(),
             'possible_duplicates' => $possibleDuplicates,
             'mapping_blocked_records' => $mappingBlockedRows->count(),
@@ -1183,6 +1318,7 @@ class EmployeeWorkbookImportService
             'department_confirmation_count' => $departmentConfirmationCount,
             'unmatched_position_count' => $unmatchedPositionCount,
             'position_confirmation_count' => $positionConfirmationCount,
+            'ambiguous_position_count' => $ambiguousPositionCount,
             'duplicates' => $rows->where('status', 'duplicate')->count(),
             'corrections' => $rows->filter(fn (EmployeeImportRow $row) => $this->needsEmployeeCorrection($row))->count(),
             'matched_departments' => $mappedDepartments,
@@ -1211,14 +1347,14 @@ class EmployeeWorkbookImportService
             || $issue === 'The mapped position is no longer active or does not match the department.';
     }
 
-    public function saveMapping(EmployeeImport $import, array $mapping, int $userId): void
+    public function saveMapping(EmployeeImport $import, array $mapping, int $userId): array
     {
-        DB::transaction(fn () => $this->persistMapping($import, $mapping, $userId));
+        return DB::transaction(fn () => $this->persistMapping($import, $mapping, $userId));
     }
 
-    private function persistMapping(EmployeeImport $import, array $mapping, int $userId): void
+    private function persistMapping(EmployeeImport $import, array $mapping, int $userId): array
     {
-        if (! in_array($import->status, ['mapping_required', 'ready_for_import', 'completed_with_errors', 'failed', 'pending_review', 'mapping_approved', 'review_required'], true)) {
+        if (! in_array($import->status, ['mapping_required', 'ready_for_import', 'partially_ready', 'completed_with_errors', 'failed', 'pending_review', 'mapping_approved', 'review_required'], true)) {
             throw ValidationException::withMessages(['mapping' => 'Mappings can only be changed while an import is awaiting review.']);
         }
         $officeColumn = (int) ($mapping['office_source_column'] ?? 0);
@@ -1272,10 +1408,68 @@ class EmployeeWorkbookImportService
             $this->suggestedPositionMap($import, $officeColumn, $departments),
             $mapping['position_map'] ?? []
         );
+        $referenceCatalog = $this->normalizedPositionReferenceCatalog($import->position_reference_titles ?? []);
+        $createdPositions = [];
+        $reusedPositions = [];
+        $createdPositionMap = $import->field_mappings['created_position_map'] ?? [];
+        foreach ($this->positionPairs($import, $officeColumn) as $pair) {
+            $key = hash('sha256', $pair['office']."\0".$pair['position']);
+            if (filter_var($mapping['create_position'][$key] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+                if (! filter_var($departments[hash('sha256', $pair['office'])] ?? null, FILTER_VALIDATE_INT)) {
+                    throw ValidationException::withMessages([
+                        "position_map.{$key}" => 'Confirm an active department before creating a position.',
+                    ]);
+                }
+                $positions[$key] = 'create';
+            }
+        }
+        foreach ($this->positionPairs($import, $officeColumn) as $pair) {
+            $key = hash('sha256', $pair['office']."\0".$pair['position']);
+            if (! empty($positions[$key])) {
+                continue;
+            }
+            $departmentId = filter_var($departments[hash('sha256', $pair['office'])] ?? null, FILTER_VALIDATE_INT);
+            if (! $departmentId) {
+                continue;
+            }
+            $match = $this->positionMatch(
+                $pair,
+                $departmentId,
+                $this->activePositions(),
+                $referenceCatalog
+            );
+            if ($match['status'] !== 'Official Reference Match') {
+                continue;
+            }
+            $position = $this->createPositionFromSource(
+                $pair['position'],
+                $departmentId,
+                [
+                    'title' => $match['position_title'],
+                    'salary_grade' => $pair['salary_grade'],
+                ],
+                $key
+            );
+            $positions[$key] = $position->id;
+            if ($position->wasRecentlyCreated) {
+                $createdPositionMap[$key] = $position->id;
+                $createdPositions[] = [
+                    'id' => $position->id,
+                    'title' => $position->title,
+                    'department' => $position->department?->name,
+                ];
+            }
+        }
         foreach ($this->positionPairs($import, $officeColumn) as $pair) {
             $key = hash('sha256', $pair['office']."\0".$pair['position']);
             $departmentId = filter_var($departments[hash('sha256', $pair['office'])] ?? null, FILTER_VALIDATE_INT);
             if (! $departmentId) {
+                if (($positions[$key] ?? null) === 'create') {
+                    throw ValidationException::withMessages([
+                        "position_map.{$key}" => 'Confirm an active department before creating a position.',
+                    ]);
+                }
+
                 continue;
             }
             $selectedPosition = $positions[$key] ?? null;
@@ -1283,18 +1477,33 @@ class EmployeeWorkbookImportService
                 continue;
             }
             if ($selectedPosition === 'create') {
-                if ($import->position_reference_count > 0 && ! $this->isPositionInReference($import, $pair['position'])) {
-                    throw ValidationException::withMessages([
-                        "position_map.{$key}" => "The title \"{$pair['position']}\" is not listed on the workbook's official Positions worksheet.",
-                    ]);
+                $newPosition = $mapping['new_positions'][$key] ?? [];
+                $referenceTitle = $this->positionReferenceTitle($pair['position'], $referenceCatalog);
+                if ($referenceTitle !== null) {
+                    $newPosition['title'] = $referenceTitle;
+                    $newPosition['salary_grade'] = $newPosition['salary_grade'] ?? $pair['salary_grade'];
                 }
                 $position = $this->createPositionFromSource(
                     $pair['position'],
                     $departmentId,
-                    $mapping['new_positions'][$key] ?? [],
+                    $newPosition,
                     $key
                 );
                 $positions[$key] = $position->id;
+                if ($position->wasRecentlyCreated) {
+                    $createdPositionMap[$key] = $position->id;
+                    $createdPositions[] = [
+                        'id' => $position->id,
+                        'title' => $position->title,
+                        'department' => $position->department?->name,
+                    ];
+                } else {
+                    $reusedPositions[] = [
+                        'id' => $position->id,
+                        'title' => $position->title,
+                        'department' => $position->department?->name,
+                    ];
+                }
 
                 continue;
             }
@@ -1307,6 +1516,11 @@ class EmployeeWorkbookImportService
             }
         }
 
+        $createdPositionMap = array_filter(
+            $createdPositionMap,
+            fn ($positionId, $key) => (int) ($positions[$key] ?? 0) === (int) $positionId,
+            ARRAY_FILTER_USE_BOTH
+        );
         $approvedMapping = [
             'source_format' => $this->normalizeMatchValue((string) $import->worksheet_name) === 'PLANTILLA'
                 ? 'plantilla'
@@ -1329,11 +1543,12 @@ class EmployeeWorkbookImportService
                 )),
                 fn ($positionId) => filter_var($positionId, FILTER_VALIDATE_INT) !== false
             ),
+            'created_position_map' => $createdPositionMap,
         ];
 
         DB::transaction(function () use ($import, $approvedMapping, $userId) {
             $locked = EmployeeImport::query()->lockForUpdate()->findOrFail($import->id);
-            if (! in_array($locked->status, ['mapping_required', 'ready_for_import', 'completed_with_errors', 'failed', 'pending_review', 'mapping_approved', 'review_required'], true)) {
+            if (! in_array($locked->status, ['mapping_required', 'ready_for_import', 'partially_ready', 'completed_with_errors', 'failed', 'pending_review', 'mapping_approved', 'review_required'], true)) {
                 throw ValidationException::withMessages(['mapping' => 'This import is no longer available for mapping review.']);
             }
             $this->persistApprovedAliases($import, $approvedMapping);
@@ -1350,6 +1565,11 @@ class EmployeeWorkbookImportService
             ]);
             $this->refreshPreview($locked, $userId);
         });
+
+        return [
+            'created_positions' => $createdPositions,
+            'reused_positions' => $reusedPositions,
+        ];
     }
 
     private function persistApprovedAliases(EmployeeImport $import, array $mapping): void
@@ -1440,27 +1660,30 @@ class EmployeeWorkbookImportService
 
     public function confirm(EmployeeImport $import, int $userId): EmployeeImport
     {
-        if (! in_array($import->status, ['ready_for_import', 'completed_with_errors', 'failed', 'mapping_approved', 'review_required'], true) || ! $import->field_mappings) {
+        $import = EmployeeImport::query()->findOrFail($import->getKey());
+        if (! in_array($import->status, ['ready_for_import', 'partially_ready', 'completed_with_errors', 'failed', 'importing', 'mapping_approved', 'review_required'], true) || ! $import->field_mappings) {
             throw ValidationException::withMessages(['mapping' => 'Select an OFFICE column, map its values and positions, and save the mappings before importing.']);
         }
         if ($import->status === 'failed' && $import->rows()->where('status', 'failed')->exists()) {
             throw ValidationException::withMessages(['import' => 'Correct or remap the records that failed before retrying this batch.']);
         }
 
-        $preflight = DB::transaction(function () use ($import, $userId) {
+        $preflight = DB::transaction(function () use ($import) {
             $lockedImport = EmployeeImport::query()->lockForUpdate()->findOrFail($import->id);
-            if (! in_array($lockedImport->status, ['ready_for_import', 'completed_with_errors', 'failed', 'mapping_approved', 'review_required'], true)
+            $resuming = $lockedImport->status === 'importing';
+            if ((! $resuming && ! in_array($lockedImport->status, ['ready_for_import', 'partially_ready', 'completed_with_errors', 'failed', 'mapping_approved', 'review_required'], true))
                 || ! $lockedImport->field_mappings || ! $lockedImport->previewed_at) {
                 throw ValidationException::withMessages(['import' => 'This workbook has already been processed or changed.']);
             }
 
-            $this->refreshPreview($lockedImport, $userId);
-            $hasReadyRows = $this->readyImportRowsCount($lockedImport) > 0;
-            if (! $hasReadyRows && ! $this->containsOnlyDuplicateRows($lockedImport)) {
-                return ['eligible' => false, 'import' => $lockedImport->fresh()];
-            }
+            if (! $resuming) {
+                $hasReadyRows = $this->readyImportRowsCount($lockedImport) > 0;
+                if (! $hasReadyRows && ! $this->containsOnlyDuplicateRows($lockedImport)) {
+                    return ['eligible' => false, 'import' => $lockedImport->fresh()];
+                }
 
-            $lockedImport->update(['status' => 'importing']);
+                $lockedImport->update(['status' => 'importing']);
+            }
 
             return ['eligible' => true, 'import' => $lockedImport];
         });
@@ -1472,16 +1695,8 @@ class EmployeeWorkbookImportService
         $lockedForImport = $preflight['import'];
 
         try {
-            return DB::transaction(fn () => $this->importReadyRows($lockedForImport, $userId));
+            return $this->importReadyRows($lockedForImport, $userId);
         } catch (\Throwable $exception) {
-            EmployeeImportRow::query()
-                ->where('employee_import_id', $lockedForImport->id)
-                ->whereIn('status', ['ready', 'ready_to_update'])
-                ->get()
-                ->each(fn (EmployeeImportRow $row) => $row->update([
-                    'status' => 'failed',
-                    'issues' => ['The import transaction failed. Review the record and retry after correcting the cause.'],
-                ]));
             EmployeeImport::query()->whereKey($lockedForImport->id)
                 ->where('status', 'importing')
                 ->update(['status' => 'failed']);
@@ -1491,7 +1706,10 @@ class EmployeeWorkbookImportService
 
     private function importReadyRows(EmployeeImport $import, int $userId): EmployeeImport
     {
-        $lockedImport = EmployeeImport::query()->lockForUpdate()->findOrFail($import->id);
+        $lockedImport = EmployeeImport::query()->findOrFail($import->id);
+        if ($lockedImport->status !== 'importing') {
+            return $lockedImport;
+        }
         $mapping = $lockedImport->field_mappings;
         $plantillaItemOwners = ($mapping['source_format'] ?? null) === 'plantilla'
             ? EmployeeServiceProfile::query()
@@ -1502,186 +1720,235 @@ class EmployeeWorkbookImportService
                 ->map(fn (Collection $profiles) => $profiles->pluck('employee_id')->all())
                 ->all()
             : [];
-        foreach ($lockedImport->rows()->whereIn('status', ['ready', 'ready_to_update', 'pending_review'])->orderBy('source_row')->lockForUpdate()->get() as $row) {
-            $prepared = $this->prepareEmployeeData($row, $mapping);
-            if ($prepared['issues']) {
-                $row->update(['status' => 'needs_review', 'issues' => $prepared['issues']]);
+        $passwordHash = null;
+        $rows = $lockedImport->rows()
+            ->whereIn('status', ['ready', 'ready_to_update', 'pending_review'])
+            ->orderBy('id')
+            ->limit(self::IMPORT_BATCH_SIZE)
+            ->get();
+        foreach ($rows as $queuedRow) {
+            $rowId = $queuedRow->id;
+            $itemOwnerToAdd = null;
+            try {
+                DB::transaction(function () use (
+                    $rowId,
+                    $lockedImport,
+                    $mapping,
+                    &$plantillaItemOwners,
+                    &$passwordHash,
+                    &$itemOwnerToAdd
+                ): void {
+                    $row = EmployeeImportRow::query()->lockForUpdate()->findOrFail($rowId);
+                    if (! in_array($row->status, ['ready', 'ready_to_update', 'pending_review'], true)) {
+                        return;
+                    }
+                    $prepared = $this->prepareEmployeeData($row, $mapping);
+                    if ($prepared['issues']) {
+                        $row->update(['status' => 'needs_review', 'issues' => $prepared['issues']]);
 
-                continue;
-            }
-            $employeeQuery = Employee::withTrashed()->with('user')->lockForUpdate();
-            $employee = $prepared['existing_employee_id']
-                ? $employeeQuery->find($prepared['existing_employee_id'])
-                : $employeeQuery->whereRaw('LOWER(employee_no) = ?', [mb_strtolower((string) $prepared['employee']['employee_no'])])->first();
-            if ($employee?->trashed()) {
-                $row->update([
-                    'status' => 'duplicate',
-                    'issues' => ['An archived employee already uses this employee number. The archived record was not changed.'],
-                ]);
+                        return;
+                    }
+                    $employeeQuery = Employee::withTrashed()->with('user')->lockForUpdate();
+                    $employee = $prepared['existing_employee_id']
+                        ? $employeeQuery->find($prepared['existing_employee_id'])
+                        : $employeeQuery->whereRaw('LOWER(employee_no) = ?', [mb_strtolower((string) $prepared['employee']['employee_no'])])->first();
+                    if ($employee?->trashed()) {
+                        $row->update([
+                            'status' => 'duplicate',
+                            'issues' => ['An archived employee already uses this employee number. The archived record was not changed.'],
+                        ]);
 
-                continue;
-            }
-            if ($employee?->user?->role === 'admin') {
-                $row->update([
-                    'status' => 'duplicate',
-                    'issues' => ['This employee number belongs to a protected Admin account. The employee and account were not changed.'],
-                ]);
+                        return;
+                    }
+                    if ($employee?->user?->role === 'admin') {
+                        $row->update([
+                            'status' => 'duplicate',
+                            'issues' => ['This employee number belongs to a protected Admin account. The employee and account were not changed.'],
+                        ]);
 
-                continue;
-            }
-            $itemNumber = trim((string) ($prepared['profile']['plantilla_item_no'] ?? ''));
-            $itemNumberKey = $this->normalizeMatchValue($itemNumber);
-            $itemOwners = $itemNumberKey !== '' ? ($plantillaItemOwners[$itemNumberKey] ?? []) : [];
-            if ($itemOwners && ! in_array($employee?->id, $itemOwners, true)) {
-                $row->update([
-                    'status' => 'needs_review',
-                    'issues' => ['This plantilla item number is already assigned to another employee. Review the current assignment before importing.'],
-                ]);
+                        return;
+                    }
+                    $itemNumber = trim((string) ($prepared['profile']['plantilla_item_no'] ?? ''));
+                    $itemNumberKey = $this->normalizeMatchValue($itemNumber);
+                    $itemOwners = $itemNumberKey !== '' ? ($plantillaItemOwners[$itemNumberKey] ?? []) : [];
+                    if ($itemOwners && ! in_array($employee?->id, $itemOwners, true)) {
+                        $row->update([
+                            'status' => 'needs_review',
+                            'issues' => ['This plantilla item number is already assigned to another employee. Review the current assignment before importing.'],
+                        ]);
 
-                continue;
-            }
+                        return;
+                    }
 
-            $isExisting = $employee !== null;
-            $previousDepartmentId = $employee?->department_id;
-            $existingUser = $employee?->user;
-            $effectiveRole = $existingUser?->role ?? $prepared['role'];
-            $targetDepartment = null;
-            if ($effectiveRole === 'office_head') {
-                $targetDepartment = Department::query()
-                    ->whereKey($prepared['employee']['department_id'])
-                    ->lockForUpdate()
-                    ->firstOrFail();
-                if ($targetDepartment->head_user_id
-                    && (int) $targetDepartment->head_user_id !== (int) ($existingUser?->id ?? 0)) {
-                    $row->update([
-                        'status' => 'needs_review',
-                        'issues' => ['This department has another assigned Office Head. Resolve the assignment before importing.'],
+                    $isExisting = $employee !== null;
+                    $previousDepartmentId = $employee?->department_id;
+                    $existingUser = $employee?->user;
+                    $effectiveRole = $existingUser?->role ?? $prepared['role'];
+                    $targetDepartment = null;
+                    if ($effectiveRole === 'office_head') {
+                        $targetDepartment = Department::query()
+                            ->whereKey($prepared['employee']['department_id'])
+                            ->lockForUpdate()
+                            ->firstOrFail();
+                        if ($targetDepartment->head_user_id
+                            && (int) $targetDepartment->head_user_id !== (int) ($existingUser?->id ?? 0)) {
+                            $row->update([
+                                'status' => 'needs_review',
+                                'issues' => ['This department has another assigned Office Head. Resolve the assignment before importing.'],
+                            ]);
+
+                            return;
+                        }
+                    }
+                    $employeeData = $prepared['employee'];
+                    if (! $prepared['employment_status_from_source'] && $isExisting) {
+                        unset($employeeData['employment_status']);
+                    }
+                    if ($isExisting) {
+                        unset($employeeData['employee_no']);
+                        $employeeData = array_filter($employeeData, fn ($value) => $value !== null && $value !== '');
+                        $employee->update($employeeData);
+                        $employee->refresh();
+                    } else {
+                        if (! $employeeData['employee_no']) {
+                            $employeeData['employee_no'] = $this->generateInternalEmployeeNumber();
+                        }
+                        $employee = Employee::create($employeeData);
+                    }
+
+                    $user = $employee->user;
+                    $accountCreated = false;
+                    if (! $user) {
+                        if ($passwordHash === null) {
+                            $temporaryPassword = config('hris.employee_import.default_password');
+                            if (! is_string($temporaryPassword) || $temporaryPassword === '') {
+                                throw new \LogicException('The employee import default password is not configured.');
+                            }
+                            $passwordHash = Hash::make($temporaryPassword);
+                        }
+                        $user = User::create([
+                            'name' => $employee->full_name,
+                            'username' => $this->usernameGenerator->generateForNameParts(
+                                $employee->first_name,
+                                $employee->middle_name,
+                                $employee->last_name,
+                                $employee->suffix,
+                                $employee->employee_no
+                            ),
+                            'email' => $prepared['employee']['email'],
+                            'password' => $passwordHash,
+                            'must_change_password' => true,
+                            'account_setup_completed' => false,
+                            'role' => $prepared['role'],
+                            'is_active' => true,
+                            'can_final_approve' => false,
+                        ]);
+                        $employee->update(['user_id' => $user->id]);
+                        $accountCreated = true;
+                    } else {
+                        $user->update(['name' => $employee->full_name]);
+                    }
+
+                    if ($user->role === 'office_head') {
+                        if ($previousDepartmentId && (int) $previousDepartmentId !== (int) $employee->department_id) {
+                            Department::query()->whereKey($previousDepartmentId)
+                                ->where('head_user_id', $user->id)
+                                ->update(['head_user_id' => null]);
+                        }
+                        $targetDepartment?->update(['head_user_id' => $user->id]);
+                    }
+
+                    $prepared['profile']['employee_id'] = $employee->id;
+                    $prepared['profile']['employee_import_id'] = $lockedImport->id;
+                    $prepared['profile']['source_row'] = $row->source_row;
+                    if ($isExisting) {
+                        $profileData = array_filter($prepared['profile'], fn ($value) => $value !== null && $value !== '');
+                        EmployeeServiceProfile::updateOrCreate(
+                            ['employee_id' => $employee->id],
+                            $profileData
+                        );
+                    } else {
+                        EmployeeServiceProfile::create($prepared['profile']);
+                    }
+
+                    foreach ($prepared['history'] as $history) {
+                        $historyData = [
+                            ...$history,
+                            'employee_id' => $employee->id,
+                            'employee_import_id' => $lockedImport->id,
+                            'source_row' => $row->source_row,
+                        ];
+                        $existingHistory = $isExisting
+                            ? EmployeeEmploymentHistory::query()
+                                ->where('employee_id', $employee->id)
+                                ->where('sequence', $history['sequence'])
+                                ->first()
+                            : null;
+                        if ($existingHistory && ! $existingHistory->employee_import_id) {
+                            continue;
+                        }
+                        if ($existingHistory) {
+                            $existingHistory->update($historyData);
+                        } else {
+                            EmployeeEmploymentHistory::create($historyData);
+                        }
+                    }
+
+                    $resultData = array_replace($row->review_data ?? [], [
+                        'import_result' => [
+                            'action' => $isExisting ? 'updated' : 'created',
+                            'account_created' => $accountCreated,
+                        ],
                     ]);
+                    $row->update([
+                        'employee_id' => $employee->id,
+                        'review_data' => $resultData,
+                        'status' => $isExisting ? 'updated' : 'imported',
+                        'issues' => null,
+                    ]);
+                    if ($itemNumberKey !== '') {
+                        $itemOwnerToAdd = [$itemNumberKey, $employee->id];
+                    }
+                });
 
-                    continue;
+                if ($itemOwnerToAdd) {
+                    [$itemNumberKey, $employeeId] = $itemOwnerToAdd;
+                    $plantillaItemOwners[$itemNumberKey] = array_values(array_unique([
+                        ...($plantillaItemOwners[$itemNumberKey] ?? []),
+                        $employeeId,
+                    ]));
                 }
+            } catch (\Throwable $exception) {
+                report($exception);
+                EmployeeImportRow::query()
+                    ->whereKey($rowId)
+                    ->whereIn('status', ['ready', 'ready_to_update', 'pending_review'])
+                    ->update([
+                        'status' => 'failed',
+                        'issues' => ['This employee could not be saved because a database or account constraint rejected the row. No employee, account, profile, history, or import-row link was committed. Review the row and retry.'],
+                    ]);
             }
-            $employeeData = $prepared['employee'];
-            if (! $prepared['employment_status_from_source'] && $isExisting) {
-                unset($employeeData['employment_status']);
-            }
-            if ($isExisting) {
-                unset($employeeData['employee_no']);
-                $employeeData = array_filter($employeeData, fn ($value) => $value !== null && $value !== '');
-                $employee->update($employeeData);
-                $employee->refresh();
-            } else {
-                if (! $employeeData['employee_no']) {
-                    $employeeData['employee_no'] = $this->generateInternalEmployeeNumber();
-                }
-                $employee = Employee::create($employeeData);
-            }
-
-            $user = $employee->user;
-            $accountCreated = false;
-            if (! $user) {
-                $user = User::create([
-                    'name' => $employee->full_name,
-                    'username' => $this->usernameGenerator->generateForNameParts(
-                        $employee->first_name,
-                        $employee->middle_name,
-                        $employee->last_name,
-                        $employee->suffix,
-                        $employee->employee_no
-                    ),
-                    'email' => $prepared['employee']['email'],
-                    'password' => Str::random(64),
-                    'must_change_password' => true,
-                    'account_setup_completed' => false,
-                    'role' => $prepared['role'],
-                    'is_active' => true,
-                    'can_final_approve' => false,
-                ]);
-                $employee->update(['user_id' => $user->id]);
-                $accountCreated = true;
-            } else {
-                $user->update(['name' => $employee->full_name]);
-            }
-
-            if ($user->role === 'office_head') {
-                if ($previousDepartmentId && (int) $previousDepartmentId !== (int) $employee->department_id) {
-                    Department::query()->whereKey($previousDepartmentId)
-                        ->where('head_user_id', $user->id)
-                        ->update(['head_user_id' => null]);
-                }
-                $targetDepartment?->update(['head_user_id' => $user->id]);
-            }
-
-            $prepared['profile']['employee_id'] = $employee->id;
-            $prepared['profile']['employee_import_id'] = $lockedImport->id;
-            $prepared['profile']['source_row'] = $row->source_row;
-            if ($isExisting) {
-                $profileData = array_filter($prepared['profile'], fn ($value) => $value !== null && $value !== '');
-                EmployeeServiceProfile::updateOrCreate(
-                    ['employee_id' => $employee->id],
-                    $profileData
-                );
-            } else {
-                EmployeeServiceProfile::create($prepared['profile']);
-            }
-            if ($itemNumberKey !== '') {
-                $plantillaItemOwners[$itemNumberKey] = array_values(array_unique([
-                    ...$itemOwners,
-                    $employee->id,
-                ]));
-            }
-
-            foreach ($prepared['history'] as $history) {
-                $historyData = [
-                    ...$history,
-                    'employee_id' => $employee->id,
-                    'employee_import_id' => $lockedImport->id,
-                    'source_row' => $row->source_row,
-                ];
-                $existingHistory = $isExisting
-                    ? EmployeeEmploymentHistory::query()
-                        ->where('employee_id', $employee->id)
-                        ->where('sequence', $history['sequence'])
-                        ->first()
-                    : null;
-                if ($existingHistory && ! $existingHistory->employee_import_id) {
-                    continue;
-                }
-                if ($existingHistory) {
-                    $existingHistory->update($historyData);
-                } else {
-                    EmployeeEmploymentHistory::create($historyData);
-                }
-            }
-
-            $resultData = array_replace($row->review_data ?? [], [
-                'import_result' => [
-                    'action' => $isExisting ? 'updated' : 'created',
-                    'account_created' => $accountCreated,
-                ],
-            ]);
-            $row->update([
-                'employee_id' => $employee->id,
-                'review_data' => $resultData,
-                'status' => $isExisting ? 'updated' : 'imported',
-                'issues' => null,
-            ]);
         }
 
         $needsReview = $lockedImport->rows()->where('status', 'needs_review')->count();
+        $failed = $lockedImport->rows()->where('status', 'failed')->count();
         $skipped = $lockedImport->rows()->where('status', 'duplicate')->count();
+        $remaining = $lockedImport->rows()->whereIn('status', ['ready', 'ready_to_update', 'pending_review'])->exists();
+        $importedCount = $lockedImport->rows()->where('status', 'imported')->count();
+        $updatedCount = $lockedImport->rows()->where('status', 'updated')->count();
+        $accountsCreatedCount = $lockedImport->rows()->whereIn('status', ['imported', 'updated'])
+            ->get()
+            ->filter(fn (EmployeeImportRow $row) => $row->review_data['import_result']['account_created'] ?? false)
+            ->count();
         $lockedImport->update([
-            'status' => $needsReview ? 'completed_with_errors' : 'completed',
-            'confirmed_by' => $userId,
-            'confirmed_at' => now(),
-            'imported_count' => $lockedImport->rows()->where('status', 'imported')->count(),
-            'updated_count' => $lockedImport->rows()->where('status', 'updated')->count(),
-            'accounts_created_count' => $lockedImport->rows()->whereIn('status', ['imported', 'updated'])
-                ->get()
-                ->filter(fn (EmployeeImportRow $row) => $row->review_data['import_result']['account_created'] ?? false)
-                ->count(),
+            'status' => $remaining ? 'importing' : (($needsReview || $failed) ? 'completed_with_errors' : 'completed'),
+            'confirmed_by' => $remaining ? null : $userId,
+            'confirmed_at' => $remaining ? null : now(),
+            'imported_count' => $importedCount,
+            'updated_count' => $updatedCount,
+            'accounts_created_count' => $accountsCreatedCount,
             'skipped_count' => $skipped,
-            'review_count' => $needsReview,
+            'review_count' => $needsReview + $failed,
         ]);
 
         return $lockedImport->fresh();
@@ -1706,7 +1973,7 @@ class EmployeeWorkbookImportService
 
         DB::transaction(function () use ($import, $row, $correction, $userId) {
             $lockedImport = EmployeeImport::query()->lockForUpdate()->findOrFail($import->id);
-            if (! in_array($lockedImport->status, ['mapping_required', 'ready_for_import', 'completed_with_errors', 'failed', 'pending_review', 'mapping_approved', 'review_required'], true)) {
+            if (! in_array($lockedImport->status, ['mapping_required', 'ready_for_import', 'partially_ready', 'completed_with_errors', 'failed', 'pending_review', 'mapping_approved', 'review_required'], true)) {
                 throw ValidationException::withMessages(['row' => 'Rows can only be reviewed before the import is complete.']);
             }
             $lockedRow = EmployeeImportRow::query()
@@ -1774,8 +2041,13 @@ class EmployeeWorkbookImportService
         $mappingIssuesRemain = $freshRows->contains(
             fn (EmployeeImportRow $row) => $this->hasUnresolvedMappingIssues($row)
         );
+        $unresolvedRowsRemain = $freshRows->contains(
+            fn (EmployeeImportRow $row) => ! in_array($row->status, [
+                ...self::READY_ROW_STATUSES, 'duplicate', 'imported', 'updated',
+            ], true)
+        );
         $nextStatus = $readyCount > 0
-            ? 'ready_for_import'
+            ? ($unresolvedRowsRemain ? 'partially_ready' : 'ready_for_import')
             : ($mappingIssuesRemain ? 'mapping_required' : 'review_required');
 
         $import->update([
@@ -2433,12 +2705,20 @@ class EmployeeWorkbookImportService
             ]);
         }
 
-        Department::query()->lockForUpdate()->findOrFail($departmentId);
+        $department = Department::query()
+            ->where('is_active', true)
+            ->lockForUpdate()
+            ->find($departmentId);
+        if (! $department) {
+            throw ValidationException::withMessages([
+                "position_map.{$key}" => 'Select an existing active department before creating a position.',
+            ]);
+        }
         $normalizedSource = $this->normalizeMatchValue($sourceTitle);
         $normalizedTitle = $this->normalizeMatchValue($title);
         $matches = Position::query()->where(function ($query) use ($departmentId) {
             $query->where('department_id', $departmentId)->orWhereNull('department_id');
-        })->get()
+        })->lockForUpdate()->get()
             ->filter(fn (Position $position) => (
                 $this->normalizeMatchValue($position->title) === $normalizedSource
                 || $this->normalizeMatchValue($position->title) === $normalizedTitle
@@ -2452,6 +2732,13 @@ class EmployeeWorkbookImportService
         if ($existing = $matches->first()) {
             if (! $existing->is_active) {
                 throw ValidationException::withMessages(['position_map' => "The existing position \"{$sourceTitle}\" is inactive. Activate it or choose another position."]);
+            }
+            if ($salaryGrade !== ''
+                && trim((string) $existing->salary_grade) !== ''
+                && $this->normalizeMatchValue($salaryGrade) !== $this->normalizeMatchValue((string) $existing->salary_grade)) {
+                throw ValidationException::withMessages([
+                    'position_map' => "The matching position \"{$existing->title}\" already exists with salary grade {$existing->salary_grade}. Select that position to confirm it rather than creating a duplicate.",
+                ]);
             }
 
             return $existing;

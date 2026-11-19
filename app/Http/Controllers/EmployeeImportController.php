@@ -26,6 +26,8 @@ class EmployeeImportController extends Controller
                 ->withCount([
                     'rows as imported_rows_count' => fn ($query) => $query->where('status', 'imported'),
                     'rows as updated_rows_count' => fn ($query) => $query->where('status', 'updated'),
+                    'rows as ready_rows_count' => fn ($query) => $query->where('status', 'ready'),
+                    'rows as ready_updates_count' => fn ($query) => $query->where('status', 'ready_to_update'),
                     'rows as duplicate_rows_count' => fn ($query) => $query->where('status', 'duplicate'),
                     'rows as correction_rows_count' => fn ($query) => $query->where('status', 'needs_review'),
                     'rows as failed_rows_count' => fn ($query) => $query->where('status', 'failed'),
@@ -171,7 +173,7 @@ class EmployeeImportController extends Controller
             'departments' => $importer->officialDepartments(),
             'positions' => Position::with('department')->where('is_active', true)->orderBy('title')->get(),
             'canEditMappings' => in_array($employeeImport->status, [
-                'mapping_required', 'ready_for_import', 'completed_with_errors', 'failed',
+                'mapping_required', 'ready_for_import', 'partially_ready', 'completed_with_errors', 'failed',
                 'pending_review', 'mapping_approved', 'review_required',
             ], true),
             'rowStatus' => $rowStatus,
@@ -196,20 +198,31 @@ class EmployeeImportController extends Controller
             'new_departments.*.authorize' => ['nullable', 'boolean'],
             'position_map' => ['nullable', 'array'],
             'position_map.*' => ['nullable'],
+            'create_position' => ['nullable', 'array'],
+            'create_position.*' => ['nullable', 'boolean'],
             'new_positions' => ['nullable', 'array'],
             'new_positions.*.title' => ['nullable', 'string', 'max:150'],
             'new_positions.*.salary_grade' => ['nullable', 'string', 'max:10'],
         ]);
 
-        $importer->saveMapping($employeeImport, $data, $request->user()->id);
+        $mappingResult = $importer->saveMapping($employeeImport, $data, $request->user()->id);
         $employeeImport->refresh();
         $auditLogger->record('employee_import.mapping_approved', $employeeImport, [
             'office_source_column' => $employeeImport->field_mappings['office_source_column'],
             'department_mapping_count' => count($employeeImport->field_mappings['department_map']),
             'position_mapping_count' => count($employeeImport->field_mappings['position_map']),
+            'positions_created' => count($mappingResult['created_positions']),
+            'existing_positions_reused' => count($mappingResult['reused_positions']),
         ]);
 
-        return back()->with('success', 'Mappings saved and employee records validated. Valid records are ready to import; unresolved records can be corrected separately.');
+        $message = 'Mappings saved and employee records validated. Valid records are ready to import; unresolved records can be corrected separately.';
+        if ($mappingResult['created_positions']) {
+            $message = count($mappingResult['created_positions']).' new position(s) created and mapped. Affected employee records were revalidated. '.$message;
+        } elseif ($mappingResult['reused_positions']) {
+            $message = 'An equivalent existing position was selected instead of creating a duplicate. Affected employee records were revalidated. '.$message;
+        }
+
+        return back()->with('success', $message);
     }
 
     public function reviewRow(
@@ -255,20 +268,41 @@ class EmployeeImportController extends Controller
         AuditLogger $auditLogger
     ): RedirectResponse {
         $request->validate(['confirm_import' => ['required', 'accepted']]);
-        $completed = $importer->confirm($employeeImport, $request->user()->id);
-        $setupLinksSent = 0;
-        $setupLinksFailed = 0;
-        $activationPending = 0;
-        $accountRows = $completed->rows()->whereIn('status', ['imported', 'updated'])->get()
+        $terminal = in_array($employeeImport->status, ['completed', 'completed_with_errors'], true);
+        $hasPendingSetupLinks = $terminal && $employeeImport->rows()
+            ->whereIn('status', ['imported', 'updated'])
+            ->get(['review_data'])
+            ->contains(fn (EmployeeImportRow $row) => ($row->review_data['import_result']['account_created'] ?? false)
+                && empty($row->review_data['import_result']['setup_link_sent_at'])
+                && empty($row->review_data['import_result']['setup_link_status']));
+        $completed = $hasPendingSetupLinks
+            ? $employeeImport
+            : $importer->confirm($employeeImport, $request->user()->id);
+
+        $accountRows = $completed->rows()->whereIn('status', ['imported', 'updated'])->orderBy('id')
+            ->get(['id', 'employee_id', 'review_data'])
             ->filter(fn (EmployeeImportRow $row) => ($row->review_data['import_result']['account_created'] ?? false)
-                && empty($row->review_data['import_result']['setup_link_sent_at']));
+                && empty($row->review_data['import_result']['setup_link_sent_at'])
+                && empty($row->review_data['import_result']['setup_link_status']))
+            ->take(50);
         $accountRows->load('employee.user');
         foreach ($accountRows as $row) {
             if (! $row->employee?->user) {
+                report(new \RuntimeException("Imported account for employee import row {$row->id} could not be loaded."));
+                $row->update([
+                    'review_data' => array_replace_recursive($row->review_data, [
+                        'import_result' => ['setup_link_status' => 'failed'],
+                    ]),
+                ]);
+
                 continue;
             }
             if (! $row->employee->user->email) {
-                $activationPending++;
+                $row->update([
+                    'review_data' => array_replace_recursive($row->review_data, [
+                        'import_result' => ['setup_link_status' => 'email_missing'],
+                    ]),
+                ]);
 
                 continue;
             }
@@ -276,33 +310,60 @@ class EmployeeImportController extends Controller
                 $status = Password::sendResetLink(['email' => $row->employee->user->email]);
             } catch (TransportExceptionInterface $exception) {
                 report($exception);
-                $setupLinksFailed++;
+                $row->update([
+                    'review_data' => array_replace_recursive($row->review_data, [
+                        'import_result' => ['setup_link_status' => 'failed'],
+                    ]),
+                ]);
 
                 continue;
             }
             if ($status === PasswordBroker::RESET_LINK_SENT) {
                 $row->update([
                     'review_data' => array_replace_recursive($row->review_data, [
-                        'import_result' => ['setup_link_sent_at' => now()->toIso8601String()],
+                        'import_result' => [
+                            'setup_link_sent_at' => now()->toIso8601String(),
+                            'setup_link_status' => 'sent',
+                        ],
                     ]),
                 ]);
-                $setupLinksSent++;
             } else {
-                $setupLinksFailed++;
+                $row->update([
+                    'review_data' => array_replace_recursive($row->review_data, [
+                        'import_result' => ['setup_link_status' => 'failed'],
+                    ]),
+                ]);
             }
         }
+
+        $setupLinkStatuses = $completed->rows()->whereIn('status', ['imported', 'updated'])->get(['review_data'])
+            ->filter(fn (EmployeeImportRow $row) => $row->review_data['import_result']['account_created'] ?? false)
+            ->map(fn (EmployeeImportRow $row) => $row->review_data['import_result']['setup_link_status']
+                ?? (! empty($row->review_data['import_result']['setup_link_sent_at']) ? 'sent' : null));
+        $setupLinksSent = $setupLinkStatuses->filter(fn (?string $status) => $status === 'sent')->count();
+        $setupLinksFailed = $setupLinkStatuses->filter(fn (?string $status) => $status === 'failed')->count();
+        $activationPending = $setupLinkStatuses->filter(fn (?string $status) => $status === 'email_missing')->count();
+        $setupLinksPending = $setupLinkStatuses->filter(fn ($status) => $status === null)->count();
+
+        if ($completed->status === 'importing' || $setupLinksPending > 0) {
+            return redirect()->route('employee-imports.show', $completed)
+                ->with('success', "Import is continuing in safe batches. {$completed->imported_count} employee(s) have been imported so far.");
+        }
+
+        $failedCount = $completed->rows()->where('status', 'failed')->count();
         $auditLogger->record('employee_import.confirmed', $completed, [
             'imported' => $completed->imported_count,
             'updated' => $completed->updated_count,
             'accounts_created' => $completed->accounts_created_count,
             'skipped' => $completed->skipped_count,
-            'needs_review' => $completed->review_count,
+            'needs_review' => $completed->review_count - $failedCount,
+            'failed' => $failedCount,
             'account_setup_links_sent' => $setupLinksSent,
             'account_setup_links_failed' => $setupLinksFailed,
             'account_activation_pending' => $activationPending,
         ]);
 
-        $message = "Import finished: {$completed->imported_count} new employee(s), {$completed->updated_count} updated, {$completed->accounts_created_count} account(s) created, {$completed->skipped_count} duplicate(s) skipped, {$completed->review_count} record(s) requiring correction. {$setupLinksSent} setup link(s) sent; {$activationPending} account(s) need an email address before HR can send an activation link.";
+        $message = "Import finished: {$completed->imported_count} new employee(s), {$completed->updated_count} updated, {$completed->accounts_created_count} account(s) created, {$completed->skipped_count} duplicate(s) skipped, ".($completed->review_count - $failedCount)." record(s) requiring correction, {$failedCount} failed. {$setupLinksSent} setup link(s) sent; {$activationPending} account(s) need an email address before HR can send an activation link.";
         if ($setupLinksFailed > 0) {
             return redirect()->route('employee-imports.show', $completed)
                 ->with('warning', "{$message} {$setupLinksFailed} account(s) did not receive a setup link; retry password setup after checking the mail service.");

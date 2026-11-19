@@ -276,11 +276,14 @@
             <span class="row-date">#{{ $import->id }}</span>
             <span class="row-main"><b>{{ $import->original_name }}</b><small>{{ $import->row_count }} source rows · {{ $import->imported_count }} imported · {{ $import->review_count }} requiring correction</small></span>
             <span class="status-tag">{{ match ($import->status) {
-                                'mapping_required', 'pending_review' => 'Mapping Required',
-                                'ready_for_import', 'mapping_approved' => 'Ready for Import',
+                                'mapping_required' => $import->field_mappings ? 'Mapping Required' : 'Analyzed',
+                                'pending_review' => 'Analyzed',
+                                'ready_for_import', 'mapping_approved' => 'Ready for import',
+                                'partially_ready' => 'Partially ready',
                                 'importing' => 'Importing',
                                 'completed' => 'Completed',
-                                'completed_with_errors', 'review_required' => 'Completed with Errors',
+                                'completed_with_errors' => 'Completed with exceptions',
+                                'review_required' => 'Needs correction',
                                 'failed' => 'Failed',
                                 default => ucfirst(str_replace('_', ' ', $import->status)),
                             } }}</span>

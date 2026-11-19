@@ -2,6 +2,7 @@
 
 return [
     'employee_import' => [
+        'default_password' => env('EMPLOYEE_IMPORT_DEFAULT_PASSWORD'),
         'official_departments' => [
             ['name' => 'HRMO/PESO', 'code' => 'HRMO/PESO'],
             ['name' => 'MHO', 'code' => 'MHO'],
@@ -32,9 +33,13 @@ return [
             'MAYOR’S OFFICE (ECONOMIC ENTERPRISE)' => 'EEO',
             "MUNICIPAL ACCOUNTANT'S OFFICE" => 'OMA',
             'OFFICE OF MUNICIPAL ACCOUNTANT' => 'OMA',
+            'MUNICIPAL ACCOUNTING OFFICE' => 'OMA',
             'MUNICIPAL BUDGET OFFICE' => 'MBO',
+            'OFFICE OF THE MUNICIPAL BUDGET OFFICER' => 'MBO',
             "MUNICIPAL ASSESSOR'S OFFICE" => 'MASO',
             'MUNICIPAL AGRICULTURE OFFICE' => 'MAO',
+            'MUNICIPAL AGRICULTURAL OFFICE' => 'MAO',
+            'OFFICE OF THE MUNICIPAL AGRICULTURIST' => 'MAO',
             'GENERAL SERVICES OFFICE' => 'GSO',
             'MUNICIPAL SOCIAL WELFARE AND DEVELOPMENT OFFICE' => 'MSWDO',
             'MAYOR’S OFFICE (LOCAL DISASTER RISK REDUCTION MANAGEMENT)' => 'MDRRMO',
@@ -42,8 +47,12 @@ return [
             "MUNICIPAL PLANNING & DEVELOPMENT COORDINATOR'S OFFICE" => 'MPDO',
             'MUNICIPAL CIVIL REGISTRAR’S OFFICE' => 'MCRO',
             "MUNICIPAL CIVIL REGISTRAR'S OFFICE" => 'MCRO',
+            'OFFICE OF THE MUNICIPAL CIVIL REGISTRAR' => 'MCRO',
             'MUNICIPAL TREASURY OFFICE' => 'MTO',
+            'OFFICE OF THE MUNICIPAL TREASURER' => 'MTO',
             "MUNICIPAL ENGINEER'S OFFICE" => 'MEO',
+            'OFFICE OF THE MUNICIPAL ENGINEER' => 'MEO',
+            'MUNICIPAL PLANNING AND DEVELOPMENT OFFICE' => 'MPDO',
             'M.O / TOURISM OFFICE' => 'M.O/Tourism Office',
             'MUNICIPAL TOURISM OFFICE' => 'M.O/Tourism Office',
         ],

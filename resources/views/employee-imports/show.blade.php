@@ -20,17 +20,16 @@
                 ? 5
                 : (($summary['corrections'] || $summary['failed'] || $summary['possible_duplicates']) ? 4 : 5));
         $statusLabel = match($import->status) {
-            'mapping_required' => 'Mapping Incomplete',
-            'pending_review' => ($summary['awaiting_mapping'] || $summary['mapping_pending']) ? 'Mapping Incomplete' : 'Validation Required',
-            'ready_for_import', 'mapping_approved' => $summary['valid'] > 0 ? 'Ready for Import' : 'No Valid Records Ready',
+            'mapping_required' => $import->field_mappings ? 'Mapping required' : 'Analyzed',
+            'pending_review' => 'Analyzed',
+            'ready_for_import', 'mapping_approved' => $summary['valid'] > 0 ? 'Ready for import' : 'No valid records ready',
+            'partially_ready' => 'Partially ready',
             'importing' => 'Importing',
             'completed' => 'Completed',
-            'completed_with_errors' => 'Completed with Errors',
-            'review_required' => $summary['valid'] > 0
-                ? 'Ready for Import'
-                : (($summary['awaiting_mapping'] || $summary['mapping_pending'])
-                    ? 'Mapping Incomplete'
-                    : (($summary['corrections'] || $summary['failed']) ? 'Needs Attention' : 'No Valid Records Ready')),
+            'completed_with_errors' => 'Completed with exceptions',
+            'review_required' => $summary['corrections'] || $summary['failed']
+                ? 'Needs correction'
+                : (($summary['awaiting_mapping'] || $summary['mapping_pending']) ? 'Mapping required' : 'No valid records ready'),
             'failed' => 'Failed',
             default => ucfirst(str_replace('_', ' ', $import->status)),
         };
@@ -72,6 +71,14 @@
                 'label' => 'Positions awaiting confirmation',
                 'count' => $summary['position_confirmation_count'],
                 'detail' => 'Review the suggestions; similar titles are not selected automatically.',
+                'href' => '#position-mappings',
+            ];
+        }
+        if ($summary['ambiguous_position_count']) {
+            $attentionItems[] = [
+                'label' => 'Ambiguous position matches',
+                'count' => $summary['ambiguous_position_count'],
+                'detail' => 'Multiple HRIS positions or conflicting salary grades require a decision.',
                 'href' => '#position-mappings',
             ];
         }
@@ -168,7 +175,7 @@
         <div class="panel-heading">
             <div>
                 <h2>Step 2: Automatic analysis</h2>
-                <p>{{ $import->original_name }} · {{ $summary['total'] }} eligible employee row(s) on {{ $import->worksheet_name ?: 'the employee' }} worksheet (headers on row {{ $import->header_row ?: 1 }})</p>
+                <p>{{ $import->original_name }} · {{ $summary['total'] }} employee record(s) detected on {{ $import->worksheet_name ?: 'the employee' }} worksheet (headers on row {{ $import->header_row ?: 1 }})</p>
                 @if($import->worksheet_names)
                     <details class="top-space"><summary>{{ count($import->worksheet_names) }} worksheets recognized</summary><p>{{ implode(' · ', $import->worksheet_names) }}</p></details>
                 @endif
@@ -178,17 +185,17 @@
         <div class="import-summary-grid">
             <article class="import-summary-group">
                 <h3>Import Overview</h3>
-                <div class="summary-primary"><b>{{ $summary['valid'] }}</b><span>Ready to import</span></div>
-                <details>
-                    <summary>Record counts</summary>
-                    <ul class="summary-list">
-                        @if($summary['total'])<li>Total eligible records <b>{{ $summary['total'] }}</b></li>@endif
-                        @if($summary['new_records'])<li>New employees <b>{{ $summary['new_records'] }}</b></li>@endif
-                        @if($summary['existing_to_update'])<li>Existing employees to update <b>{{ $summary['existing_to_update'] }}</b></li>@endif
-                        @if($summary['awaiting_validation'])<li>Awaiting validation <b>{{ $summary['awaiting_validation'] }}</b></li>@endif
-                        @if(!$summary['total'])<li>No eligible employee records were detected.</li>@endif
-                    </ul>
-                </details>
+                <div class="summary-primary"><b>{{ $summary['importable'] }}</b><span>Total importable records</span></div>
+                <ul class="summary-list">
+                    <li>Total employee records <b>{{ $summary['total'] }}</b></li>
+                    <li>Valid new employees <b>{{ $summary['ready_new'] }}</b></li>
+                    <li>Existing employees to update <b>{{ $summary['ready_updates'] }}</b></li>
+                    <li>Accounts to create <b>{{ $summary['accounts_to_create'] }}</b></li>
+                    <li>Duplicates to skip <b>{{ $summary['duplicates'] }}</b></li>
+                    <li>Awaiting department mapping <b>{{ $summary['awaiting_department_mapping'] }}</b></li>
+                    <li>Awaiting position mapping <b>{{ $summary['awaiting_position_mapping'] }}</b></li>
+                    <li>Records needing correction <b>{{ $summary['corrections'] }}</b></li>
+                </ul>
             </article>
             <article class="import-summary-group">
                 <h3>Organizational Matching</h3>
@@ -205,6 +212,7 @@
                         @if($summary['department_confirmation_count'])<li>Departments needing confirmation <b>{{ $summary['department_confirmation_count'] }}</b></li>@endif
                         @if($summary['unmatched_position_count'])<li>Unmatched positions <b>{{ $summary['unmatched_position_count'] }}</b></li>@endif
                         @if($summary['position_confirmation_count'])<li>Positions needing confirmation <b>{{ $summary['position_confirmation_count'] }}</b></li>@endif
+                        @if($summary['ambiguous_position_count'])<li>Ambiguous position matches <b>{{ $summary['ambiguous_position_count'] }}</b></li>@endif
                         @if($summary['mapping_blocked_records'])<li>Employee records blocked by mappings <b>{{ $summary['mapping_blocked_records'] }}</b></li>@endif
                         @if($summary['position_reference_count'])<li>Titles listed in Positions reference <b>{{ $summary['reference_position_matches'] }} / {{ $summary['position_reference_count'] }}</b></li>@endif
                         @if(!$summary['departments'] && !$summary['positions_detected'])<li>Select an organizational unit column to analyze matches.</li>@endif
@@ -314,6 +322,11 @@
                                         @endif
                                         @if(isset($departmentMatch['confidence'])) · {{ $departmentMatch['confidence'] }}% confidence @endif
                                     </small>
+                                            @if(!empty($departmentMatch['affected_records']))
+                                                <details class="top-space"><summary>View {{ count($departmentMatch['affected_records']) }} affected employee record(s)</summary>
+                                                    <ul>@foreach($departmentMatch['affected_records'] as $record)<li>Row {{ $record['source_row'] }} — {{ $record['name'] }}</li>@endforeach</ul>
+                                                </details>
+                                            @endif
                                 </span>
                                 <label>
                                     <span class="sr-only">Department for {{ $office }}</span>
@@ -384,29 +397,44 @@
                                     : null;
                                 $positionSuggestions = $departmentWillBeCreated ? [] : ($mappingSummary['position_suggestions'][$key] ?? []);
                                 $positionMatch = $mappingSummary['position_matches'][$key] ?? [];
+                                $automaticReference = ($positionMatch['status'] ?? null) === 'Official Reference Match';
                                 $suggestedPositionIds = collect($positionSuggestions)->pluck('id')->all();
                                 $selectedPositionId = filter_var($selectedPosition, FILTER_VALIDATE_INT);
-                                if ($selectedPositionId && $selectedPositionId !== (int) ($positionMatch['position_id'] ?? 0)) {
+                                $hasConfirmedMatch = $selectedPositionId
+                                    && $selectedPositionId === (int) ($positionMatch['position_id'] ?? 0);
+                                if ($selectedPositionId && ! $hasConfirmedMatch) {
                                     $positionMatch['status'] = 'Needs HR Confirmation';
                                     $positionMatch['reason'] = 'The selected position differs from the automatic match; save to confirm this choice';
                                 }
+                                $showCreatePosition = ! $hasConfirmedMatch
+                                    && empty($positionMatch['has_exact_match'])
+                                    && ! $automaticReference;
                             @endphp
                             <div class="mapping-row">
                                 <span>
                                     <b>{{ $pair['position'] }}</b>
                                     <small>
                                         {{ $pair['office'] }} · {{ $positionMatch['status'] ?? 'Unmatched' }}
-                                        · Matched HRIS position: {{ $matchedPosition?->title ?? 'None' }}
+                                        · @if($automaticReference)
+                                            Official reference title to add: {{ $positionMatch['position_title'] }}
+                                        @else
+                                            Matched HRIS position: {{ $matchedPosition?->title ?? 'None' }}
+                                        @endif
                                         @if(!empty($positionMatch['reason'])) · {{ $positionMatch['reason'] }}@endif
                                         @if(isset($positionMatch['confidence'])) · {{ $positionMatch['confidence'] }}% confidence @endif
                                         @if($import->position_reference_count > 0) · {{ !empty($mappingSummary['reference_positions'][$key]) ? 'Listed on Positions worksheet' : 'Not found in Positions worksheet' }}@endif
                                         @if(count($pair['salary_grades'] ?? []) > 1) · Workbook has multiple salary grades: {{ implode(', ', $pair['salary_grades']) }}@endif
                                     </small>
+                                    @if(!empty($pair['affected_records']))
+                                        <details class="top-space"><summary>View {{ count($pair['affected_records']) }} affected employee record(s)</summary>
+                                            <ul>@foreach($pair['affected_records'] as $record)<li>Row {{ $record['source_row'] }} — {{ $record['name'] }}</li>@endforeach</ul>
+                                        </details>
+                                    @endif
                                 </span>
                                 <label>
                                     <span class="sr-only">Position for {{ $pair['position'] }} in {{ $pair['office'] }}</span>
                                     <select name="position_map[{{ $key }}]" onchange="document.getElementById('position-create-{{ $key }}')?.toggleAttribute('open', this.value === 'create')">
-                                    <option value="">Needs HR confirmation — no position selected</option>
+                                    <option value="">{{ $automaticReference ? 'Official reference title will be added when mappings are saved' : 'Needs HR confirmation — no position selected' }}</option>
                                     @if($positionSuggestions)
                                         <optgroup label="Possible matches — HR confirmation required">
                                             @foreach($positionSuggestions as $suggestion)
@@ -421,25 +449,28 @@
                                             <option value="{{ $position->id }}" @selected((string) $selectedPosition === (string) $position->id)>{{ $position->title }} — {{ $position->department?->name ?? 'Any department' }}</option>
                                         @endforeach
                                     </optgroup>
-                                    @if(empty($positionMatch['has_exact_match']) && ($import->position_reference_count === 0 || !empty($mappingSummary['reference_positions'][$key])))
+                                    @if($showCreatePosition)
                                         <option value="create" @selected($selectedPosition === 'create')>Create position “{{ $pair['position'] }}”</option>
                                     @endif
                                     </select>
                                 </label>
-                                @if(empty($positionMatch['has_exact_match']) && ($import->position_reference_count === 0 || !empty($mappingSummary['reference_positions'][$key])))
+                                @if($showCreatePosition && ($departmentId || $departmentWillBeCreated))
                                     <details id="position-create-{{ $key }}" class="mapping-create" @if($selectedPosition === 'create' || old("new_positions.{$key}.title") !== null) open @endif>
-                                        <summary>Create New Position</summary>
+                                        <summary>+ Create New Position</summary>
                                         <p class="muted">
-                                            Department: {{ $departmentWillBeCreated ? 'the new department above' : ($departments->firstWhere('id', $departmentId)?->name ?? 'select an existing department or create one above') }}.
+                                            Imported title: {{ $pair['position'] }} · Source department: {{ $pair['office'] }} · Department: {{ $departmentWillBeCreated ? 'the new department above' : ($departments->firstWhere('id', $departmentId)?->name ?? 'select an existing department above') }} · Affected employee records: {{ count($pair['affected_records'] ?? []) }}.
                                             Status: Active (required for this import). Plantilla item numbers and employment classifications remain on employee records; neither is a field on the current positions table. Remarks are not supported by the current positions schema.
                                         </p>
                                         <div class="form-grid top-space">
                                             <label>Position title<input name="new_positions[{{ $key }}][title]" maxlength="150" value="{{ old("new_positions.{$key}.title", $pair['position']) }}"></label>
                                             <label>Salary grade<input name="new_positions[{{ $key }}][salary_grade]" maxlength="10" value="{{ old("new_positions.{$key}.salary_grade", $pair['salary_grade'] ?? '') }}"></label>
                                         </div>
+                                        <button class="button button-secondary top-space" type="submit" name="create_position[{{ $key }}]" value="1">Create and map this position</button>
                                         @error("new_positions.{$key}.title")<small class="form-error">{{ $message }}</small>@enderror
                                         @error("new_positions.{$key}.salary_grade")<small class="form-error">{{ $message }}</small>@enderror
                                     </details>
+                                @elseif($showCreatePosition)
+                                    <p class="muted">Confirm a department mapping before creating this position.</p>
                                 @endif
                                 @error("position_map.{$key}")<small class="form-error">{{ $message }}</small>@enderror
                             </div>
@@ -574,10 +605,30 @@
             <div class="panel-heading">
                 <div>
                     <h2>Step 5: Final review and import</h2>
-                    <p>{{ $summary['ready_new'] }} new employee(s), {{ $summary['ready_updates'] }} existing employee(s) to update, {{ $summary['accounts_to_create'] }} account(s) to create, {{ $summary['duplicates'] }} duplicate(s) to skip, and {{ $summary['unresolved_records'] }} unresolved record(s).</p>
+                    <p>{{ $summary['total'] }} total employee record(s): {{ $summary['ready_new'] }} valid new employee(s), {{ $summary['ready_updates'] }} existing employee(s) to update, and {{ $summary['accounts_to_create'] }} account(s) to create. {{ $summary['duplicates'] }} duplicate(s) will be skipped; {{ $summary['unresolved_records'] }} unresolved record(s) will remain saved for review. {{ $summary['importable'] }} validated record(s) can be imported now.</p>
                 </div>
             </div>
-            @if($summary['valid'] > 0)
+            @if($import->status === 'importing' || $summary['pending_setup_links'] > 0)
+                <p class="success-note">
+                    @if($import->status === 'importing')
+                        This import is being processed in batches. {{ $summary['imported'] + $summary['updated'] }} of {{ $summary['total'] }} employee record(s) have been saved so far.
+                    @else
+                        Employee records are saved; account setup links are continuing in batches.
+                    @endif
+                    This workflow resumes automatically if this page is reloaded.
+                </p>
+                <form id="continue-employee-import" method="POST" action="{{ route('employee-imports.confirm', $import) }}" onsubmit="const button = this.querySelector('button'); button.disabled = true; button.textContent = 'Importing…';">
+                    @csrf
+                    <input type="hidden" name="confirm_import" value="1">
+                    <button class="button button-primary">{{ $import->status === 'importing' ? 'Continue import' : 'Continue account setup links' }}</button>
+                </form>
+                <script>
+                    document.addEventListener('DOMContentLoaded', () => {
+                        const form = document.getElementById('continue-employee-import');
+                        if (form) window.setTimeout(() => form.requestSubmit(), 250);
+                    });
+                </script>
+            @elseif($summary['valid'] > 0)
                 <form method="POST" action="{{ route('employee-imports.confirm', $import) }}" onsubmit="if (!confirm('Import {{ $summary['ready_new'] }} new employee(s), update {{ $summary['ready_updates'] }} existing employee(s), and create {{ $summary['accounts_to_create'] }} new account(s)? Unresolved rows and duplicates will not be imported.')) return false; const button = this.querySelector('button'); button.disabled = true; button.textContent = 'Importing…';">
                     @csrf
                     <input type="hidden" name="confirm_import" value="1">
