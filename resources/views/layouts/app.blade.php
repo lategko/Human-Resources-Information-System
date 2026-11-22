@@ -7,6 +7,7 @@
     <meta name="theme-color" content="#17324d">
     <link rel="icon" type="image/webp" href="{{ asset('image/hrislogo.webp') }}">
     <title>@yield('title', 'Dashboard') · Camalaniugan Municipal HRMO</title>
+    <script>document.documentElement.dataset.theme = localStorage.getItem('hris-theme') === 'dark' ? 'dark' : 'light';</script>
     @vite(['resources/css/app.css', 'resources/js/app.js'])
 </head>
 @php
@@ -21,9 +22,9 @@
         default => 'Municipal HRIS',
     };
 @endphp
-<body data-role-theme="{{ $roleTheme }}" x-data="{ sidebarOpen: false, profileOpen: false }">
-    <div class="app-shell">
-        <aside id="primary-navigation" class="sidebar" :class="{ 'sidebar-open': sidebarOpen }" aria-label="Primary navigation">
+<body data-role-theme="{{ $roleTheme }}" x-data="{ sidebarOpen: false, sidebarCollapsed: false, profileOpen: false, init() { const resetCollapsedSidebar = () => { if (window.matchMedia('(max-width: 1060px)').matches) this.sidebarCollapsed = false; }; resetCollapsedSidebar(); window.addEventListener('resize', resetCollapsedSidebar, { passive: true }); } }">
+    <div class="app-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
+        <aside id="primary-navigation" class="sidebar" :class="{ 'sidebar-open': sidebarOpen }" :inert="sidebarCollapsed" aria-label="Primary navigation">
             <a class="brand" href="{{ route('dashboard') }}" @click="sidebarOpen=false">
                 <img class="brand-logo" src="{{ asset('image/hrislogo.webp') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal" width="44" height="44" decoding="async">
                 <span><strong>Municipality of Camalaniugan</strong><small>Human Resource Management Office</small></span>
@@ -135,12 +136,20 @@
         <main class="main-area">
             <div class="role-theme-band" aria-hidden="true"></div>
             <header class="topbar">
+                <button class="sidebar-collapse-toggle" type="button" @click="sidebarCollapsed = !sidebarCollapsed" :aria-expanded="(!sidebarCollapsed).toString()" :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'" :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'">
+                    <i data-lucide="panel-left-close" aria-hidden="true"></i>
+                </button>
                 <button class="mobile-menu" type="button" @click="sidebarOpen = !sidebarOpen" :aria-expanded="sidebarOpen.toString()" aria-controls="primary-navigation" aria-label="Toggle navigation">
                     <i data-lucide="menu" aria-hidden="true"></i>
                 </button>
                 <div class="breadcrumbs"><span>Camalaniugan</span><i data-lucide="chevron-right" aria-hidden="true"></i><strong>@yield('title', 'Dashboard')</strong></div>
                 <div class="topbar-right">
                     <span class="topbar-date"><i data-lucide="calendar-days" aria-hidden="true"></i>{{ now()->format('D, M j, Y') }}</span>
+                    <button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false" aria-label="Switch to dark mode">
+                        <i class="theme-icon-moon" data-lucide="moon" aria-hidden="true"></i>
+                        <i class="theme-icon-sun" data-lucide="sun" aria-hidden="true"></i>
+                        <span>Dark mode</span>
+                    </button>
                     <a class="icon-button" href="{{ route('notifications.index') }}" aria-label="Notifications{{ $unreadCount ? ', '.$unreadCount.' unread' : '' }}">
                         <i data-lucide="bell" aria-hidden="true"></i>
                         @if($unreadCount)<span class="notification-count">{{ $unreadCount > 99 ? '99+' : $unreadCount }}</span>@endif

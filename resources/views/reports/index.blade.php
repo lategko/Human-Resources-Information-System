@@ -1,7 +1,7 @@
 @extends('layouts.app')
 @section('title', 'Reports')
 @section('content')
-    <div class="report-print-document">
+    <div class="report-print-document reports-page">
     <div class="page-heading"><div><span class="eyebrow">REPORTS & ANALYTICS</span><h1>Reports</h1><p>Filter attendance and leave activity within your authorized access scope.</p></div><button class="button button-outline" onclick="window.print()">Print this report</button></div>
     <header class="report-print-header">
         <img src="{{ asset('image/hrislogo.webp') }}" alt="Official Municipality of Camalaniugan Human Resource Management Office seal" width="84" height="84" decoding="async">

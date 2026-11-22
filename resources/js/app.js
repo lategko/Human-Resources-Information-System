@@ -2,11 +2,12 @@ import './bootstrap';
 import Alpine from 'alpinejs';
 import {
     createIcons, Activity, ArrowRight, ArrowUpDown, Bell, BriefcaseBusiness, Building2,
-    CalendarDays, ChartNoAxesCombined, ChartNoAxesColumnIncreasing, Check, ChevronDown,
-    ChevronRight, CircleAlert, CircleCheck, ClipboardCheck, Clock3, ContactRound, FileClock,
-    FilePlus2, Files, History, LayoutDashboard, ListChecks, ListFilter, LogOut, Menu,
-    ReceiptText, Search, Settings2, ShieldCheck, UserRound, UserRoundPlus, Users, UsersRound,
-    Wallet,
+    CalendarClock, CalendarDays, ChartNoAxesCombined, ChartNoAxesColumnIncreasing, Check,
+    ChevronDown, ChevronRight, CircleAlert, CircleCheck, CircleX, ClipboardCheck, Clock3,
+    ContactRound, CornerUpLeft, FileCheck2, FileClock, FilePlus2, FileSpreadsheet, Files, History,
+    KeyRound, Landmark, LayoutDashboard, ListChecks, ListFilter, LogOut, Menu, Moon, PanelLeftClose,
+    ReceiptText, Search, Settings2, ShieldCheck, Sun, UserRound, UserRoundCheck, UserRoundPen,
+    UserRoundPlus, UserRoundX, Users, UsersRound, Wallet,
 } from 'lucide';
 import Chart from 'chart.js/auto';
 
@@ -14,7 +15,26 @@ window.Alpine = Alpine;
 Chart.defaults.font.family = '"Inter Variable", Inter, "Segoe UI", Arial, sans-serif';
 Chart.defaults.font.size = 12;
 Chart.defaults.font.weight = 400;
-Chart.defaults.color = '#536678';
+
+window.applyHrisChartTheme = () => {
+    const isDark = document.documentElement.dataset.theme === 'dark';
+    const textColor = isDark ? '#cbd5e1' : '#536678';
+    const gridColor = isDark ? '#334155' : '#edf1f4';
+
+    Chart.defaults.color = textColor;
+    document.querySelectorAll('canvas').forEach((canvas) => {
+        const chart = Chart.getChart(canvas);
+        if (!chart) return;
+
+        Object.values(chart.options.scales ?? {}).forEach((scale) => {
+            if (scale.ticks) scale.ticks.color = textColor;
+            if (scale.grid && scale.grid.display !== false) scale.grid.color = gridColor;
+        });
+        chart.update('none');
+    });
+};
+
+window.applyHrisChartTheme();
 
 window.publicNavigation = () => ({
     menuOpen: false,
@@ -95,11 +115,33 @@ createIcons({
     icons: {
         Activity, ArrowRight, ArrowUpDown, Bell, BriefcaseBusiness, Building2, CalendarDays,
         ChartNoAxesCombined, ChartNoAxesColumnIncreasing, Check, ChevronDown, ChevronRight,
-        CircleAlert, CircleCheck, ClipboardCheck, Clock3, ContactRound, FileClock, FilePlus2,
-        Files, History, LayoutDashboard, ListChecks, ListFilter, LogOut, Menu, ReceiptText,
-        Search, Settings2, ShieldCheck, UserRound, UserRoundPlus, Users, UsersRound, Wallet,
+        CalendarClock, CircleAlert, CircleCheck, CircleX, ClipboardCheck, Clock3,
+        ContactRound, CornerUpLeft, FileCheck2, FileClock, FilePlus2, FileSpreadsheet, Files, History,
+        KeyRound, Landmark, LayoutDashboard, ListChecks, ListFilter, LogOut, Menu, Moon, PanelLeftClose,
+        ReceiptText, Search, Settings2, ShieldCheck, Sun, UserRound, UserRoundCheck, UserRoundPen,
+        UserRoundPlus, UserRoundX, Users, UsersRound, Wallet,
     },
 });
+
+const themeToggle = document.querySelector('[data-theme-toggle]');
+
+if (themeToggle) {
+    const updateThemeControl = () => {
+        const isDark = document.documentElement.dataset.theme === 'dark';
+        themeToggle.setAttribute('aria-pressed', String(isDark));
+        themeToggle.setAttribute('aria-label', isDark ? 'Switch to light mode' : 'Switch to dark mode');
+        themeToggle.querySelector('span').textContent = isDark ? 'Light mode' : 'Dark mode';
+    };
+
+    updateThemeControl();
+    themeToggle.addEventListener('click', () => {
+        const nextTheme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = nextTheme;
+        localStorage.setItem('hris-theme', nextTheme);
+        updateThemeControl();
+        window.applyHrisChartTheme();
+    });
+}
 
 window.leaveApplicationForm = (types, selectedId, workingDaysUrl) => ({
     types,
@@ -171,6 +213,7 @@ window.drawAttendanceChart = (data) => {
             scales: { y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: '#edf1f4' } }, x: { grid: { display: false } } },
         },
     });
+    window.applyHrisChartTheme();
 };
 
 window.drawLeaveChart = (data) => {
@@ -198,6 +241,7 @@ window.drawLeaveChart = (data) => {
             },
         },
     });
+    window.applyHrisChartTheme();
 };
 
 Alpine.start();

@@ -6,7 +6,7 @@
         <a class="button button-primary" href="{{ route('account.profile.edit') }}"><i data-lucide="user-round-pen" aria-hidden="true"></i> Edit profile</a>
     </div>
 
-    <div class="profile-layout account-profile-layout">
+    <div class="profile-layout account-profile-layout account-settings-layout">
         <section class="panel profile-card account-profile-card">
             @include('shared.avatar', ['user' => $user, 'size' => 'profile-photo-large'])
             <h2>{{ $user->employee?->full_name ?? $user->name }}</h2>

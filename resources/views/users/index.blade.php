@@ -3,11 +3,11 @@
 @section('content')
     <div class="page-heading"><div><span class="eyebrow">{{ auth()->user()->isAdministrator() ? 'SYSTEM ADMINISTRATION' : 'HR OPERATIONS' }}</span><h1>User accounts</h1><p>{{ auth()->user()->isAdministrator() ? 'Manage sign-in access, activation, and role assignments.' : 'Read-only account directory for HR operational review.' }}</p></div>@if(auth()->user()->isAdministrator())<a class="button button-primary" href="{{ route('users.create') }}">＋ Create user</a>@endif</div>
     @if(auth()->user()->isAdministrator())<div class="alert alert-info"><b>Security reminder.</b> Use unique strong passwords and disable accounts promptly when access is no longer authorized.</div>@endif
-    <form method="GET" action="{{ route('users.index') }}" class="panel form-panel top-space">
+    <form method="GET" action="{{ route('users.index') }}" class="panel form-panel account-search-panel top-space">
         <label>Search employee name, username, or employee number<input name="search" value="{{ $search }}" maxlength="100" placeholder="Search accounts and unlinked employees"></label>
         <div class="form-actions"><button class="button button-primary" type="submit">Search</button><a class="button button-outline" href="{{ route('users.index') }}">Clear</a></div>
     </form>
-    <section class="panel top-space"><div class="table-wrap"><table><thead><tr><th>USER / LOGIN</th><th>ROLE</th><th>DEPARTMENT / POSITION</th><th>ACCOUNT</th><th></th></tr></thead><tbody>
+    <section class="panel user-directory-panel top-space"><div class="table-wrap"><table><thead><tr><th>USER / LOGIN</th><th>ROLE</th><th>DEPARTMENT / POSITION</th><th>ACCOUNT</th><th></th></tr></thead><tbody>
         @forelse($users as $user)<tr>
             <td><b>{{ $user->employee?->full_name ?? $user->name }}</b><small class="table-sub">Username: {{ $user->username ?: 'Not set' }}</small><small class="table-sub">Email: {{ $user->email ?: 'Not registered' }} · {{ $user->hasVerifiedEmail() ? 'Verified' : 'Not verified' }}</small></td>
             <td>{{ $user->role === 'admin' && $user->can_final_approve ? 'ADMIN · DESIGNATED MAYOR-LEAVE APPROVER' : ($user->role === 'mayor' ? 'MAYOR · FINAL APPROVER' : str_replace('_',' ',ucfirst($user->role))) }}</td>

@@ -12,6 +12,7 @@
     @endif
 </div>
 
+<div class="role-dashboard role-dashboard-{{ $role }}">
 @if($role === 'employee')
 <div class="welcome-strip">
     <div>
@@ -466,4 +467,5 @@
 </div>
 @endif
 @endif
+</div>
 @endsection

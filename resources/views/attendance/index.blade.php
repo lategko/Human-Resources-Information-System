@@ -3,15 +3,15 @@
 @section('content')
     @php($scopeRecords = $records->getCollection())
     <div class="page-heading"><div><span class="eyebrow">TIME AND ATTENDANCE</span><h1>{{ auth()->user()->isEmployee() ? 'My attendance' : 'Attendance monitoring' }}</h1><p>Review timestamp records. Late/undertime calculations require approved municipal work schedules.</p></div></div>
-    <section class="panel">
-        <form class="filter-bar" method="GET"><label>Work date<input type="date" name="date" value="{{ request('date') }}"></label>
+    <section class="panel attendance-records-panel">
+        <form class="filter-bar attendance-filters" method="GET"><label>Work date<input type="date" name="date" value="{{ request('date') }}"></label>
             @if(!auth()->user()->isOfficeHead() && !auth()->user()->isEmployee())<select name="department_id"><option value="">All departments</option>@foreach($departments as $department)<option value="{{ $department->id }}" @selected(request('department_id') == $department->id)>{{ $department->name }}</option>@endforeach</select>@endif
             <label class="search-field"><span>⌕</span><input name="q" value="{{ request('q') }}" placeholder="Employee ID or last name"></label>
             <select name="status"><option value="">All attendance statuses</option>@foreach(['Present','Late','Absent','On Leave','On Approved Leave','Official Business','Half Day','Rest Day','Holiday'] as $status)<option @selected(request('status') === $status)>{{ $status }}</option>@endforeach</select>
             <button type="submit" class="button button-outline">Filter</button>
         </form>
         @if($scopeRecords->isNotEmpty())
-            <div class="attendance-summary"><div><small>RECORDS IN THIS PAGE</small><b>{{ $scopeRecords->count() }}</b></div><div><small>LATE MINUTES</small><b>{{ $scopeRecords->sum('late_minutes') }}</b></div><div><small>UNDERTIME MINUTES</small><b>{{ $scopeRecords->sum('undertime_minutes') }}</b></div><div><small>UNAPPROVED EXTRA MINUTES</small><b>{{ $scopeRecords->sum('unapproved_extra_minutes') }}</b></div><div><small>ABSENCES RECORDED</small><b>{{ $scopeRecords->where('status','Absent')->count() }}</b></div></div>
+            <div class="attendance-summary attendance-overview"><div><small>RECORDS IN THIS PAGE</small><b>{{ $scopeRecords->count() }}</b></div><div><small>LATE MINUTES</small><b>{{ $scopeRecords->sum('late_minutes') }}</b></div><div><small>UNDERTIME MINUTES</small><b>{{ $scopeRecords->sum('undertime_minutes') }}</b></div><div><small>UNAPPROVED EXTRA MINUTES</small><b>{{ $scopeRecords->sum('unapproved_extra_minutes') }}</b></div><div><small>ABSENCES RECORDED</small><b>{{ $scopeRecords->where('status','Absent')->count() }}</b></div></div>
         @endif
         <div class="table-wrap"><table><thead><tr>@if(!auth()->user()->isEmployee())<th>EMPLOYEE</th>@endif<th>DATE</th><th>TIME IN</th><th>TIME OUT</th><th>HOURS</th><th>LATE</th><th>UNDERTIME</th><th>STATUS</th>@if(auth()->user()->canManageHr() || auth()->user()->isAdministrator())<th>REVIEW</th>@endif</tr></thead><tbody>
         @forelse($records as $record)

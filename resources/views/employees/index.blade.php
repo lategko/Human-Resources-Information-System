@@ -10,8 +10,8 @@
     <div class="page-heading"><div><span class="eyebrow">EMPLOYEE DIRECTORY</span><h1>Employees</h1><p>Search and review employee records within your access scope.</p></div>
         @can('create', App\Models\Employee::class)<a class="button button-primary" href="{{ route('employees.create') }}"><i data-lucide="user-round-plus"></i> Add employee</a>@endcan
     </div>
-    <section class="panel">
-        <form class="filter-bar" method="GET">
+    <section class="panel employee-directory-panel">
+        <form class="filter-bar directory-filters" method="GET">
             <label class="search-field"><i data-lucide="search"></i><input type="search" name="q" value="{{ request('q') }}" placeholder="Search name or employee ID"></label>
             @if(!auth()->user()->isOfficeHead())
                 <select name="department_id" aria-label="Filter by department"><option value="">All departments</option>@foreach($departments as $department)<option value="{{ $department->id }}" @selected(request('department_id') == $department->id)>{{ $department->name }}</option>@endforeach</select>

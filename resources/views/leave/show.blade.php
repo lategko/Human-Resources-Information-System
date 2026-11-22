@@ -6,7 +6,7 @@
             @can('cancel', $application)<form method="POST" action="{{ route('leave.cancel', $application) }}" onsubmit="return confirm('Cancel this leave application? This cannot be undone.')">@csrf<button class="button button-danger" type="submit">Cancel request</button></form>@endcan
         </div>
     </div>
-    <div class="application-layout">
+    <div class="application-layout leave-application-layout">
         <div class="application-main">
             <section class="panel form-panel">
                 <div class="panel-heading"><div><h2>Application details</h2><p>Employee information snapshot captured when filed.</p></div></div>
