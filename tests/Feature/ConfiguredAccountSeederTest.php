@@ -17,10 +17,10 @@ class ConfiguredAccountSeederTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_all_four_configured_accounts_are_created_once_linked_and_can_log_in(): void
+    public function test_configured_accounts_are_created_once_linked_and_can_log_in(): void
     {
         $accounts = [];
-        foreach (['admin', 'mayor', 'office_head', 'employee'] as $role) {
+        foreach (['admin', 'mayor', 'employee'] as $role) {
             $accounts[$role] = $this->account("{$role}@example.test", $role);
         }
         Config::set('hris.initial_accounts', $accounts);
@@ -30,17 +30,12 @@ class ConfiguredAccountSeederTest extends TestCase
         $this->travel(2)->seconds();
         $this->seed(ConfiguredAccountSeeder::class);
 
-        $this->assertDatabaseCount('users', 4);
-        $this->assertDatabaseCount('employees', 4);
+        $this->assertDatabaseCount('users', 3);
+        $this->assertDatabaseCount('employees', 3);
         $this->assertSame($createdAt->toDateTimeString(), User::where('seed_key', 'admin')->firstOrFail()->updated_at->toDateTimeString());
-        $this->assertSame(
-            User::where('seed_key', 'office_head')->value('id'),
-            Department::findOrFail($accounts['office_head']['department_id'])->fresh()->head_user_id,
-        );
         foreach ([
             'admin' => 'Administration overview',
             'mayor' => 'Municipal executive overview',
-            'office_head' => 'Department overview',
             'employee' => 'My workspace',
         ] as $role => $dashboardHeading) {
             $user = User::where('seed_key', $role)->firstOrFail();
@@ -48,7 +43,7 @@ class ConfiguredAccountSeederTest extends TestCase
             $this->assertNotNull($user->employee);
             $this->assertSame($accounts[$role]['employee_no'], $user->employee->employee_no);
             $this->assertTrue(Hash::check('InitialPassword123!', $user->password));
-            $this->assertDatabaseCount('users', 4);
+            $this->assertDatabaseCount('users', 3);
 
             $this->post(route('login.store'), [
                 'email' => $user->email,
@@ -74,7 +69,7 @@ class ConfiguredAccountSeederTest extends TestCase
     public function test_database_seeder_runs_repeatedly_without_duplicate_users_or_employee_records(): void
     {
         $accounts = [];
-        foreach (['admin', 'mayor', 'office_head', 'employee'] as $role) {
+        foreach (['admin', 'mayor', 'employee'] as $role) {
             $accounts[$role] = $this->account("{$role}@example.test", $role);
         }
         Config::set('hris.initial_accounts', $accounts);
@@ -82,14 +77,14 @@ class ConfiguredAccountSeederTest extends TestCase
         $this->seed(DatabaseSeeder::class);
         $this->seed(DatabaseSeeder::class);
 
-        $this->assertDatabaseCount('users', 4);
-        $this->assertDatabaseCount('employees', 4);
+        $this->assertDatabaseCount('users', 3);
+        $this->assertDatabaseCount('employees', 3);
         $this->assertSame(
-            ['admin', 'employee', 'mayor', 'office_head'],
+            ['admin', 'employee', 'mayor'],
             User::query()->orderBy('role')->pluck('role')->all(),
         );
-        $this->assertSame(4, User::whereNotNull('seed_key')->count());
-        $this->assertSame(4, Employee::whereNotNull('user_id')->count());
+        $this->assertSame(3, User::whereNotNull('seed_key')->count());
+        $this->assertSame(3, Employee::whereNotNull('user_id')->count());
     }
 
     public function test_reseeding_preserves_existing_user_details_credentials_and_employee_id(): void
@@ -174,25 +169,20 @@ class ConfiguredAccountSeederTest extends TestCase
         }
     }
 
-    public function test_office_head_department_changes_synchronize_employee_and_department_assignments(): void
+    public function test_unverified_office_head_cannot_be_bootstrapped_from_configuration(): void
     {
-        $oldDepartment = Department::create(['name' => 'Old Office']);
-        $newDepartment = Department::create(['name' => 'New Office']);
         $account = $this->account('office-head@example.test', 'office_head');
-        $account['department_id'] = $oldDepartment->id;
         Config::set('hris.initial_accounts', ['office_head' => $account]);
-        $this->seed(ConfiguredAccountSeeder::class);
 
-        $user = User::where('seed_key', 'office_head')->firstOrFail();
-        $employeeId = $user->employee->id;
-        $account['department_id'] = $newDepartment->id;
-        Config::set('hris.initial_accounts', ['office_head' => $account]);
-        $this->seed(ConfiguredAccountSeeder::class);
+        try {
+            $this->seed(ConfiguredAccountSeeder::class);
+            $this->fail('Office Head accounts must be verified through employee records, not bootstrapped from configuration.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString("Unsupported initial account slot 'office_head'", $exception->getMessage());
+        }
 
-        $this->assertNull($oldDepartment->fresh()->head_user_id);
-        $this->assertSame($user->id, $newDepartment->fresh()->head_user_id);
-        $this->assertSame($employeeId, $user->fresh()->employee->id);
-        $this->assertSame($newDepartment->id, $user->fresh()->employee->department_id);
+        $this->assertDatabaseCount('users', 0);
+        $this->assertDatabaseCount('employees', 0);
     }
 
     public function test_invalid_department_ids_do_not_stop_seeding_and_leave_assignments_unresolved(): void
@@ -200,10 +190,6 @@ class ConfiguredAccountSeederTest extends TestCase
         Config::set('hris.initial_accounts', [
             'admin' => [
                 ...$this->account('admin@example.test', 'admin'),
-                'department_id' => 999,
-            ],
-            'office_head' => [
-                ...$this->account('office-head@example.test', 'office_head'),
                 'department_id' => 999,
             ],
             'employee' => [
@@ -214,17 +200,12 @@ class ConfiguredAccountSeederTest extends TestCase
 
         $this->seed(ConfiguredAccountSeeder::class);
 
-        $this->assertDatabaseCount('users', 3);
-        $this->assertDatabaseCount('employees', 3);
+        $this->assertDatabaseCount('users', 2);
+        $this->assertDatabaseCount('employees', 2);
         $this->assertDatabaseHas('employees', [
             'employee_no' => User::where('seed_key', 'admin')->firstOrFail()->employee->employee_no,
             'department_id' => null,
         ]);
-        $officeHead = User::where('seed_key', 'office_head')->firstOrFail();
-        $this->assertNotNull($officeHead->employee);
-        $this->assertNull($officeHead->employee->department_id);
-        $this->assertNull(Department::where('head_user_id', $officeHead->id)->first());
-
         $employeeUser = User::where('seed_key', 'employee')->firstOrFail();
         $this->actingAs($employeeUser)
             ->get(route('dashboard'))
@@ -236,42 +217,6 @@ class ConfiguredAccountSeederTest extends TestCase
         $this->get(route('leave.create'))
             ->assertOk()
             ->assertSee('Department not assigned');
-    }
-
-    public function test_updated_configuration_synchronizes_user_employee_and_office_head_department(): void
-    {
-        $oldDepartment = Department::create(['name' => 'Old Configured Office']);
-        $newDepartment = Department::create(['name' => 'New Configured Office']);
-        $account = $this->account('office-head@example.test', 'office_head');
-        $account['department_id'] = $oldDepartment->id;
-        Config::set('hris.initial_accounts', ['office_head' => $account]);
-        $this->seed(ConfiguredAccountSeeder::class);
-
-        $user = User::where('seed_key', 'office_head')->firstOrFail();
-        $userId = $user->id;
-        $employeeId = $user->employee->id;
-        $account['name'] = 'Updated Office Head Name';
-        $account['email'] = 'updated-office-head@example.test';
-        $account['password'] = 'UpdatedPassword456!';
-        $account['employee_no'] = 'OFFICE-HEAD-UPDATED';
-        $account['department_id'] = $newDepartment->id;
-        Config::set('hris.initial_accounts', ['office_head' => $account]);
-
-        $this->seed(ConfiguredAccountSeeder::class);
-        $this->seed(ConfiguredAccountSeeder::class);
-
-        $user->refresh();
-        $this->assertSame($userId, $user->id);
-        $this->assertSame('Updated Office Head Name', $user->name);
-        $this->assertSame('updated-office-head@example.test', $user->email);
-        $this->assertTrue(Hash::check('UpdatedPassword456!', $user->password));
-        $this->assertSame($employeeId, $user->employee->id);
-        $this->assertSame('OFFICE-HEAD-UPDATED', $user->employee->employee_no);
-        $this->assertSame($newDepartment->id, $user->employee->department_id);
-        $this->assertNull($oldDepartment->fresh()->head_user_id);
-        $this->assertSame($userId, $newDepartment->fresh()->head_user_id);
-        $this->assertSame(1, User::count());
-        $this->assertSame(1, Employee::count());
     }
 
     public function test_unconfigured_accounts_and_unrelated_employee_records_are_preserved(): void

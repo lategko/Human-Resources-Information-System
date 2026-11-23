@@ -257,7 +257,7 @@
                 </details>
             </article>
         </div>
-        <p class="info-note top-space">Email is optional during import. Each imported employee account uses the configured temporary password and must change it at first sign-in before accessing HRIS modules. Re-importing a linked employee also resets that account to the temporary password. HR sends a password setup link when an email is available. Protected Admin accounts are not changed. Only HR-approved Office Head designations receive that role.</p>
+        <p class="info-note top-space">Email is optional during import. New employee accounts use the configured temporary password and must change it at first sign-in before accessing HRIS modules. Re-importing an employee preserves the linked account's existing password, password-change status, and permissions. HR sends a password setup link when an email is available. Protected Admin accounts are not changed. Suggested Office Head and Mayor roles require explicit HR Admin review.</p>
     </section>
 
     @if($canEditMappings)
@@ -487,9 +487,12 @@
 
     <section class="panel" id="employee-corrections">
         <div class="panel-heading">
-        <div><h2>Step 4: Review employee records</h2><p>Valid rows do not need individual review. Use the filters to find corrections, possible duplicates, or specific source records.</p></div>
+        <div><h2>Step 4: Review employee records</h2><p>Use the filters to review role suggestions, corrections, possible duplicates, or specific source records before importing.</p></div>
         <a class="text-link" href="#needs-attention-title">Back to Needs Attention</a>
         </div>
+        @if($errors->has('role') || $errors->has('reason'))
+            <div class="warning-note">{{ $errors->first('role') ?: $errors->first('reason') }}</div>
+        @endif
         <form method="GET" action="{{ route('employee-imports.show', $import) }}" class="filter-bar import-row-filters">
             @if($selectedOfficeColumn)<input type="hidden" name="office_column" value="{{ $selectedOfficeColumn }}">@endif
             <label>Record status
@@ -501,6 +504,7 @@
                         'awaiting_mapping' => 'Awaiting department or position mapping',
                         'needs_review' => 'Needs correction',
                         'possible_duplicates' => 'Possible duplicate employees',
+                        'role_review' => 'Imported employee accounts',
                         'duplicate' => 'Duplicate records',
                         'failed' => 'Failed records',
                         'ready' => 'Ready to import',
@@ -518,9 +522,71 @@
             <button type="submit" class="button button-secondary">Filter records</button>
         </form>
         <p class="muted import-row-count">Showing {{ $rows->count() }} of {{ $rows->total() }} matching record(s) · {{ $summary['awaiting_validation'] }} awaiting validation · {{ $summary['corrections'] }} needing correction · {{ $summary['duplicates'] }} duplicates · {{ $summary['failed'] }} failed</p>
+        <div class="table-wrap employee-import-role-table-wrap">
+            <table class="employee-import-role-table">
+                <thead>
+                    <tr>
+                        <th>Employee Name</th>
+                        <th>Employee Number</th>
+                        <th>Position</th>
+                        <th>Department</th>
+                        <th>Suggested System Role</th>
+                        <th>Confirmed System Role</th>
+                        <th>Import Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @forelse($rows as $row)
+                        @php
+                            $roleState = $rowReviewStates[$row->id]['role'] ?? [];
+                            $roleLabels = ['admin' => 'HR Admin', 'office_head' => 'Office Head', 'mayor' => 'Mayor', 'employee' => 'Employee'];
+                            $suggestedRole = $roleState['suggested_role'] ?? 'employee';
+                            $confirmedRole = $roleState['confirmed_role'] ?? 'employee';
+                        @endphp
+                        <tr>
+                            <td><b>{{ implode(' ', array_filter($parsedNames[$row->id] ?? [])) ?: 'Name needs review' }}</b></td>
+                            <td>{{ $roleState['employee_number'] ?? 'Assigned on import' }}</td>
+                            <td>{{ $roleState['position'] ?? 'Position unresolved' }}</td>
+                            <td>{{ $roleState['department'] ?? 'Department unresolved' }}</td>
+                            <td><span class="role-badge role-badge-{{ $suggestedRole }}">{{ $roleLabels[$suggestedRole] ?? 'Employee' }}</span></td>
+                            <td>
+                                <span class="role-badge role-badge-{{ $confirmedRole }}">{{ $roleLabels[$confirmedRole] ?? 'Employee' }}</span>
+                                @if(isset($row->review_data['role_review']['confirmed_role']))<small class="role-review-note">HR Admin reviewed</small>@endif
+                                @if(!empty($roleState['role_conflict']))<p class="warning-note">{{ $roleState['role_conflict'] }}</p>@endif
+                                @if(in_array($row->status, ['imported', 'updated'], true) && $row->employee?->user && !$row->employee->user->isAdministrator())
+                                    <details class="top-space">
+                                        <summary>Review role</summary>
+                                        <form method="POST" action="{{ route('employee-imports.rows.role', [$import, $row]) }}" class="form-stack top-space">
+                                            @csrf
+                                            @method('PUT')
+                                            <label>Confirmed role
+                                                <select name="role" required>
+                                                    @foreach(['employee' => 'Employee', 'office_head' => 'Office Head', 'mayor' => 'Mayor'] as $value => $label)
+                                                        <option value="{{ $value }}" @selected($confirmedRole === $value)>{{ $label }}</option>
+                                                    @endforeach
+                                                </select>
+                                            </label>
+                                            <label>Reason for role decision
+                                                <textarea name="reason" rows="2" maxlength="1000" required>{{ old('reason') }}</textarea>
+                                            </label>
+                                            <button class="button button-secondary">Save role review</button>
+                                        </form>
+                                    </details>
+                                @endif
+                            </td>
+                            <td><span class="status-tag">{{ ucfirst(str_replace('_', ' ', $row->status)) }}</span></td>
+                        </tr>
+                    @empty
+                        <tr><td colspan="7" class="empty-note">No employee records match these filters.</td></tr>
+                    @endforelse
+                </tbody>
+            </table>
+        </div>
         @forelse($rows as $row)
             @php
                 $reviewState = $rowReviewStates[$row->id] ?? [];
+                $roleState = $reviewState['role'] ?? [];
+                $confirmedRole = $roleState['confirmed_role'] ?? 'employee';
             @endphp
             <article class="application-row" id="employee-row-{{ $row->id }}">
                 <span class="row-date">Row {{ $row->source_row }}</span>
@@ -558,6 +624,13 @@
                                 @csrf
                                 @method('PUT')
                                 <div class="form-grid">
+                                    <label>Confirmed role
+                                        <select name="role" required>
+                                            @foreach(['employee' => 'Employee', 'office_head' => 'Office Head', 'mayor' => 'Mayor'] as $value => $label)
+                                                <option value="{{ $value }}" @selected($confirmedRole === $value)>{{ $label }}</option>
+                                            @endforeach
+                                        </select>
+                                    </label>
                                     <label>First name *<input name="first_name" value="{{ $correctedName['first_name'] ?? $defaults['name']['first_name'] ?? '' }}" required></label>
                                     <label>Middle name<input name="middle_name" value="{{ $correctedName['middle_name'] ?? $defaults['name']['middle_name'] ?? '' }}"></label>
                                     <label>Last name *<input name="last_name" value="{{ $correctedName['last_name'] ?? $defaults['name']['last_name'] ?? '' }}" required></label>

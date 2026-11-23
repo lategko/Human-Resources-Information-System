@@ -61,15 +61,18 @@ class EmployeeImportController extends Controller
             'row_status' => ['nullable', Rule::in([
                 'all', 'needs_attention', 'needs_review', 'awaiting_mapping', 'duplicate', 'failed',
                 'awaiting_validation', 'ready', 'ready_to_update', 'imported', 'updated',
-                'possible_duplicates',
+                'possible_duplicates', 'role_review',
             ])],
             'row_search' => ['nullable', 'string', 'max:100'],
         ]);
         $rowStatus = $filters['row_status'] ?? 'needs_attention';
         $rowSearch = trim($filters['row_search'] ?? '');
         $rowQuery = $employeeImport->rows()->orderBy('source_row');
+        if ($rowStatus === 'role_review') {
+            $rowQuery->with('employee.user');
+        }
         $inMemoryFilter = $rowSearch !== '' || in_array($rowStatus, [
-            'possible_duplicates', 'awaiting_mapping', 'needs_review',
+            'possible_duplicates', 'awaiting_mapping', 'needs_review', 'role_review',
         ], true);
 
         if ($rowStatus === 'needs_attention') {
@@ -96,6 +99,14 @@ class EmployeeImportController extends Controller
                 $filteredRows = $filteredRows->filter(
                     fn (EmployeeImportRow $row) => $importer->needsEmployeeCorrection($row)
                 );
+            } elseif ($rowStatus === 'role_review') {
+                $filteredRows = $filteredRows->filter(function (EmployeeImportRow $row) {
+                    $user = $row->employee?->user;
+
+                    return in_array($row->status, ['imported', 'updated'], true)
+                        && $user
+                        && ! $user->isAdministrator();
+                });
             }
             if ($rowSearch !== '') {
                 $needle = mb_strtolower($rowSearch);
@@ -148,13 +159,14 @@ class EmployeeImportController extends Controller
         $correctionDefaults = $rows->getCollection()->mapWithKeys(fn ($row) => [
             $row->id => $importer->correctionDefaults($row),
         ]);
+        $rows->getCollection()->load(['reviewer', 'employee.user', 'employee.department', 'employee.position']);
         $rowReviewStates = $rows->getCollection()->mapWithKeys(fn (EmployeeImportRow $row) => [
             $row->id => [
                 'awaiting_mapping' => $importer->hasUnresolvedMappingIssues($row),
                 'needs_correction' => $importer->needsEmployeeCorrection($row),
+                'role' => $importer->roleReviewSummary($employeeImport, $row),
             ],
         ]);
-        $rows->getCollection()->load('reviewer');
 
         return view('employee-imports.show', [
             'import' => $employeeImport->load(['uploader', 'mappingApprover', 'previewer', 'confirmer', 'mappingEvents.changer']),
@@ -238,6 +250,7 @@ class EmployeeImportController extends Controller
             'last_name' => ['required', 'string', 'max:100'],
             'suffix' => ['nullable', 'string', 'max:20'],
             'employee_no' => ['nullable', 'string', 'max:255'],
+            'role' => ['nullable', Rule::in(['employee', 'office_head', 'mayor'])],
             'sex' => ['nullable', 'string', 'max:20'],
             'date_of_birth' => ['nullable', 'date', 'before:today'],
             'position_level' => ['nullable', 'string', 'max:255'],
@@ -252,6 +265,7 @@ class EmployeeImportController extends Controller
                 'employee_no', 'sex', 'date_of_birth', 'employment_type', 'email', 'confirm_distinct_employee',
             ])),
             'profile' => array_intersect_key($correction, array_flip(['position_level', 'source_classification'])),
+            'role' => $correction['role'] ?? null,
         ], $request->user()->id);
         $auditLogger->record('employee_import.row_reviewed', $employeeImportRow, [
             'source_row' => $employeeImportRow->source_row,
@@ -259,6 +273,27 @@ class EmployeeImportController extends Controller
         ]);
 
         return back()->with('success', "Source row {$employeeImportRow->source_row} corrections saved and validation refreshed.");
+    }
+
+    public function reviewImportedRole(
+        Request $request,
+        EmployeeImport $employeeImport,
+        EmployeeImportRow $employeeImportRow,
+        EmployeeWorkbookImportService $importer
+    ): RedirectResponse {
+        $review = $request->validate([
+            'role' => ['required', Rule::in(['employee', 'office_head', 'mayor'])],
+            'reason' => ['required', 'string', 'max:1000'],
+        ]);
+        $importer->reviewImportedEmployeeRole(
+            $employeeImport,
+            $employeeImportRow,
+            $review['role'],
+            trim($review['reason']),
+            $request->user()->id
+        );
+
+        return back()->with('success', "Role review saved for source row {$employeeImportRow->source_row}. Existing account credentials were preserved.");
     }
 
     public function confirm(

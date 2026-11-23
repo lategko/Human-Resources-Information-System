@@ -16,7 +16,6 @@ class ConfiguredAccountSeeder extends Seeder
     private const ROLES = [
         'admin' => 'admin',
         'mayor' => 'mayor',
-        'office_head' => 'office_head',
         'employee' => 'employee',
     ];
 

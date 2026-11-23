@@ -9,8 +9,8 @@ use App\Http\Controllers\Auth\EmailVerificationController;
 use App\Http\Controllers\Auth\NewPasswordController;
 use App\Http\Controllers\Auth\PasswordResetLinkController;
 use App\Http\Controllers\DashboardController;
-use App\Http\Controllers\DepartmentController;
 use App\Http\Controllers\DatabaseBackupController;
+use App\Http\Controllers\DepartmentController;
 use App\Http\Controllers\EmployeeController;
 use App\Http\Controllers\EmployeeImportController;
 use App\Http\Controllers\HolidayController;
@@ -114,6 +114,7 @@ Route::middleware(['auth', 'active', 'account.setup'])->group(function () {
         Route::get('/employee-imports/{employeeImport}', [EmployeeImportController::class, 'show'])->name('employee-imports.show');
         Route::put('/employee-imports/{employeeImport}/mapping', [EmployeeImportController::class, 'updateMapping'])->name('employee-imports.mapping');
         Route::put('/employee-imports/{employeeImport}/rows/{employeeImportRow}/review', [EmployeeImportController::class, 'reviewRow'])->name('employee-imports.rows.review');
+        Route::put('/employee-imports/{employeeImport}/rows/{employeeImportRow}/role', [EmployeeImportController::class, 'reviewImportedRole'])->name('employee-imports.rows.role');
         Route::post('/employee-imports/{employeeImport}/confirm', [EmployeeImportController::class, 'confirm'])->name('employee-imports.confirm');
         Route::get('/employee-imports/{employeeImport}/source', [EmployeeImportController::class, 'download'])->name('employee-imports.source');
         Route::post('/departments', [DepartmentController::class, 'store'])->name('departments.store');

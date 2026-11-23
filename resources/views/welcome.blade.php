@@ -60,7 +60,7 @@
         <section id="about" class="public-section public-about" aria-labelledby="about-title">
             <div class="public-section-inner public-about-layout">
                 <div class="public-about-photo">
-                    <img src="{{ asset('image/login.background.jpg') }}" alt="Municipal building of Camalaniugan, Cagayan" width="1195" height="800" loading="lazy" decoding="async">
+                    <img src="{{ asset('image/backgroundlanding.jpg') }}" alt="Municipal building of Camalaniugan, Cagayan" width="1195" height="800" loading="lazy" decoding="async">
                     <div class="public-photo-caption"><span>Municipality of Camalaniugan<small>Province of Cagayan, Philippines</small></span></div>
                 </div>
                 <div class="public-about-copy">

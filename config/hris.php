@@ -62,8 +62,10 @@ return [
             'BFP',
             'BUREAU OF FIRE PROTECTION',
         ],
-        // Only exact HR-confirmed titles grant the Office Head role.
-        'office_head_designations' => [],
+        // These explicit department/position pairs are the only title-based Office Head suggestions.
+        'office_head_designations' => [
+            ['department_code' => 'MTO', 'position_title' => 'Municipal Treasurer'],
+        ],
     ],
     'initial_accounts' => [
         'admin' => [
@@ -81,14 +83,6 @@ return [
             'role' => 'mayor',
             'employee_no' => env('HRIS_INITIAL_MAYOR_EMPLOYEE_NO'),
             'department_id' => env('HRIS_INITIAL_MAYOR_DEPARTMENT_ID'),
-        ],
-        'office_head' => [
-            'name' => env('HRIS_INITIAL_OFFICE_HEAD_NAME'),
-            'email' => env('HRIS_INITIAL_OFFICE_HEAD_EMAIL'),
-            'password' => env('HRIS_INITIAL_OFFICE_HEAD_PASSWORD'),
-            'role' => 'office_head',
-            'employee_no' => env('HRIS_INITIAL_OFFICE_HEAD_EMPLOYEE_NO'),
-            'department_id' => env('HRIS_INITIAL_OFFICE_HEAD_DEPARTMENT_ID'),
         ],
         'employee' => [
             'name' => env('HRIS_INITIAL_EMPLOYEE_NAME'),

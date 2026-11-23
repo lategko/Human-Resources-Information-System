@@ -6307,6 +6307,51 @@ body[data-role-theme] .button-primary {
     }
 }
 
+.employee-import-role-table {
+    min-width: 1080px;
+}
+
+.employee-import-role-table th,
+.employee-import-role-table td {
+    vertical-align: top;
+}
+
+.employee-import-role-table td small,
+.role-review-note {
+    display: block;
+    margin-top: 5px;
+}
+
+.role-badge {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.role-badge-admin {
+    background: #dbeafe;
+    color: #1e40af;
+}
+
+.role-badge-office_head {
+    background: #e0f2fe;
+    color: #075985;
+}
+
+.role-badge-mayor {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.role-badge-employee {
+    background: #f1f5f9;
+    color: #475569;
+}
+
 .workplace-assignment-panel {
     overflow: hidden;
 }

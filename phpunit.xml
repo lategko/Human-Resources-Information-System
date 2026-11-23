@@ -38,11 +38,6 @@
         <env name="HRIS_INITIAL_MAYOR_PASSWORD" value="" force="true"/>
         <env name="HRIS_INITIAL_MAYOR_EMPLOYEE_NO" value="" force="true"/>
         <env name="HRIS_INITIAL_MAYOR_DEPARTMENT_ID" value="" force="true"/>
-        <env name="HRIS_INITIAL_OFFICE_HEAD_NAME" value="" force="true"/>
-        <env name="HRIS_INITIAL_OFFICE_HEAD_EMAIL" value="" force="true"/>
-        <env name="HRIS_INITIAL_OFFICE_HEAD_PASSWORD" value="" force="true"/>
-        <env name="HRIS_INITIAL_OFFICE_HEAD_EMPLOYEE_NO" value="" force="true"/>
-        <env name="HRIS_INITIAL_OFFICE_HEAD_DEPARTMENT_ID" value="" force="true"/>
         <env name="HRIS_INITIAL_EMPLOYEE_NAME" value="" force="true"/>
         <env name="HRIS_INITIAL_EMPLOYEE_EMAIL" value="" force="true"/>
         <env name="HRIS_INITIAL_EMPLOYEE_PASSWORD" value="" force="true"/>

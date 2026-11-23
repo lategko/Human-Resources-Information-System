@@ -42,7 +42,8 @@ class EmployeeWorkbookImportService
 
     public function __construct(
         private readonly EmployeeUsernameGenerator $usernameGenerator,
-        private readonly EmployeeAssignmentHistoryRecorder $assignmentHistoryRecorder
+        private readonly EmployeeAssignmentHistoryRecorder $assignmentHistoryRecorder,
+        private readonly AuditLogger $auditLogger
     ) {}
 
     public function stage(UploadedFile $file, int $userId): EmployeeImport
@@ -1788,7 +1789,18 @@ class EmployeeWorkbookImportService
                         ? $this->assignmentHistoryRecorder->snapshot($employee)
                         : null;
                     $existingUser = $employee?->user;
-                    $effectiveRole = $existingUser?->role ?? $prepared['role'];
+                    $effectiveRole = $prepared['role'];
+                    if ($effectiveRole === 'mayor' && User::query()
+                        ->where('role', 'mayor')
+                        ->when($existingUser, fn ($query) => $query->where('id', '!=', $existingUser->id))
+                        ->exists()) {
+                        $row->update([
+                            'status' => 'needs_review',
+                            'issues' => ['A different Mayor account already exists. Reconcile the account identity before assigning this role.'],
+                        ]);
+
+                        return;
+                    }
                     $targetDepartment = null;
                     if ($effectiveRole === 'office_head') {
                         $targetDepartment = Department::query()
@@ -1834,13 +1846,14 @@ class EmployeeWorkbookImportService
 
                     $user = $employee->user;
                     $accountCreated = false;
-                    $temporaryPassword = config('hris.employee_import.default_password');
-                    if (! is_string($temporaryPassword) || $temporaryPassword === '') {
-                        throw new \LogicException('The employee import default password is not configured.');
-                    }
-                    $passwordHash = Hash::make($temporaryPassword);
+                    $previousRole = $user?->role;
 
                     if (! $user) {
+                        $temporaryPassword = config('hris.employee_import.default_password');
+                        if (! is_string($temporaryPassword) || $temporaryPassword === '') {
+                            throw new \LogicException('The employee import default password is not configured.');
+                        }
+
                         $user = User::create([
                             'name' => $employee->full_name,
                             'username' => $this->usernameGenerator->generateForNameParts(
@@ -1851,7 +1864,7 @@ class EmployeeWorkbookImportService
                                 $employee->employee_no
                             ),
                             'email' => $prepared['employee']['email'],
-                            'password' => $passwordHash,
+                            'password' => Hash::make($temporaryPassword),
                             'must_change_password' => true,
                             'account_setup_completed' => false,
                             'role' => $prepared['role'],
@@ -1861,14 +1874,13 @@ class EmployeeWorkbookImportService
                         $employee->update(['user_id' => $user->id]);
                         $accountCreated = true;
                     } else {
-                        $user->update([
-                            'name' => $employee->full_name,
-                            'password' => $passwordHash,
-                            'must_change_password' => true,
-                            'account_setup_completed' => false,
-                        ]);
+                        $user->update(['name' => $employee->full_name, 'role' => $effectiveRole]);
                     }
 
+                    if ($previousRole === 'office_head' && $user->role !== 'office_head') {
+                        Department::query()->where('head_user_id', $user->id)
+                            ->update(['head_user_id' => null]);
+                    }
                     if ($user->role === 'office_head') {
                         if ($previousDepartmentId && (int) $previousDepartmentId !== (int) $employee->department_id) {
                             Department::query()->whereKey($previousDepartmentId)
@@ -1876,6 +1888,26 @@ class EmployeeWorkbookImportService
                                 ->update(['head_user_id' => null]);
                         }
                         $targetDepartment?->update(['head_user_id' => $user->id]);
+                        $position = $employee->position;
+                        if ($position && ! $position->is_office_head_designation) {
+                            $position->update(['is_office_head_designation' => true]);
+                            $this->auditLogger->record('employee_import.office_head_designation_approved', $position, [
+                                'employee_id' => $employee->id,
+                                'department_id' => $employee->department_id,
+                                'employee_import_id' => $lockedImport->id,
+                                'administrator_id' => $userId,
+                            ]);
+                        }
+                    }
+                    if ($accountCreated || $previousRole !== $user->role) {
+                        $this->auditLogger->record('employee_import.role_changed', $user, [
+                            'previous_role' => $previousRole,
+                            'new_role' => $user->role,
+                            'employee_id' => $employee->id,
+                            'employee_import_id' => $lockedImport->id,
+                            'source_row' => $row->source_row,
+                            'administrator_id' => $userId,
+                        ]);
                     }
 
                     $prepared['profile']['employee_id'] = $employee->id;
@@ -1987,7 +2019,7 @@ class EmployeeWorkbookImportService
 
     public function saveRowReview(EmployeeImport $import, EmployeeImportRow $row, array $correction, int $userId): void
     {
-        if ($row->employee_import_id !== $import->id || $row->status === 'duplicate' || $row->status === 'imported') {
+        if ($row->employee_import_id !== $import->id || in_array($row->status, ['duplicate', 'imported', 'updated'], true)) {
             throw ValidationException::withMessages(['row' => 'This source row cannot be edited in its current state.']);
         }
 
@@ -2000,7 +2032,7 @@ class EmployeeWorkbookImportService
                 ->where('employee_import_id', $lockedImport->id)
                 ->lockForUpdate()
                 ->findOrFail($row->id);
-            if (in_array($lockedRow->status, ['duplicate', 'imported'], true)) {
+            if (in_array($lockedRow->status, ['duplicate', 'imported', 'updated'], true)) {
                 throw ValidationException::withMessages(['row' => 'This source row cannot be edited in its current state.']);
             }
             $lockedRow->update([
@@ -2008,6 +2040,13 @@ class EmployeeWorkbookImportService
                     'name' => $correction['name'] ?? null,
                     'employee' => array_filter($correction['employee'] ?? [], fn ($value) => $value !== null && $value !== ''),
                     'profile' => array_filter($correction['profile'] ?? [], fn ($value) => $value !== null && $value !== ''),
+                    'role_review' => isset($correction['role'])
+                        ? [
+                            'confirmed_role' => $correction['role'],
+                            'reviewed_by' => $userId,
+                            'reviewed_at' => now()->toIso8601String(),
+                        ]
+                        : null,
                 ], fn ($value) => $value !== null && $value !== [])),
                 'reviewed_by' => $userId,
                 'reviewed_at' => now(),
@@ -2017,6 +2056,136 @@ class EmployeeWorkbookImportService
             if ($lockedImport->field_mappings) {
                 $this->refreshPreview($lockedImport, $userId);
             }
+        });
+    }
+
+    public function roleReviewSummary(EmployeeImport $import, EmployeeImportRow $row): array
+    {
+        $row->loadMissing(['employee.user', 'employee.department', 'employee.position']);
+        $classification = $row->review_data['classification'] ?? [];
+        if (! $import->field_mappings) {
+            $role = $row->employee?->user?->role ?? $classification['role'] ?? 'employee';
+
+            return [
+                'employee_number' => $row->employee?->employee_no,
+                'position' => $row->employee?->position?->title ?? $classification['position'] ?? null,
+                'department' => $row->employee?->department?->name ?? $classification['department'] ?? null,
+                'suggested_role' => $classification['suggested_role'] ?? $role,
+                'confirmed_role' => $row->employee?->user?->role ?? $classification['confirmed_role'] ?? $role,
+                'role_conflict' => $classification['role_conflict'] ?? null,
+            ];
+        }
+
+        $prepared = $this->prepareEmployeeData($row, $import->field_mappings);
+
+        return [
+            'employee_number' => $prepared['employee']['employee_no'] ?: $row->employee?->employee_no,
+            'position' => $prepared['position_title'] ?: $row->employee?->position?->title,
+            'department' => $prepared['department_name'] ?: $row->employee?->department?->name,
+            'suggested_role' => $prepared['suggested_role'],
+            'confirmed_role' => $row->employee?->user?->role ?? $prepared['role'],
+            'role_conflict' => $prepared['role_conflict'],
+        ];
+    }
+
+    public function reviewImportedEmployeeRole(
+        EmployeeImport $import,
+        EmployeeImportRow $row,
+        string $role,
+        string $reason,
+        int $userId
+    ): void {
+        if (! in_array($role, ['employee', 'office_head', 'mayor'], true)) {
+            throw ValidationException::withMessages(['role' => 'Choose Employee, Office Head, or Mayor.']);
+        }
+        if ($row->employee_import_id !== $import->id || ! in_array($row->status, ['imported', 'updated'], true)) {
+            throw ValidationException::withMessages(['role' => 'Only imported employee accounts can be reviewed here.']);
+        }
+
+        DB::transaction(function () use ($import, $row, $role, $reason, $userId): void {
+            $lockedImport = EmployeeImport::query()->lockForUpdate()->findOrFail($import->id);
+            $lockedRow = EmployeeImportRow::query()
+                ->where('employee_import_id', $lockedImport->id)
+                ->whereIn('status', ['imported', 'updated'])
+                ->lockForUpdate()
+                ->findOrFail($row->id);
+            $employee = Employee::query()->withTrashed()->lockForUpdate()->findOrFail($lockedRow->employee_id);
+            if ($employee->trashed() || ! $employee->user_id) {
+                throw ValidationException::withMessages(['role' => 'This imported row is not linked to an active employee account.']);
+            }
+            $user = User::query()->lockForUpdate()->findOrFail($employee->user_id);
+            if ($user->isAdministrator()) {
+                throw ValidationException::withMessages(['role' => 'Protected Admin accounts cannot be changed through employee imports.']);
+            }
+            if ($role === 'mayor' && User::query()
+                ->where('role', 'mayor')
+                ->where('id', '!=', $user->id)
+                ->exists()) {
+                throw ValidationException::withMessages([
+                    'role' => 'A different active Mayor account exists. Preserve it and resolve the account identity before assigning this role.',
+                ]);
+            }
+
+            $department = null;
+            if ($role === 'office_head') {
+                if (! $employee->department_id) {
+                    throw ValidationException::withMessages(['role' => 'Assign the employee to a department before making them an Office Head.']);
+                }
+                $department = Department::query()->lockForUpdate()->findOrFail($employee->department_id);
+                if ($department->head_user_id && (int) $department->head_user_id !== (int) $user->id) {
+                    throw ValidationException::withMessages([
+                        'role' => 'This department already has an assigned Office Head. Resolve that assignment before changing roles.',
+                    ]);
+                }
+            }
+
+            $previousRole = $user->role;
+            if ($previousRole === 'office_head' && $role !== 'office_head') {
+                Department::query()->where('head_user_id', $user->id)->update(['head_user_id' => null]);
+            }
+            $user->role = $role;
+            $user->save();
+
+            if ($role === 'office_head') {
+                $department->update(['head_user_id' => $user->id]);
+                $position = $employee->position;
+                if ($position && ! $position->is_office_head_designation) {
+                    $position->update(['is_office_head_designation' => true]);
+                    $this->auditLogger->record('employee_import.office_head_designation_approved', $position, [
+                        'employee_id' => $employee->id,
+                        'department_id' => $department->id,
+                        'employee_import_id' => $lockedImport->id,
+                        'administrator_id' => $userId,
+                    ]);
+                }
+            }
+
+            $reviewData = $lockedRow->review_data ?? [];
+            $reviewData['role_review'] = [
+                'confirmed_role' => $role,
+                'reason' => $reason,
+                'reviewed_by' => $userId,
+                'reviewed_at' => now()->toIso8601String(),
+            ];
+            $reviewData['classification'] = array_replace($reviewData['classification'] ?? [], [
+                'role' => $role,
+                'confirmed_role' => $role,
+            ]);
+            $lockedRow->update(['review_data' => $reviewData]);
+
+            $this->auditLogger->record(
+                $previousRole === $role ? 'employee_import.role_reviewed' : 'employee_import.role_changed',
+                $user,
+                [
+                    'previous_role' => $previousRole,
+                    'new_role' => $role,
+                    'employee_id' => $employee->id,
+                    'employee_import_id' => $lockedImport->id,
+                    'source_row' => $lockedRow->source_row,
+                    'administrator_id' => $userId,
+                    'reason' => $reason,
+                ]
+            );
         });
     }
 
@@ -2044,11 +2213,14 @@ class EmployeeWorkbookImportService
                     'action' => $prepared['existing_employee_id'] ? 'update' : 'create',
                     'account_action' => $prepared['account_action'],
                     'role' => $prepared['role'],
+                    'suggested_role' => $prepared['suggested_role'],
+                    'confirmed_role' => $prepared['role'],
                     'department' => $prepared['department_name'],
                     'position' => $prepared['position_title'],
                     'possible_name_matches' => $prepared['possible_name_matches'],
                     'identity_type' => $prepared['identity_type'],
                     'plantilla_item_no' => $prepared['plantilla_item_no'],
+                    'role_conflict' => $prepared['role_conflict'],
                 ],
             ])]);
             $row->update([
@@ -2301,7 +2473,28 @@ class EmployeeWorkbookImportService
             $issues[] = 'Nature of appointment is missing or exceeds the supported length.';
         }
         $department = $departmentId ? Department::find($departmentId) : null;
-        $role = $linkedUser?->role ?? 'employee';
+        $position = $positionId ? Position::with('department')->find($positionId) : null;
+        $suggestedRole = $this->suggestedRole($positionValue, $officeValue, $position, $department);
+        $roleReview = $row->review_data['role_review'] ?? [];
+        $roleReviewed = isset($roleReview['confirmed_role']);
+        $role = $roleReviewed
+            ? $roleReview['confirmed_role']
+            : ($linkedUser?->role ?? 'employee');
+        $roleConflict = null;
+        $mayorRoleConflict = $suggestedRole === 'mayor' && User::query()->where('role', 'mayor')
+            ->when($linkedUser, fn ($query) => $query->where('id', '!=', $linkedUser->id))
+            ->exists();
+        if ($mayorRoleConflict && (! $roleReviewed || $role === 'mayor')) {
+            $roleConflict = 'A different Mayor account already exists. Preserve it and reconcile the official Mayor identity before assigning this role.';
+        }
+        if (! $roleReviewed && in_array($suggestedRole, ['office_head', 'mayor'], true)
+            && $role !== $suggestedRole) {
+            $roleLabel = $suggestedRole === 'office_head' ? 'Office Head' : 'Mayor';
+            $issues[] = "The suggested {$roleLabel} role requires explicit HR Admin review before import.";
+        }
+        if ($roleConflict) {
+            $issues[] = $roleConflict;
+        }
         if ($role === 'office_head' && $department?->head_user_id
             && (int) $department->head_user_id !== (int) ($linkedUser?->id ?? 0)) {
             $issues[] = 'This department already has an assigned Office Head; confirm the correct assignment before importing another.';
@@ -2354,6 +2547,8 @@ class EmployeeWorkbookImportService
             'account_action' => $linkedUser ? 'existing' : 'create',
             'department_name' => $department?->name,
             'position_title' => $positionValue,
+            'suggested_role' => $suggestedRole,
+            'role_conflict' => $roleConflict,
             'employee' => [
                 'department_id' => $departmentId,
                 'position_id' => $positionId,
@@ -2372,8 +2567,44 @@ class EmployeeWorkbookImportService
             'profile' => $profile,
             'history' => $history,
             'role' => $role,
+            'role_reviewed' => $roleReviewed,
             'employment_status_from_source' => $statusCell && trim((string) ($statusCell['display_value'] ?? '')) !== '',
         ];
+    }
+
+    private function suggestedRole(
+        string $positionTitle,
+        string $sourceOffice,
+        ?Position $position,
+        ?Department $department
+    ): string {
+        $mayorOffices = [
+            'MAYORSOFFICEEXECUTIVE',
+            'OFFICEOFTHEMUNICIPALMAYOR',
+            'OFFICEOFTHEMUNICIPALMAYOREXECUTIVE',
+            'MUNICIPALMAYORSOFFICE',
+        ];
+        if ($this->normalizeMatchValue($positionTitle) === 'MUNICIPALMAYOR'
+            && (in_array($this->normalizeMatchValue($sourceOffice), $mayorOffices, true)
+                || in_array($this->normalizeMatchValue((string) $department?->name), $mayorOffices, true))) {
+            return 'mayor';
+        }
+
+        if ($position?->is_office_head_designation) {
+            return 'office_head';
+        }
+
+        $departmentCode = $this->normalizeMatchValue((string) ($position?->department?->code ?? $department?->code));
+        $positionTitle = $this->normalizeMatchValue($positionTitle);
+        foreach (config('hris.employee_import.office_head_designations', []) as $designation) {
+            if (is_array($designation)
+                && $this->normalizeMatchValue((string) ($designation['position_title'] ?? '')) === $positionTitle
+                && $this->normalizeMatchValue((string) ($designation['department_code'] ?? '')) === $departmentCode) {
+                return 'office_head';
+            }
+        }
+
+        return 'employee';
     }
 
     private function employmentHistory(array $data, array &$issues): array
