@@ -14,7 +14,7 @@
             <h1>Choose a password</h1>
             <p>Use at least 12 characters. This link can only be used once and expires shortly.</p>
         </div>
-        @if($errors->any())<div class="alert alert-error" role="alert">{{ $errors->first() }}</div>@endif
+        @include('shared.flash-messages')
         <form method="POST" action="{{ route('password.update') }}" class="form-stack login-form">
             @csrf
             <input type="hidden" name="token" value="{{ $token }}">

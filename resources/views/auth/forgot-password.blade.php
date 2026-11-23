@@ -14,8 +14,7 @@
             <h1>Set up or reset password</h1>
             <p>Enter your registered email address. We will send a time-limited password setup link if an account matches.</p>
         </div>
-        @if(session('status'))<div class="alert alert-success" role="status">{{ session('status') }}</div>@endif
-        @if($errors->any())<div class="alert alert-error" role="alert">{{ $errors->first() }}</div>@endif
+        @include('shared.flash-messages')
         <form method="POST" action="{{ route('password.email') }}" class="form-stack login-form">
             @csrf
             <label for="email">Email address<input id="email" type="email" name="email" value="{{ old('email') }}" autocomplete="email" required autofocus></label>

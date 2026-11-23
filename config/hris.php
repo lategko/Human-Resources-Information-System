@@ -62,9 +62,12 @@ return [
             'BFP',
             'BUREAU OF FIRE PROTECTION',
         ],
-        // These explicit department/position pairs are the only title-based Office Head suggestions.
+        // Only these HR-verified department/position pairs may be inferred as Office Heads.
         'office_head_designations' => [
             ['department_code' => 'MTO', 'position_title' => 'Municipal Treasurer'],
+            ['department_code' => 'MHO', 'position_title' => 'Municipal Health Officer'],
+            ['department_code' => 'GSO', 'position_title' => 'General Services Officer'],
+            ['department_code' => 'MEO', 'position_title' => 'Municipal Engineer'],
         ],
     ],
     'initial_accounts' => [

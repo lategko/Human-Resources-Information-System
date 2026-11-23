@@ -10,9 +10,6 @@
         <a class="button button-secondary" href="{{ route('employee-imports.source', $import) }}">Download original workbook</a>
     </div>
 
-    @if (session('success'))<div class="success-note">{{ session('success') }}</div>@endif
-    @if (session('warning'))<div class="warning-note">{{ session('warning') }}</div>@endif
-
     @php
         $activeStep = !$import->field_mappings || $summary['awaiting_mapping']
             ? 3
@@ -72,6 +69,14 @@
                 'count' => $summary['position_confirmation_count'],
                 'detail' => 'Review the suggestions; similar titles are not selected automatically.',
                 'href' => '#position-mappings',
+            ];
+        }
+        if ($summary['awaiting_role_confirmation']) {
+            $attentionItems[] = [
+                'label' => 'Awaiting HR role confirmation',
+                'count' => $summary['awaiting_role_confirmation'],
+                'detail' => 'Verify the Municipal Mayor identity before assigning the protected Mayor role.',
+                'href' => request()->fullUrlWithQuery(['row_status' => 'needs_review', 'row_search' => null, 'page' => 1]).'#employee-corrections',
             ];
         }
         if ($summary['ambiguous_position_count']) {
@@ -194,6 +199,11 @@
                     <li>Duplicates to skip <b>{{ $summary['duplicates'] }}</b></li>
                     <li>Awaiting department mapping <b>{{ $summary['awaiting_department_mapping'] }}</b></li>
                     <li>Awaiting position mapping <b>{{ $summary['awaiting_position_mapping'] }}</b></li>
+                    @if($import->field_mappings)
+                        <li>Suggested Office Head roles <b>{{ $summary['office_heads'] }}</b></li>
+                        <li>Employee role candidates <b>{{ $summary['employees'] }}</b></li>
+                        <li>Awaiting HR role confirmation <b>{{ $summary['awaiting_role_confirmation'] }}</b></li>
+                    @endif
                     <li>Records needing correction <b>{{ $summary['corrections'] }}</b></li>
                 </ul>
             </article>
@@ -203,7 +213,7 @@
                     <div class="summary-line"><span>Departments matched</span><b>{{ $summary['matched_departments'] }} / {{ $summary['departments'] }}</b></div>
                 @endif
                 @if($summary['positions_detected'])
-                    <div class="summary-line"><span>Positions matched</span><b>{{ $summary['matched_positions'] }} / {{ $summary['positions_detected'] }}</b></div>
+                    <div class="summary-line"><span>Existing HRIS positions matched</span><b>{{ $summary['matched_positions'] }} / {{ $summary['positions_detected'] }}</b></div>
                 @endif
                 <details>
                     <summary>Matching details</summary>
@@ -214,7 +224,10 @@
                         @if($summary['position_confirmation_count'])<li>Positions needing confirmation <b>{{ $summary['position_confirmation_count'] }}</b></li>@endif
                         @if($summary['ambiguous_position_count'])<li>Ambiguous position matches <b>{{ $summary['ambiguous_position_count'] }}</b></li>@endif
                         @if($summary['mapping_blocked_records'])<li>Employee records blocked by mappings <b>{{ $summary['mapping_blocked_records'] }}</b></li>@endif
-                        @if($summary['position_reference_count'])<li>Titles listed in Positions reference <b>{{ $summary['reference_position_matches'] }} / {{ $summary['position_reference_count'] }}</b></li>@endif
+                        @if($summary['position_reference_count'])
+                            <li>Source position pairs with exact reference title <b>{{ $summary['reference_position_matches'] }} / {{ $summary['positions_detected'] }}</b></li>
+                            <li>Available titles in Positions reference <b>{{ $summary['position_reference_count'] }}</b></li>
+                        @endif
                         @if(!$summary['departments'] && !$summary['positions_detected'])<li>Select an organizational unit column to analyze matches.</li>@endif
                     </ul>
                 </details>
@@ -280,12 +293,9 @@
             </form>
 
             @if($selectedOfficeColumn)
-                <form method="POST" action="{{ route('employee-imports.mapping', $import) }}" class="form-stack top-space">
+                <form method="POST" action="{{ route('employee-imports.mapping', $import) }}" class="form-stack top-space" data-confirm-type="form" data-confirm-title="Save Organizational Mappings?" data-confirm-message="Save the department and position mappings, then revalidate the affected employee records?" data-confirm-text="Save Mappings">
                     @csrf
                     @method('PUT')
-                    @if($errors->any())
-                        <div class="warning-note"><ul>@foreach($errors->all() as $error)<li>{{ $error }}</li>@endforeach</ul></div>
-                    @endif
                     <input type="hidden" name="office_source_column" value="{{ $selectedOfficeColumn }}">
                     <input type="hidden" name="employment_status" value="{{ $import->field_mappings['employment_status'] ?? 'Active' }}">
 
@@ -398,6 +408,7 @@
                                 $positionSuggestions = $departmentWillBeCreated ? [] : ($mappingSummary['position_suggestions'][$key] ?? []);
                                 $positionMatch = $mappingSummary['position_matches'][$key] ?? [];
                                 $automaticReference = ($positionMatch['status'] ?? null) === 'Official Reference Match';
+                                $verifiedHeadDesignation = ($positionMatch['status'] ?? null) === 'Verified Office Head Designation';
                                 $suggestedPositionIds = collect($positionSuggestions)->pluck('id')->all();
                                 $selectedPositionId = filter_var($selectedPosition, FILTER_VALIDATE_INT);
                                 $hasConfirmedMatch = $selectedPositionId
@@ -415,8 +426,10 @@
                                     <b>{{ $pair['position'] }}</b>
                                     <small>
                                         {{ $pair['office'] }} · {{ $positionMatch['status'] ?? 'Unmatched' }}
-                                        · @if($automaticReference)
+                                        ·                                         @if($automaticReference)
                                             Official reference title to add: {{ $positionMatch['position_title'] }}
+                                        @elseif($verifiedHeadDesignation)
+                                            Verified Office Head designation: {{ $positionMatch['position_title'] ?? $matchedPosition?->title ?? $pair['position'] }}
                                         @else
                                             Matched HRIS position: {{ $matchedPosition?->title ?? 'None' }}
                                         @endif
@@ -434,7 +447,7 @@
                                 <label>
                                     <span class="sr-only">Position for {{ $pair['position'] }} in {{ $pair['office'] }}</span>
                                     <select name="position_map[{{ $key }}]" onchange="document.getElementById('position-create-{{ $key }}')?.toggleAttribute('open', this.value === 'create')">
-                                    <option value="">{{ $automaticReference ? 'Official reference title will be added when mappings are saved' : 'Needs HR confirmation — no position selected' }}</option>
+                                    <option value="">{{ $automaticReference ? 'Official reference title will be added when mappings are saved' : ($verifiedHeadDesignation ? 'Verified Office Head position will be department-specific' : 'Needs HR confirmation — no position selected') }}</option>
                                     @if($positionSuggestions)
                                         <optgroup label="Possible matches — HR confirmation required">
                                             @foreach($positionSuggestions as $suggestion)
@@ -465,7 +478,7 @@
                                             <label>Position title<input name="new_positions[{{ $key }}][title]" maxlength="150" value="{{ old("new_positions.{$key}.title", $pair['position']) }}"></label>
                                             <label>Salary grade<input name="new_positions[{{ $key }}][salary_grade]" maxlength="10" value="{{ old("new_positions.{$key}.salary_grade", $pair['salary_grade'] ?? '') }}"></label>
                                         </div>
-                                        <button class="button button-secondary top-space" type="submit" name="create_position[{{ $key }}]" value="1">Create and map this position</button>
+                                        <button class="button button-secondary top-space" type="submit" name="create_position[{{ $key }}]" value="1" data-confirm-type="warning" data-confirm-title="Create and Map Position?" data-confirm-message="Create the new position record and map the matching workbook position to it?" data-confirm-text="Create Position">Create and map this position</button>
                                         @error("new_positions.{$key}.title")<small class="form-error">{{ $message }}</small>@enderror
                                         @error("new_positions.{$key}.salary_grade")<small class="form-error">{{ $message }}</small>@enderror
                                     </details>
@@ -541,7 +554,8 @@
                             $roleState = $rowReviewStates[$row->id]['role'] ?? [];
                             $roleLabels = ['admin' => 'HR Admin', 'office_head' => 'Office Head', 'mayor' => 'Mayor', 'employee' => 'Employee'];
                             $suggestedRole = $roleState['suggested_role'] ?? 'employee';
-                            $confirmedRole = $roleState['confirmed_role'] ?? 'employee';
+                            $awaitingRoleConfirmation = !empty($roleState['awaiting_confirmation']);
+                            $confirmedRole = $roleState['confirmed_role'] ?? ($awaitingRoleConfirmation ? null : 'employee');
                         @endphp
                         <tr>
                             <td><b>{{ implode(' ', array_filter($parsedNames[$row->id] ?? [])) ?: 'Name needs review' }}</b></td>
@@ -550,13 +564,18 @@
                             <td>{{ $roleState['department'] ?? 'Department unresolved' }}</td>
                             <td><span class="role-badge role-badge-{{ $suggestedRole }}">{{ $roleLabels[$suggestedRole] ?? 'Employee' }}</span></td>
                             <td>
-                                <span class="role-badge role-badge-{{ $confirmedRole }}">{{ $roleLabels[$confirmedRole] ?? 'Employee' }}</span>
+                                @if($awaitingRoleConfirmation)
+                                    <span class="status-tag">Awaiting HR confirmation</span>
+                                    <small class="role-review-note">The existing Mayor account is protected and will not be replaced.</small>
+                                @else
+                                    <span class="role-badge role-badge-{{ $confirmedRole }}">{{ $roleLabels[$confirmedRole] ?? 'Employee' }}</span>
+                                @endif
                                 @if(isset($row->review_data['role_review']['confirmed_role']))<small class="role-review-note">HR Admin reviewed</small>@endif
                                 @if(!empty($roleState['role_conflict']))<p class="warning-note">{{ $roleState['role_conflict'] }}</p>@endif
                                 @if(in_array($row->status, ['imported', 'updated'], true) && $row->employee?->user && !$row->employee->user->isAdministrator())
                                     <details class="top-space">
                                         <summary>Review role</summary>
-                                        <form method="POST" action="{{ route('employee-imports.rows.role', [$import, $row]) }}" class="form-stack top-space">
+                                        <form method="POST" action="{{ route('employee-imports.rows.role', [$import, $row]) }}" class="form-stack top-space" data-confirm-type="warning" data-confirm-title="Confirm Employee Role?" data-confirm-message="Save the confirmed role for {{ $row->employee?->full_name ?? 'this employee' }}? Role changes affect application permissions." data-confirm-text="Confirm Role">
                                             @csrf
                                             @method('PUT')
                                             <label>Confirmed role
@@ -569,7 +588,7 @@
                                             <label>Reason for role decision
                                                 <textarea name="reason" rows="2" maxlength="1000" required>{{ old('reason') }}</textarea>
                                             </label>
-                                            <button class="button button-secondary">Save role review</button>
+                                            <button class="button button-secondary" data-loading-text="Saving…">Save role review</button>
                                         </form>
                                     </details>
                                 @endif
@@ -586,7 +605,8 @@
             @php
                 $reviewState = $rowReviewStates[$row->id] ?? [];
                 $roleState = $reviewState['role'] ?? [];
-                $confirmedRole = $roleState['confirmed_role'] ?? 'employee';
+                $awaitingRoleConfirmation = !empty($roleState['awaiting_confirmation']);
+                $confirmedRole = $roleState['confirmed_role'] ?? ($awaitingRoleConfirmation ? null : 'employee');
             @endphp
             <article class="application-row" id="employee-row-{{ $row->id }}">
                 <span class="row-date">Row {{ $row->source_row }}</span>
@@ -620,12 +640,15 @@
                         @endphp
                         <details class="top-space">
                             <summary>Correct employee details</summary>
-                            <form method="POST" action="{{ route('employee-imports.rows.review', [$import, $row]) }}" class="form-stack top-space">
+                            <form method="POST" action="{{ route('employee-imports.rows.review', [$import, $row]) }}" class="form-stack top-space" data-confirm-type="form" data-confirm-title="Save Employee Corrections?" data-confirm-message="Save these corrected employee details and revalidate the record before import?" data-confirm-text="Save Corrections">
                                 @csrf
                                 @method('PUT')
                                 <div class="form-grid">
                                     <label>Confirmed role
-                                        <select name="role" required>
+                                        <select name="role">
+                                            @if($awaitingRoleConfirmation)
+                                                <option value="" selected>Awaiting HR confirmation — leave blank to defer</option>
+                                            @endif
                                             @foreach(['employee' => 'Employee', 'office_head' => 'Office Head', 'mayor' => 'Mayor'] as $value => $label)
                                                 <option value="{{ $value }}" @selected($confirmedRole === $value)>{{ $label }}</option>
                                             @endforeach
@@ -647,7 +670,7 @@
                                     <p class="warning-note">Possible existing name matches: {{ collect($row->review_data['classification']['possible_name_matches'])->pluck('full_name')->implode(', ') }}.</p>
                                     <label class="checkbox-label"><input type="checkbox" name="confirm_distinct_employee" value="1" @checked(!empty($correctedEmployee['confirm_distinct_employee']))> I confirm this is a different person from the possible match(es).</label>
                                 @endif
-                                <button class="button button-secondary">Save corrections and revalidate</button>
+                                <button class="button button-secondary" data-loading-text="Saving…">Save corrections and revalidate</button>
                             </form>
                         </details>
                     @endif
@@ -690,7 +713,7 @@
                     @endif
                     This workflow resumes automatically if this page is reloaded.
                 </p>
-                <form id="continue-employee-import" method="POST" action="{{ route('employee-imports.confirm', $import) }}" onsubmit="const button = this.querySelector('button'); button.disabled = true; button.textContent = 'Importing…';">
+                <form id="continue-employee-import" method="POST" action="{{ route('employee-imports.confirm', $import) }}">
                     @csrf
                     <input type="hidden" name="confirm_import" value="1">
                     <button class="button button-primary">{{ $import->status === 'importing' ? 'Continue import' : 'Continue account setup links' }}</button>
@@ -702,16 +725,24 @@
                     });
                 </script>
             @elseif($summary['valid'] > 0)
-                <form method="POST" action="{{ route('employee-imports.confirm', $import) }}" onsubmit="if (!confirm('Import {{ $summary['ready_new'] }} new employee(s), update {{ $summary['ready_updates'] }} existing employee(s), and create {{ $summary['accounts_to_create'] }} new account(s)? Unresolved rows and duplicates will not be imported.')) return false; const button = this.querySelector('button'); button.disabled = true; button.textContent = 'Importing…';">
+                <form method="POST" action="{{ route('employee-imports.confirm', $import) }}"
+                    data-confirm-type="import"
+                    data-confirm-title="Confirm Employee Import?"
+                    data-confirm-message="You are about to import {{ $summary['ready_new'] }} new employee record(s), update {{ $summary['ready_updates'] }} existing record(s), and create {{ $summary['accounts_to_create'] }} account(s). Unresolved records and duplicates will not be imported."
+                    data-confirm-text="Confirm Import">
                     @csrf
                     <input type="hidden" name="confirm_import" value="1">
-                    <button class="button button-primary">Confirm and import ready records</button>
+                    <button class="button button-primary" data-loading-text="Importing…">Confirm and import ready records</button>
                 </form>
             @elseif($summary['duplicates'] > 0 && $summary['corrections'] === 0 && $summary['failed'] === 0)
-                <form method="POST" action="{{ route('employee-imports.confirm', $import) }}" onsubmit="if (!confirm('Finish this batch without importing any records? All detected records are duplicates.')) return false; const button = this.querySelector('button'); button.disabled = true; button.textContent = 'Finishing batch…';">
+                <form method="POST" action="{{ route('employee-imports.confirm', $import) }}"
+                    data-confirm-type="import"
+                    data-confirm-title="Finish Import Batch?"
+                    data-confirm-message="No new employee records will be imported because all detected records are duplicates. Confirm to finish this batch."
+                    data-confirm-text="Finish Batch">
                     @csrf
                     <input type="hidden" name="confirm_import" value="1">
-                    <button class="button button-secondary">Finish batch and skip duplicates</button>
+                    <button class="button button-secondary" data-loading-text="Finishing batch…">Finish batch and skip duplicates</button>
                 </form>
             @elseif($summary['awaiting_validation'] > 0)
                 <p class="empty-note">Save the organizational mappings to validate employee records before importing.</p>

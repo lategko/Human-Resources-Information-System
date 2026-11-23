@@ -85,7 +85,7 @@ class EmployeeWorkbookImportTest extends TestCase
             ->assertSee('Column H — OFFICE')
             ->assertSee('Column S — OFFICE')
             ->assertSee('Office H source')
-            ->assertSee('Unmatched');
+            ->assertSee('Needs HR Confirmation');
         $this->actingAs($hrmo)->get(route('employee-imports.show', [$import, 'office_column' => 8]))
             ->assertOk()
             ->assertSee('name="office_source_column" value="8"', false)
@@ -551,7 +551,7 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame(1, $import->skipped_count);
     }
 
-    public function test_office_head_designation_is_suggested_and_requires_hr_confirmation(): void
+    public function test_verified_office_head_designation_is_assigned_automatically(): void
     {
         $department = $this->officialDepartment();
         Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
@@ -565,18 +565,9 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->putMapping($import, ['office_source_column' => 8])->assertRedirect();
         $import->refresh();
         $row = $import->rows()->firstOrFail();
-        $this->assertSame('needs_review', $row->status);
-        $this->assertSame('employee', $row->review_data['classification']['role']);
+        $this->assertSame('ready', $row->status);
+        $this->assertSame('office_head', $row->review_data['classification']['role']);
         $this->assertSame('office_head', $row->review_data['classification']['suggested_role']);
-
-        $this->actingAs(User::where('role', 'admin')->firstOrFail())
-            ->put(route('employee-imports.rows.review', [$import, $row]), [
-                'first_name' => 'Test',
-                'last_name' => 'Person',
-                'role' => 'office_head',
-            ])
-            ->assertRedirect()
-            ->assertSessionHasNoErrors();
 
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
@@ -607,19 +598,10 @@ class EmployeeWorkbookImportTest extends TestCase
         ])->assertRedirect();
 
         $row = $import->rows()->firstOrFail();
-        $this->assertSame('needs_review', $row->status);
+        $this->assertSame('ready', $row->status);
         $this->assertSame('office_head', $row->review_data['classification']['suggested_role']);
-        $this->assertSame('employee', $row->review_data['classification']['role']);
+        $this->assertSame('office_head', $row->review_data['classification']['role']);
 
-        $this->actingAs(User::where('role', 'admin')->firstOrFail())
-            ->put(route('employee-imports.rows.review', [$import, $row]), [
-                'first_name' => 'Lourdes',
-                'middle_name' => 'Unciano',
-                'last_name' => 'Cepeda',
-                'role' => 'office_head',
-            ])
-            ->assertRedirect()
-            ->assertSessionHasNoErrors();
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
             ->assertRedirect();
@@ -627,6 +609,84 @@ class EmployeeWorkbookImportTest extends TestCase
         $employee = Employee::where('first_name', 'Lourdes')->firstOrFail();
         $this->assertSame('office_head', $employee->user->role);
         $this->assertSame($employee->user->id, $department->fresh()->head_user_id);
+    }
+
+    public function test_verified_department_head_designations_get_independent_department_scoped_assignments(): void
+    {
+        $records = [
+            ['code' => 'MTO', 'employee_no' => 'IMP-HEAD-1', 'name' => 'Lourdes Unciano Cepeda', 'position' => 'Municipal Treasurer'],
+            ['code' => 'MHO', 'employee_no' => 'IMP-HEAD-2', 'name' => 'MHO Head Test', 'position' => 'Municipal Health Officer'],
+            ['code' => 'GSO', 'employee_no' => 'IMP-HEAD-3', 'name' => 'GSO Head Test', 'position' => 'General Services Officer'],
+            ['code' => 'MEO', 'employee_no' => 'IMP-HEAD-4', 'name' => 'MEO Head Test', 'position' => 'Municipal Engineer'],
+        ];
+        $departments = Department::query()->whereIn('code', collect($records)->pluck('code'))->get()->keyBy('code');
+        $this->assertCount(4, $departments);
+        $globalEngineerPosition = Position::create(['title' => 'Municipal Engineer']);
+        $departmentMap = collect($records)->mapWithKeys(
+            fn (array $record) => [hash('sha256', $record['code']) => $departments[$record['code']]->id]
+        )->all();
+        $extraRows = collect(array_slice($records, 1))->map(fn (array $record) => [
+            0 => $record['employee_no'],
+            1 => $record['name'],
+            7 => $record['code'],
+            8 => $record['position'],
+        ])->all();
+        $import = $this->stage($this->workbookUpload(
+            name: $records[0]['name'],
+            overrides: [
+                0 => $records[0]['employee_no'],
+                7 => $records[0]['code'],
+                8 => $records[0]['position'],
+            ],
+            extraRows: $extraRows
+        ));
+        $mayorAccountsBefore = User::query()->where('role', 'mayor')->count();
+        $mayorBefore = User::query()->where('role', 'mayor')->first();
+        $mayorSnapshot = $mayorBefore?->only(['name', 'username', 'email', 'password', 'role', 'can_final_approve']);
+
+        Notification::fake();
+        $this->putMapping($import, [
+            'office_source_column' => 8,
+            'department_map' => $departmentMap,
+        ])->assertRedirect();
+
+        $rows = $import->refresh()->rows()->orderBy('source_row')->get();
+        $this->assertCount(4, $rows);
+        foreach ($rows as $row) {
+            $this->assertSame('ready', $row->status);
+            $this->assertSame('office_head', $row->review_data['classification']['suggested_role']);
+        }
+        $summary = app(EmployeeWorkbookImportService::class)->importSummary($import, 8);
+        $this->assertSame(4, $summary['office_heads']);
+        $this->assertSame(0, $summary['employees']);
+        $this->assertSame(0, $summary['awaiting_role_confirmation']);
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
+            ->assertRedirect();
+
+        $headUserIds = [];
+        foreach ($records as $record) {
+            $department = $departments[$record['code']]->fresh();
+            $employee = Employee::query()->where('employee_no', $record['employee_no'])->firstOrFail();
+            $this->assertSame('office_head', $employee->user->role);
+            $this->assertSame($department->id, $employee->department_id);
+            $this->assertSame($department->id, $employee->position->department_id);
+            $this->assertTrue($employee->position->is_office_head_designation);
+            $this->assertSame($employee->user_id, $department->head_user_id);
+            $headUserIds[] = $department->head_user_id;
+        }
+        $this->assertCount(4, array_unique($headUserIds));
+
+        $municipalEngineer = Employee::query()->where('employee_no', 'IMP-HEAD-4')->firstOrFail();
+        $this->assertNotSame($globalEngineerPosition->id, $municipalEngineer->position_id);
+        $this->assertSame($departments['MEO']->id, $municipalEngineer->position->department_id);
+        $this->assertSame($mayorAccountsBefore, User::query()->where('role', 'mayor')->count());
+        if ($mayorBefore) {
+            $this->assertSame($mayorSnapshot, $mayorBefore->fresh()->only([
+                'name', 'username', 'email', 'password', 'role', 'can_final_approve',
+            ]));
+        }
     }
 
     public function test_hr_approved_department_and_position_aliases_are_reused_for_later_batches(): void
@@ -735,6 +795,43 @@ class EmployeeWorkbookImportTest extends TestCase
                 'Unmatched',
             ]);
         }
+    }
+
+    public function test_unmatched_department_and_position_values_require_hr_confirmation(): void
+    {
+        $this->officialDepartment();
+        $importer = app(EmployeeWorkbookImportService::class);
+
+        $unmatchedDepartment = 'Unverified Municipal Office';
+        $departmentImport = $this->stage($this->workbookUpload(overrides: [
+            7 => $unmatchedDepartment,
+            8 => 'Unlisted Position',
+        ]));
+        $departmentKey = hash('sha256', $unmatchedDepartment);
+        $departmentSummary = $importer->mappingSummary($departmentImport, 8);
+
+        $this->assertArrayNotHasKey($departmentKey, $departmentSummary['department_map']);
+        $this->assertSame(
+            'Needs HR Confirmation',
+            $departmentSummary['department_matches'][$departmentKey]['status']
+        );
+
+        $unmatchedPosition = 'Unlisted Position';
+        $positionImport = $this->stage($this->workbookUpload(overrides: [
+            7 => 'HRMO/PESO',
+            8 => $unmatchedPosition,
+        ]));
+        $positionKey = hash('sha256', "HRMO/PESO\0{$unmatchedPosition}");
+        $positionSummary = $importer->mappingSummary($positionImport, 8);
+        $importSummary = $importer->importSummary($positionImport, 8);
+
+        $this->assertArrayNotHasKey($positionKey, $positionSummary['position_map']);
+        $this->assertSame(
+            'Needs HR Confirmation',
+            $positionSummary['position_matches'][$positionKey]['status']
+        );
+        $this->assertSame(1, $importSummary['position_confirmation_count']);
+        $this->assertSame(0, $importSummary['unmatched_position_count']);
     }
 
     public function test_official_workbook_columns_and_department_values_are_recognized(): void
@@ -1004,9 +1101,22 @@ class EmployeeWorkbookImportTest extends TestCase
         $knownPositionKey = hash('sha256', "HRMO/PESO\0HR Officer");
         $unknownPositionKey = hash('sha256', "HRMO/PESO\0Unknown position");
         $summary = $importer->mappingSummary($import, 1);
+        $importSummary = $importer->importSummary($import, 1);
         $this->assertSame('Official Reference Match', $summary['position_matches'][$knownPositionKey]['status']);
         $this->assertArrayNotHasKey($unknownPositionKey, $summary['position_map']);
         $this->assertFalse($summary['positions']->contains('position', 'HR Officer'));
+        $this->assertSame(2, $importSummary['positions_detected']);
+        $this->assertSame(0, $importSummary['matched_positions']);
+        $this->assertSame(1, $importSummary['reference_position_matches']);
+        $this->assertSame(2, $importSummary['position_reference_count']);
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', [$import, 'office_column' => 1]))
+            ->assertOk()
+            ->assertSee('Existing HRIS positions matched')
+            ->assertSee('Source position pairs with exact reference title')
+            ->assertSee('1 / 2')
+            ->assertSee('Available titles in Positions reference');
 
         $this->putMapping($import, ['office_source_column' => 1])->assertRedirect()->assertSessionHasNoErrors();
 
@@ -1066,7 +1176,7 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame($department->id, $import->fresh()->field_mappings['department_map'][hash('sha256', 'HRMO/PESO')]);
     }
 
-    public function test_position_directory_can_mark_an_hr_approved_office_head_designation(): void
+    public function test_position_directory_designation_assigns_office_head_role_automatically(): void
     {
         config(['hris.employee_import.office_head_designations' => []]);
         $department = $this->officialDepartment();
@@ -1079,16 +1189,8 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->putMapping($import, ['office_source_column' => 8])->assertRedirect();
 
         $row = $import->rows()->firstOrFail();
-        $this->assertSame('employee', $row->review_data['classification']['role']);
+        $this->assertSame('office_head', $row->review_data['classification']['role']);
         $this->assertSame('office_head', $row->review_data['classification']['suggested_role']);
-        $this->actingAs(User::where('role', 'admin')->firstOrFail())
-            ->put(route('employee-imports.rows.review', [$import, $row]), [
-                'first_name' => 'Test',
-                'last_name' => 'Person',
-                'role' => 'office_head',
-            ])
-            ->assertRedirect()
-            ->assertSessionHasNoErrors();
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
             ->assertRedirect();
@@ -1128,7 +1230,31 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame('mayor', $row->review_data['classification']['suggested_role']);
         $this->assertSame('employee', $row->review_data['classification']['role']);
 
+        $importer = app(EmployeeWorkbookImportService::class);
+        $summary = $importer->importSummary($import, 8);
+        $this->assertSame(1, $summary['awaiting_role_confirmation']);
+        $this->assertSame(0, $summary['employees']);
+        $this->assertNull($importer->roleReviewSummary($import, $row)['confirmed_role']);
+        $this->assertTrue($importer->roleReviewSummary($import, $row)['awaiting_confirmation']);
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->get(route('employee-imports.show', [$import, 'office_column' => 8]))
+            ->assertOk()
+            ->assertSee('Awaiting HR role confirmation')
+            ->assertSee('Awaiting HR confirmation')
+            ->assertDontSee('<span class="role-badge role-badge-employee">Employee</span>', false);
+
         $parsedName = app(EmployeeWorkbookImportService::class)->parsedName($row);
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->put(route('employee-imports.rows.review', [$import, $row]), [
+                'first_name' => $parsedName['first_name'],
+                'middle_name' => $parsedName['middle_name'],
+                'last_name' => $parsedName['last_name'],
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+        $row->refresh();
+        $this->assertTrue($importer->roleReviewSummary($import, $row)['awaiting_confirmation']);
+
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->put(route('employee-imports.rows.review', [$import, $row]), [
                 'first_name' => $parsedName['first_name'],
@@ -1138,6 +1264,7 @@ class EmployeeWorkbookImportTest extends TestCase
             ])
             ->assertRedirect()
             ->assertSessionHasNoErrors();
+
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
             ->assertRedirect();

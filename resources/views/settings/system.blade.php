@@ -3,7 +3,7 @@
 @section('content')
     <div class="page-heading"><div><span class="eyebrow">SYSTEM SETTINGS</span><h1>System settings</h1><p>Configure municipal work schedules and explicit alternate leave reviewers.</p></div></div>
     <section class="panel settings-card"><div class="panel-heading"><div><h2>Standard workweek</h2><p>Working-day counts use these selected weekdays and active holidays.</p></div></div>
-        <form method="POST" action="{{ route('settings.system.update') }}" class="form-stack">@csrf @method('PUT')
+        <form method="POST" action="{{ route('settings.system.update') }}" class="form-stack" data-confirm-type="form" data-confirm-title="Save System Settings?" data-confirm-message="Save the approved workweek and explicitly configured alternate reviewer assignments? These settings affect leave working-day calculations and review routing." data-confirm-text="Save Settings">@csrf @method('PUT')
             <div class="weekday-grid">@foreach([1=>'Monday',2=>'Tuesday',3=>'Wednesday',4=>'Thursday',5=>'Friday',6=>'Saturday',7=>'Sunday'] as $day=>$name)<label class="choice-card"><input type="checkbox" name="workweek_days[]" value="{{ $day }}" @checked(in_array($day, $workweekDays, true))><span><b>{{ $name }}</b></span></label>@endforeach</div>
             <p class="privacy-note">Configure only the approved municipal work schedule. This setting affects leave working-day calculations.</p>
             <div class="form-grid">
@@ -16,7 +16,7 @@
                     <small>Only an active Admin explicitly designated for this limited permission is eligible. No approver is assumed.</small>
                 </label>
             </div>
-            <div class="form-actions"><button class="button button-primary">Save workweek</button></div>
+            <div class="form-actions"><button class="button button-primary" data-loading-text="Saving…">Save workweek</button></div>
         </form>
     </section>
     <section class="panel panel-spaced"><div class="panel-heading"><div><h2>Leave approval routes</h2><p>Standard applications follow Office Head endorsement → Admin / HR Office certification → Mayor final decision.</p></div></div>
@@ -26,9 +26,9 @@
     <section class="panel panel-spaced">
         <div class="panel-heading"><div><h2>Database backup and restore</h2><p>Encrypted database backups are stored outside the public directory and restricted to Admin / HRMO.</p></div></div>
         <div class="info-note">Automatic backups run daily at 2:00 AM when Laravel's scheduler is running. Restoring first creates a safety backup, verifies the selected backup, and places the application in maintenance mode.</div>
-        <form method="POST" action="{{ route('settings.system.backups.store') }}" class="form-actions top-space">
+        <form method="POST" action="{{ route('settings.system.backups.store') }}" class="form-actions top-space" data-confirm-type="form" data-confirm-title="Create Database Backup?" data-confirm-message="Create a protected encrypted backup of the current HRIS database?" data-confirm-text="Create Backup">
             @csrf
-            <button class="button button-primary" type="submit">Create manual backup</button>
+            <button class="button button-primary" type="submit" data-loading-text="Creating backup…">Create manual backup</button>
         </form>
         <div class="table-wrap top-space">
             <table>
@@ -45,7 +45,7 @@
                                     <a class="button button-outline button-small" href="{{ route('settings.system.backups.download', $backup['id']) }}">Download encrypted file</a>
                                     <details class="correction-details">
                                         <summary>Verify and restore</summary>
-                                        <form method="POST" action="{{ route('settings.system.backups.restore', $backup['id']) }}" class="form-stack">
+                                        <form method="POST" action="{{ route('settings.system.backups.restore', $backup['id']) }}" class="form-stack" data-confirm-type="warning" data-confirm-title="Restore Database Backup?" data-confirm-message="This replaces the active HRIS database. A safety backup will be created before the selected backup is restored. Confirm only after entering the administrator password and typing RESTORE." data-confirm-text="Restore Database">
                                             @csrf
                                             <label>Administrator password
                                                 <input type="password" name="password" autocomplete="current-password" required>
@@ -54,7 +54,7 @@
                                                 <input name="confirmation" autocomplete="off" required>
                                             </label>
                                             <p class="privacy-note">This replaces the active database. A safety backup is created first; already-running requests are paused during restoration.</p>
-                                            <button class="button button-outline" type="submit">Restore selected backup</button>
+                                            <button class="button button-outline" type="submit" data-loading-text="Restoring…">Restore selected backup</button>
                                         </form>
                                     </details>
                                 @else

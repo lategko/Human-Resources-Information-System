@@ -761,6 +761,42 @@ class HrisWorkflowTest extends TestCase
         $this->assertSame('Approved', $pending->fresh()->status);
     }
 
+    public function test_office_head_cannot_review_a_misrouted_application_from_another_department(): void
+    {
+        $officeHead = User::where('role', 'office_head')->firstOrFail();
+        $otherDepartment = Department::create(['name' => 'Misrouted Office', 'code' => 'MIS']);
+        $otherEmployee = Employee::create([
+            'department_id' => $otherDepartment->id,
+            'employee_no' => 'MIS-0001',
+            'first_name' => 'Other',
+            'last_name' => 'Department Employee',
+            'employment_status' => 'Active',
+        ]);
+        $application = LeaveApplication::create([
+            'employee_id' => $otherEmployee->id,
+            'leave_type_id' => LeaveType::where('code', 'VACATION')->value('id'),
+            'status' => 'Under Office Head Review',
+            'office_head_reviewer_id' => $officeHead->id,
+            'office_snapshot' => $otherDepartment->name,
+            'last_name_snapshot' => $otherEmployee->last_name,
+            'first_name_snapshot' => $otherEmployee->first_name,
+            'working_days' => 1,
+            'start_date' => today()->addDays(5),
+            'end_date' => today()->addDays(5),
+        ]);
+
+        $this->actingAs($officeHead)
+            ->get(route('leave.show', $application))
+            ->assertForbidden();
+        $this->get(route('leave.index'))->assertDontSee($otherEmployee->full_name);
+        $this->post(route('leave.review', $application), [
+            'action' => 'endorse',
+            'recommendation' => 'For approval',
+        ])->assertForbidden();
+
+        $this->assertSame('Under Office Head Review', $application->fresh()->status);
+    }
+
     public function test_mayor_alternate_endorsement_is_separate_from_hr_verification_and_final_approval(): void
     {
         [$startDate, $endDate] = $this->nextTwoWorkingDays();
@@ -1574,6 +1610,21 @@ class HrisWorkflowTest extends TestCase
     public function test_administrator_can_create_named_office_head_and_assign_a_department(): void
     {
         $department = Department::create(['name' => 'Configured Office', 'code' => 'CFG']);
+        $position = Position::create([
+            'department_id' => $department->id,
+            'title' => 'Configured Office Head',
+            'is_office_head_designation' => true,
+        ]);
+        $employee = Employee::create([
+            'department_id' => $department->id,
+            'position_id' => $position->id,
+            'employee_no' => 'CFG-HEAD-001',
+            'first_name' => 'Actual',
+            'middle_name' => 'Municipal',
+            'last_name' => 'Office Head',
+            'suffix' => 'Jr.',
+            'employment_status' => 'Active',
+        ]);
         $admin = User::where('role', 'admin')->firstOrFail();
 
         $this->actingAs($admin)
@@ -1592,6 +1643,7 @@ class HrisWorkflowTest extends TestCase
                 'email' => 'office-head-created@example.test',
                 'role' => 'office_head',
                 'department_id' => $department->id,
+                'employee_id' => $employee->id,
                 'is_active' => '1',
                 'password' => 'SecureInitialPassword123!',
                 'password_confirmation' => 'SecureInitialPassword123!',
@@ -1601,8 +1653,250 @@ class HrisWorkflowTest extends TestCase
         $officeHead = User::where('email', 'office-head-created@example.test')->firstOrFail();
         $this->assertSame('Actual Municipal Office Head Jr.', $officeHead->name);
         $this->assertSame('office_head', $officeHead->role);
-        $this->assertSame('Actual', $officeHead->first_name);
+        $this->assertSame($employee->id, $officeHead->employee->id);
         $this->assertSame($officeHead->id, $department->fresh()->head_user_id);
+    }
+
+    public function test_administrator_cannot_assign_office_head_role_without_verified_position(): void
+    {
+        $department = Department::create(['name' => 'Unverified Office', 'code' => 'UNV']);
+        $position = Position::create(['department_id' => $department->id, 'title' => 'Office Coordinator']);
+        $employee = Employee::create([
+            'department_id' => $department->id,
+            'position_id' => $position->id,
+            'employee_no' => 'UNV-EMP-001',
+            'first_name' => 'Regular',
+            'last_name' => 'Employee',
+            'employment_status' => 'Active',
+        ]);
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->post(route('users.store'), [
+                'email' => 'unverified-head@example.test',
+                'role' => 'office_head',
+                'department_id' => $department->id,
+                'employee_id' => $employee->id,
+                'is_active' => '1',
+                'password' => 'SecureInitialPassword123!',
+                'password_confirmation' => 'SecureInitialPassword123!',
+            ])
+            ->assertSessionHasErrors('employee_id');
+
+        $this->assertDatabaseMissing('users', ['email' => 'unverified-head@example.test']);
+        $this->assertNull($department->fresh()->head_user_id);
+    }
+
+    public function test_account_linked_to_a_verified_office_head_position_is_promoted_automatically(): void
+    {
+        $department = Department::create(['name' => 'Linked Office', 'code' => 'LNK']);
+        $position = Position::create([
+            'department_id' => $department->id,
+            'title' => 'Linked Office Head',
+            'is_office_head_designation' => true,
+        ]);
+        $employee = Employee::create([
+            'department_id' => $department->id,
+            'position_id' => $position->id,
+            'employee_no' => 'LNK-HEAD-001',
+            'first_name' => 'Linked',
+            'last_name' => 'Employee',
+            'employment_status' => 'Active',
+        ]);
+        $admin = User::where('role', 'admin')->firstOrFail();
+
+        $this->actingAs($admin)
+            ->post(route('users.store'), [
+                'role' => 'employee',
+                'employee_id' => $employee->id,
+                'is_active' => '1',
+            ])
+            ->assertRedirect(route('users.index'));
+
+        $officeHead = $employee->fresh()->user;
+        $this->assertSame('office_head', $officeHead->role);
+        $this->assertTrue($officeHead->must_change_password);
+        $this->assertSame($officeHead->id, $department->fresh()->head_user_id);
+        $this->actingAs($officeHead)->get(route('dashboard'))->assertRedirect(route('account.setup'));
+
+        $officeHead->forceFill([
+            'must_change_password' => false,
+            'account_setup_completed' => true,
+        ])->save();
+
+        $this->actingAs($officeHead)->get(route('dashboard'))->assertOk()->assertSee('Department overview');
+    }
+
+    public function test_designating_an_existing_employee_position_assigns_and_audits_office_head_role(): void
+    {
+        $department = Department::create(['name' => 'Verified Office', 'code' => 'VER']);
+        $position = Position::create(['department_id' => $department->id, 'title' => 'Verified Office Lead']);
+        $employeeUser = User::create([
+            'name' => 'Verified Employee',
+            'email' => 'verified-employee@example.test',
+            'password' => 'TestAccount123!',
+            'role' => 'employee',
+            'is_active' => true,
+        ]);
+        $employee = Employee::create([
+            'user_id' => $employeeUser->id,
+            'department_id' => $department->id,
+            'position_id' => $position->id,
+            'employee_no' => 'VER-EMP-001',
+            'first_name' => 'Verified',
+            'last_name' => 'Employee',
+            'employment_status' => 'Active',
+        ]);
+        $admin = User::where('role', 'admin')->firstOrFail();
+
+        $this->actingAs($admin)
+            ->put(route('positions.update', $position), [
+                'title' => $position->title,
+                'department_id' => $department->id,
+                'is_office_head_designation' => '1',
+                'is_active' => '1',
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        $this->assertSame('office_head', $employeeUser->fresh()->role);
+        $this->assertSame($employeeUser->id, $department->fresh()->head_user_id);
+        $this->assertDatabaseHas('audit_logs', [
+            'user_id' => $admin->id,
+            'action' => 'user.role_changed',
+            'subject_type' => User::class,
+            'subject_id' => $employeeUser->id,
+        ]);
+    }
+
+    public function test_revoking_a_position_designation_returns_its_office_head_to_employee(): void
+    {
+        $department = Department::create(['name' => 'Reassigned Office', 'code' => 'REV']);
+        $position = Position::create([
+            'department_id' => $department->id,
+            'title' => 'Former Office Head',
+            'is_office_head_designation' => true,
+        ]);
+        $officeHead = User::create([
+            'name' => 'Former Head',
+            'email' => 'former-head@example.test',
+            'password' => 'TestAccount123!',
+            'role' => 'office_head',
+            'is_active' => true,
+        ]);
+        Employee::create([
+            'user_id' => $officeHead->id,
+            'department_id' => $department->id,
+            'position_id' => $position->id,
+            'employee_no' => 'REV-HEAD-001',
+            'first_name' => 'Former',
+            'last_name' => 'Head',
+            'employment_status' => 'Active',
+        ]);
+        $department->update(['head_user_id' => $officeHead->id]);
+        $admin = User::where('role', 'admin')->firstOrFail();
+
+        $this->actingAs($admin)
+            ->put(route('positions.update', $position), [
+                'title' => $position->title,
+                'department_id' => $department->id,
+                'is_office_head_designation' => '0',
+                'is_active' => '1',
+            ])
+            ->assertRedirect()
+            ->assertSessionHasNoErrors();
+
+        $this->assertSame('employee', $officeHead->fresh()->role);
+        $this->assertNull($department->fresh()->head_user_id);
+    }
+
+    public function test_employee_moved_out_of_a_verified_head_position_loses_office_head_assignment(): void
+    {
+        $department = Department::create(['name' => 'Former Head Office', 'code' => 'FHO']);
+        $headPosition = Position::create([
+            'department_id' => $department->id,
+            'title' => 'Former Department Head',
+            'is_office_head_designation' => true,
+        ]);
+        $staffPosition = Position::create([
+            'department_id' => $department->id,
+            'title' => 'Department Staff',
+        ]);
+        $officeHead = User::create([
+            'name' => 'Former Head Employee',
+            'email' => 'former-position@example.test',
+            'password' => 'TestAccount123!',
+            'role' => 'office_head',
+            'is_active' => true,
+        ]);
+        $employee = Employee::create([
+            'user_id' => $officeHead->id,
+            'department_id' => $department->id,
+            'position_id' => $headPosition->id,
+            'employee_no' => 'FHO-HEAD-001',
+            'first_name' => 'Former',
+            'last_name' => 'Head',
+            'employment_status' => 'Active',
+        ]);
+        $department->update(['head_user_id' => $officeHead->id]);
+        $admin = User::where('role', 'admin')->firstOrFail();
+
+        $this->actingAs($admin)
+            ->put(route('employees.update', $employee), [
+                'employee_no' => $employee->employee_no,
+                'department_id' => $department->id,
+                'position_id' => $staffPosition->id,
+                'first_name' => $employee->first_name,
+                'last_name' => $employee->last_name,
+                'employment_status' => 'Active',
+                'assignment_effective_date' => today()->toDateString(),
+                'assignment_change_reason' => 'Official assignment changed.',
+            ])
+            ->assertRedirect(route('employees.show', $employee))
+            ->assertSessionHasNoErrors();
+
+        $this->assertSame('employee', $officeHead->fresh()->role);
+        $this->assertNull($department->fresh()->head_user_id);
+    }
+
+    public function test_position_designation_is_not_assigned_automatically_when_multiple_employees_hold_it(): void
+    {
+        $department = Department::create(['name' => 'Ambiguous Office', 'code' => 'AMB']);
+        $position = Position::create(['department_id' => $department->id, 'title' => 'Ambiguous Office Lead']);
+        foreach (['First', 'Second'] as $name) {
+            $user = User::create([
+                'name' => "{$name} Employee",
+                'email' => strtolower($name).'-ambiguous@example.test',
+                'password' => 'TestAccount123!',
+                'role' => 'employee',
+                'is_active' => true,
+            ]);
+            Employee::create([
+                'user_id' => $user->id,
+                'department_id' => $department->id,
+                'position_id' => $position->id,
+                'employee_no' => 'AMB-'.strtoupper($name),
+                'first_name' => $name,
+                'last_name' => 'Employee',
+                'employment_status' => 'Active',
+            ]);
+        }
+
+        $this->actingAs(User::where('role', 'admin')->firstOrFail())
+            ->put(route('positions.update', $position), [
+                'title' => $position->title,
+                'department_id' => $department->id,
+                'is_office_head_designation' => '1',
+                'is_active' => '1',
+            ])
+            ->assertRedirect()
+            ->assertSessionHasErrors('position_id');
+
+        $this->assertFalse($position->fresh()->is_office_head_designation);
+        $this->assertSame(2, User::where('role', 'employee')->whereIn('email', [
+            'first-ambiguous@example.test',
+            'second-ambiguous@example.test',
+        ])->count());
+        $this->assertNull($department->fresh()->head_user_id);
     }
 
     public function test_archived_and_already_linked_employee_records_cannot_be_linked_again(): void

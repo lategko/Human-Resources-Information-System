@@ -5,8 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\Department;
 use App\Models\Position;
 use App\Services\AuditLogger;
+use App\Services\OfficeHeadRoleAssignmentService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
@@ -56,11 +58,31 @@ class PositionController extends Controller
         return back()->with('success', 'Position created.');
     }
 
-    public function update(Request $request, Position $position, AuditLogger $auditLogger): RedirectResponse
-    {
+    public function update(
+        Request $request,
+        Position $position,
+        AuditLogger $auditLogger,
+        OfficeHeadRoleAssignmentService $officeHeadRoleAssignmentService
+    ): RedirectResponse {
         $data = $this->validated($request, $position);
-        $position->update($data);
-        $auditLogger->record('position.updated', $position);
+        $wasOfficeHeadDesignation = $position->is_office_head_designation;
+        DB::transaction(function () use (
+            $data,
+            $position,
+            $wasOfficeHeadDesignation,
+            $request,
+            $auditLogger,
+            $officeHeadRoleAssignmentService
+        ): void {
+            $position->update($data);
+            $position->refresh();
+            if ($position->is_office_head_designation) {
+                $officeHeadRoleAssignmentService->synchronizeVerifiedPosition($position, $request->user());
+            } elseif ($wasOfficeHeadDesignation) {
+                $officeHeadRoleAssignmentService->revokePosition($position, $request->user());
+            }
+            $auditLogger->record('position.updated', $position);
+        });
 
         return back()->with('success', 'Position updated.');
     }
@@ -87,6 +109,12 @@ class PositionController extends Controller
         }
 
         $data = $request->validate($rules);
+
+        if (($data['is_office_head_designation'] ?? false) && ! ($data['department_id'] ?? $position?->department_id)) {
+            throw ValidationException::withMessages([
+                'department_id' => 'An Office Head designation must be assigned to a specific department.',
+            ]);
+        }
 
         if (! empty($data['department_id'])) {
             $department = Department::findOrFail($data['department_id']);

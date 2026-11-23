@@ -13,7 +13,16 @@
     @endphp
     <div class="page-heading"><div><span class="eyebrow">APPLICATION #{{ str_pad($application->id, 5, '0', STR_PAD_LEFT) }}</span><h1>{{ $application->leaveType->name }}{{ $application->other_leave_type ? ' · '.$application->other_leave_type : '' }}</h1><p>{{ $application->employee->full_name }} <span class="muted-separator">·</span> Filed {{ $application->filed_at?->format('F j, Y') ?? $application->created_at->format('F j, Y') }}</p></div>
         <div class="heading-actions"><span class="status-tag status-{{ \Illuminate\Support\Str::slug($application->status) }}">{{ $application->status }}</span><a class="button button-outline" href="{{ route('leave.print', $application) }}" target="_blank">Print / Save PDF</a>@can('update', $application)<a class="button button-primary" href="{{ route('leave.edit', $application) }}">Edit application</a>@endcan
-            @can('cancel', $application)<form method="POST" action="{{ route('leave.cancel', $application) }}" onsubmit="return confirm('Cancel this leave application? This cannot be undone.')">@csrf<button class="button button-danger" type="submit">Cancel request</button></form>@endcan
+            @can('cancel', $application)
+                <form method="POST" action="{{ route('leave.cancel', $application) }}"
+                    data-confirm-type="warning"
+                    data-confirm-title="Cancel Leave Application?"
+                    data-confirm-message="Are you sure you want to cancel this leave application? This action cannot be undone."
+                    data-confirm-text="Cancel Application">
+                    @csrf
+                    <button class="button button-danger" type="submit" data-loading-text="Cancelling…">Cancel request</button>
+                </form>
+            @endcan
         </div>
     </div>
     <div class="application-layout leave-application-layout">
@@ -88,8 +97,8 @@
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf
                             <label>{{ $application->status === 'Under Alternate Office Head Review' ? 'Alternate recommendation' : 'Recommendation' }}<select name="recommendation" required><option value="For approval">For approval</option><option value="For disapproval">For disapproval</option></select></label>
                             <label>Remarks<textarea name="remarks" rows="3" placeholder="Required for disapproval or return"></textarea></label>
-                            <button class="button button-primary button-wide" name="action" value="endorse">Approve and send to Mayor</button>
-                            <button class="button button-outline button-wide" name="action" value="return">Return for correction</button>
+                            <button class="button button-primary button-wide" name="action" value="endorse" data-confirm-type="approval" data-confirm-title="Approve Leave Application?" data-confirm-message="Are you sure you want to recommend this leave application for the Mayor’s final approval?" data-confirm-text="Approve Leave">Approve and send to Mayor</button>
+                            <button class="button button-outline button-wide" name="action" value="return" data-confirm-type="warning" data-confirm-title="Return Leave Application?" data-confirm-message="Return this leave application to the employee for correction?" data-confirm-text="Return for Correction">Return for correction</button>
                         </form>
                     </section>
                 @elseif(auth()->user()->isAdministrator() && $application->status === 'Awaiting Alternate HR Reviewer Assignment')
@@ -100,7 +109,7 @@
                                 <select name="assigned_hr_reviewer_id" required><option value="">Select an active Admin</option>@foreach(\App\Models\User::query()->where('role', 'admin')->where('is_active', true)->whereKeyNot($application->employee->user_id)->orderBy('name')->get() as $reviewer)<option value="{{ $reviewer->id }}">{{ $reviewer->name }}</option>@endforeach</select>
                             </label>
                             <label>Assignment remarks<textarea name="remarks" rows="2"></textarea></label>
-                            <button class="button button-primary button-wide">Assign and forward for HR verification</button>
+                            <button class="button button-primary button-wide" data-confirm-type="approval" data-confirm-title="Assign HR Reviewer?" data-confirm-message="Assign the selected active Admin to verify this leave application and forward it to HR review?" data-confirm-text="Assign Reviewer">Assign and forward for HR verification</button>
                         </form>
                     </section>
                 @elseif(auth()->user()->isAdministrator() && $application->status === 'Awaiting Authorized Final Approver Assignment')
@@ -111,7 +120,7 @@
                                 <select name="assigned_final_approver_id" required><option value="">Select an active designated approver</option>@foreach(\App\Models\User::query()->where('role', 'admin')->where('is_active', true)->where('can_final_approve', true)->orderBy('name')->get() as $approver)<option value="{{ $approver->id }}">{{ $approver->name }}</option>@endforeach</select>
                             </label>
                             <label>Assignment remarks<textarea name="remarks" rows="2"></textarea></label>
-                            <button class="button button-primary button-wide">Assign authorized approver</button>
+                            <button class="button button-primary button-wide" data-confirm-type="approval" data-confirm-title="Assign Final Approver?" data-confirm-message="Assign the explicitly designated Admin to make the final decision on this Mayor personal leave application?" data-confirm-text="Assign Approver">Assign authorized approver</button>
                         </form>
                     </section>
                 @elseif(auth()->user()->isHrmo())
@@ -142,7 +151,7 @@
                                     <label>Eligibility review remarks<textarea name="eligibility_remarks" rows="2">{{ $application->eligibility_remarks }}</textarea></label>
                                 </div>
                             @endif
-                            <button class="button button-primary button-wide" type="submit">Certify and send to Office Head</button>
+                            <button class="button button-primary button-wide" type="submit" data-confirm-type="approval" data-confirm-title="Certify Leave Application?" data-confirm-message="Confirm that you have verified the leave credits, working days, and supporting information for this application." data-confirm-text="Certify Application">Certify and send to Office Head</button>
                         </form>
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack review-divider">@csrf
                             <input type="hidden" name="action" value="return">
@@ -155,8 +164,8 @@
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf
                             <input type="hidden" name="recommendation" value="For approval">
                             <label>Remarks<textarea name="remarks" rows="3"></textarea></label>
-                            <button class="button button-primary button-wide" name="action" value="endorse">Approve and send to Mayor</button>
-                            <button class="button button-outline button-wide" name="action" value="return">Return for correction</button>
+                            <button class="button button-primary button-wide" name="action" value="endorse" data-confirm-type="approval" data-confirm-title="Approve Leave Application?" data-confirm-message="Are you sure you want to recommend this leave application for the Mayor’s final approval?" data-confirm-text="Approve Leave">Approve and send to Mayor</button>
+                            <button class="button button-outline button-wide" name="action" value="return" data-confirm-type="warning" data-confirm-title="Return Leave Application?" data-confirm-message="Return this leave application to the employee for correction?" data-confirm-text="Return for Correction">Return for correction</button>
                         </form>
                     </section>
                 @elseif(auth()->user()->canFinalApprove() || (auth()->user()->canApproveMayorLeave() && $application->status === 'Pending Authorized Final Approval'))
@@ -166,16 +175,16 @@
                             <label>Number of days without pay<input type="number" min="0" step=".5" name="days_without_pay" value="0"></label>
                             <label>Others (specify)<input name="approval_others"></label>
                             <label>Remarks<textarea name="remarks" rows="2"></textarea></label>
-                            <button class="button button-primary button-wide" name="action" value="approve">Approve application</button>
+                            <button class="button button-primary button-wide" name="action" value="approve" data-confirm-type="approval" data-confirm-title="Approve Leave Application?" data-confirm-message="Are you sure you want to grant final approval for this employee’s leave application?" data-confirm-text="Approve Leave">Approve application</button>
                         </form>
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack review-divider">@csrf
                             <input type="hidden" name="action" value="disapprove"><label>Reason for disapproval *<textarea name="reason" rows="2" required></textarea></label>
                             <label>Additional remarks<textarea name="remarks" rows="2"></textarea></label>
-                            <button class="button button-danger button-wide" type="submit">Disapprove application</button>
+                            <button class="button button-danger button-wide" type="submit" data-confirm-type="rejection" data-confirm-title="Reject Leave Application?" data-confirm-message="Please confirm that you want to disapprove this leave application. The stated reason will be recorded." data-confirm-text="Disapprove Application">Disapprove application</button>
                         </form>
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack review-divider">@csrf
                             <input type="hidden" name="action" value="return"><label>Return for clarification *<textarea name="remarks" rows="2" required></textarea></label>
-                            <button class="button button-outline button-wide" type="submit">Return for clarification</button>
+                            <button class="button button-outline button-wide" type="submit" data-confirm-type="warning" data-confirm-title="Return for Clarification?" data-confirm-message="Return this leave application for the employee to provide clarification?" data-confirm-text="Return Application">Return for clarification</button>
                         </form>
                     </section>
                 @endif

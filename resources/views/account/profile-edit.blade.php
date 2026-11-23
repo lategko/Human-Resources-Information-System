@@ -6,7 +6,7 @@
         <a class="button button-outline" href="{{ route('account.profile') }}">Cancel</a>
     </div>
 
-    <form method="POST" action="{{ route('account.profile.update') }}" class="panel form-panel account-edit-form">
+    <form method="POST" action="{{ route('account.profile.update') }}" class="panel form-panel account-edit-form" data-confirm-type="form" data-confirm-title="Save Profile Changes?" data-confirm-message="Save your updated personal and contact information?" data-confirm-text="Save Changes">
         @csrf @method('PUT')
         <div class="panel-heading"><div><h2>Personal information</h2><p>Employee name, birthdate, department, position, and employee number are managed by HR.</p></div></div>
         @if($user->employee)
@@ -56,7 +56,7 @@
         @error('new_password')<span class="field-error" role="alert">{{ $message }}</span>@enderror
         <div class="form-actions">
             <a class="button button-outline" href="{{ route('account.profile') }}">Cancel</a>
-            <button class="button button-primary" type="submit">Save changes</button>
+            <button class="button button-primary" type="submit" data-loading-text="Saving…">Save changes</button>
         </div>
     </form>
 @endsection

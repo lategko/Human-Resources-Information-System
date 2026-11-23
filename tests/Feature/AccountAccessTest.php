@@ -53,7 +53,10 @@ class AccountAccessTest extends TestCase
                 'password' => 'InitialPassword123!',
             ])->assertRedirect(route('dashboard'));
 
-            $this->get(route('dashboard'))->assertOk()->assertSee($dashboardHeading);
+            $response = $this->get(route('dashboard'))->assertOk()->assertSee($dashboardHeading);
+            preg_match('/<aside id="primary-navigation".*?>(.*?)<\/aside>/s', $response->getContent(), $sidebar);
+            $this->assertArrayHasKey(1, $sidebar);
+            $this->assertStringNotContainsString('data-lucide=', $sidebar[1]);
 
             $sessionId = session()->getId();
             $this->post(route('logout'))->assertRedirect(route('login'));

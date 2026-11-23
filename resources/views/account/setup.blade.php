@@ -13,7 +13,11 @@
             @endif
         </div>
     </div>
-    <form method="POST" action="{{ route('account.setup.update') }}" class="panel form-panel" x-data="{ showCurrentPassword: false, showNewPassword: false, showConfirmationPassword: false }">
+    <form method="POST" action="{{ route('account.setup.update') }}" class="panel form-panel" x-data="{ showCurrentPassword: false, showNewPassword: false, showConfirmationPassword: false }"
+        data-confirm-type="warning"
+        data-confirm-title="{{ $user->must_change_password ? 'Change Password and Continue?' : 'Complete Account Setup?' }}"
+        data-confirm-message="{{ $user->must_change_password ? 'Change the temporary password and save your username and contact details before continuing?' : 'Save your username and contact information to complete account setup?' }}"
+        data-confirm-text="{{ $user->must_change_password ? 'Change Password' : 'Complete Setup' }}">
         @csrf @method('PUT')
         <div class="panel-heading"><div><h2>{{ $user->name }}</h2><p>Employee number: {{ $user->employee?->employee_no ?? 'Not linked' }}</p></div></div>
         <div class="form-grid">
@@ -55,6 +59,6 @@
             <label>Contact number<input name="contact_number" value="{{ old('contact_number', $user->employee?->contact_number ?? $user->profile_contact_number) }}" autocomplete="tel"></label>
             <label class="field-span">Address<textarea name="address" rows="3" autocomplete="street-address">{{ old('address', $user->employee?->address ?? $user->profile_address) }}</textarea></label>
         </div>
-        <div class="form-actions"><button class="button button-primary" type="submit">{{ $user->must_change_password ? 'Change password and continue' : 'Complete account setup' }}</button></div>
+        <div class="form-actions"><button class="button button-primary" type="submit" data-loading-text="Saving…">{{ $user->must_change_password ? 'Change password and continue' : 'Complete account setup' }}</button></div>
     </form>
 @endsection

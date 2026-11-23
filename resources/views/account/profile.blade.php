@@ -31,9 +31,13 @@
                 <button class="button button-primary" type="submit">Save picture</button>
             </form>
             @if($user->profile_photo_path)
-                <form method="POST" action="{{ route('account.profile.photo.delete') }}" onsubmit="return confirm('Remove your profile picture? Your initials will be shown instead.')">
+                <form method="POST" action="{{ route('account.profile.photo.delete') }}"
+                    data-confirm-type="delete"
+                    data-confirm-title="Remove Profile Picture?"
+                    data-confirm-message="Your profile picture will be removed and your initials will be shown instead."
+                    data-confirm-text="Remove Picture">
                     @csrf @method('DELETE')
-                    <button class="button button-outline profile-remove-photo" type="submit">Remove picture</button>
+                    <button class="button button-outline profile-remove-photo" type="submit" data-loading-text="Removing…">Remove picture</button>
                 </form>
             @endif
         </section>
@@ -90,7 +94,7 @@
 
             <section id="change-password" class="panel form-panel account-password-panel">
                 <div class="panel-heading"><div><h2>Change password</h2><p>Use your current password to set a new password of at least 12 characters.</p></div></div>
-                <form method="POST" action="{{ route('account.profile.password') }}">
+                <form method="POST" action="{{ route('account.profile.password') }}" data-confirm-type="warning" data-confirm-title="Change Account Password?" data-confirm-message="Your current password will be replaced with the new password entered here." data-confirm-text="Change Password">
                     @csrf @method('PUT')
                     <div class="form-grid">
                         <label class="field-span">Current password<input type="password" name="current_password" autocomplete="current-password" required></label>
@@ -99,7 +103,7 @@
                     </div>
                     @error('current_password')<span class="field-error" role="alert">{{ $message }}</span>@enderror
                     @error('new_password')<span class="field-error" role="alert">{{ $message }}</span>@enderror
-                    <div class="form-actions"><button class="button button-primary" type="submit">Change password</button></div>
+                    <div class="form-actions"><button class="button button-primary" type="submit" data-loading-text="Changing…">Change password</button></div>
                 </form>
             </section>
         </div>

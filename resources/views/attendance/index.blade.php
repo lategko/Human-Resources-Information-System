@@ -51,7 +51,7 @@
 
         <section class="panel">
             <div class="panel-heading"><div><h2>Request an attendance exception</h2><p>Technical problems do not create or alter attendance automatically.</p></div></div>
-            <form method="POST" action="{{ route('attendance.exceptions.store') }}" enctype="multipart/form-data" class="form-grid top-space">
+            <form method="POST" action="{{ route('attendance.exceptions.store') }}" enctype="multipart/form-data" class="form-grid top-space" data-confirm-type="form" data-confirm-title="Submit Attendance Correction Request?" data-confirm-message="Send this attendance exception request and explanation to HR for review?" data-confirm-text="Submit Request">
                 @csrf
                 <label>Attendance date *<input type="date" name="attendance_date" value="{{ old('attendance_date', today()->toDateString()) }}" required></label>
                 <label>Requested action *<select name="requested_action" required><option value="time_in">Time in</option><option value="time_out">Time out</option><option value="correction">Correction</option></select></label>
@@ -126,7 +126,7 @@
                                         <small>Accuracy</small><b>{{ $record->time_in_accuracy_meters ? number_format($record->time_in_accuracy_meters,1).' m (in)' : '—' }}{{ $record->time_out_accuracy_meters ? ' · '.number_format($record->time_out_accuracy_meters,1).' m (out)' : '' }}</b>
                                         <small>Distance</small><b>{{ $record->time_in_distance_meters ? number_format($record->time_in_distance_meters,1).' m (in)' : '—' }}{{ $record->time_out_distance_meters ? ' · '.number_format($record->time_out_distance_meters,1).' m (out)' : '' }}</b>
                                     </div>
-                                    <form method="POST" action="{{ route('attendance.correct', $record) }}" class="correction-form">
+                                    <form method="POST" action="{{ route('attendance.correct', $record) }}" class="correction-form" data-confirm-type="form" data-confirm-title="Save Attendance Correction?" data-confirm-message="Save the corrected attendance status, times, and remarks for this employee?" data-confirm-text="Save Correction">
                                         @csrf
                                         <label>Attendance status<select name="status">@foreach(['Present','Late','Absent','On Leave','On Approved Leave','Official Business','Half Day','Rest Day','Holiday'] as $status)<option @selected($record->status === $status)>{{ $status }}</option>@endforeach</select></label>
                                         <label>Time in<input type="time" name="time_in" value="{{ $record->time_in ? substr($record->time_in,0,5) : '' }}"></label>
@@ -134,7 +134,7 @@
                                         <label>Late minutes<input type="number" min="0" name="late_minutes" value="{{ $record->late_minutes }}" required></label>
                                         <label>Undertime minutes<input type="number" min="0" name="undertime_minutes" value="{{ $record->undertime_minutes }}" required></label>
                                         <label>Correction remarks *<textarea name="correction_remarks" required rows="2"></textarea></label>
-                                        <button class="button button-primary">Save correction</button>
+                                        <button class="button button-primary" data-loading-text="Saving…">Save correction</button>
                                     </form>
                                 </details>
                             </td>
@@ -153,7 +153,7 @@
         <div class="content-grid">
             <section class="panel panel-wide">
                 <div class="panel-heading"><div><h2>Authorized workplaces</h2><p>Configure geofenced attendance locations and accuracy limits.</p></div></div>
-                <form method="POST" action="{{ route('attendance.workplaces.store') }}" class="workplace-form top-space">
+                <form method="POST" action="{{ route('attendance.workplaces.store') }}" class="workplace-form top-space" data-confirm-type="form" data-confirm-title="Add Authorized Workplace?" data-confirm-message="Add this geofenced workplace as an authorized attendance location?" data-confirm-text="Add Workplace">
                     @csrf
                     <div class="workplace-picker" x-data="workplaceMapPicker({ searchUrl: @js(route('attendance.workplaces.geocode.search')), reverseUrl: @js(route('attendance.workplaces.geocode.reverse')), latitude: '', longitude: '', radius: 100 })">
                         <div class="workplace-map-tools">
@@ -183,7 +183,7 @@
                         </div>
                     </div>
                     <input type="hidden" name="is_active" value="1">
-                    <button class="button button-primary">Add workplace</button>
+                    <button class="button button-primary" data-loading-text="Adding…">Add workplace</button>
                 </form>
                 <div class="table-wrap top-space">
                     <table><thead><tr><th>WORKPLACE</th><th>COORDINATES</th><th>RADIUS</th><th>ACCURACY</th><th>STATUS</th><th>HISTORY</th></tr></thead><tbody>
@@ -197,7 +197,7 @@
                             <td>
                                 <details class="workplace-edit-details">
                                     <summary>{{ $workplace->history()->count() }} change(s) · Edit</summary>
-                                    <form method="POST" action="{{ route('attendance.workplaces.update', $workplace) }}" class="workplace-form workplace-edit-form">
+                                    <form method="POST" action="{{ route('attendance.workplaces.update', $workplace) }}" class="workplace-form workplace-edit-form" data-confirm-type="form" data-confirm-title="Save Workplace Changes?" data-confirm-message="Save the location, geofence, or accuracy changes for {{ $workplace->name }}?" data-confirm-text="Save Workplace">
                                         @csrf
                                         @method('PUT')
                                         <div class="workplace-picker" x-data="workplaceMapPicker({ searchUrl: @js(route('attendance.workplaces.geocode.search')), reverseUrl: @js(route('attendance.workplaces.geocode.reverse')), latitude: @js((string) $workplace->latitude), longitude: @js((string) $workplace->longitude), address: @js($workplace->address), radius: @js($workplace->radius_meters) })">
@@ -393,7 +393,7 @@
                     </div>
 
                     <div class="workplace-tab-content" x-show="activeTab === 'individual'" x-cloak>
-                        <form method="POST" x-bind:action="individualAssignmentUrl.replace('__EMPLOYEE__', selectedEmployee)" class="form-stack">
+                        <form method="POST" x-bind:action="individualAssignmentUrl.replace('__EMPLOYEE__', selectedEmployee)" class="form-stack" data-confirm-type="form" data-confirm-title="Save Individual Workplace Assignment?" data-confirm-message="Save or clear the selected employee’s individual workplace assignment from the effective date?" data-confirm-text="Save Assignment">
                             @csrf
                             <label>Search employee
                                 <input type="search" x-model="employeeSearch" placeholder="Search by name or employee ID">
@@ -427,7 +427,7 @@
                             <label>Reason for reassignment *
                                 <textarea name="reason" rows="2" maxlength="2000" required>{{ old('reason') }}</textarea>
                             </label>
-                            <button class="button button-primary" type="submit" :disabled="!selectedEmployee">Save individual assignment</button>
+                            <button class="button button-primary" type="submit" :disabled="!selectedEmployee" data-loading-text="Saving…">Save individual assignment</button>
                         </form>
                     </div>
                 </div>
@@ -464,7 +464,7 @@
                 <div class="table-wrap top-space">
                     <table><thead><tr><th>EMPLOYEE</th><th>DATE</th><th>ACTION</th><th>EXPLANATION</th><th>STATUS</th><th>REVIEW</th></tr></thead><tbody>
                     @forelse($attendanceExceptions as $exception)
-                        <tr><td>{{ $exception->employee->full_name }}</td><td>{{ $exception->attendance_date->format('M j, Y') }}</td><td>{{ str_replace('_',' ',ucfirst($exception->requested_action)) }}</td><td>{{ $exception->explanation }}</td><td>{{ $exception->status }}</td><td>@if($exception->status === 'Pending')<form method="POST" action="{{ route('attendance.exceptions.review', $exception) }}" class="form-stack">@csrf<select name="status"><option>Approved</option><option>Rejected</option></select><textarea name="review_remarks" rows="2" maxlength="2000"></textarea><button class="button button-outline">Save review</button></form>@else{{ $exception->reviewer?->name }} · {{ $exception->reviewed_at?->format('M j, Y') }}@endif</td></tr>
+                        <tr><td>{{ $exception->employee->full_name }}</td><td>{{ $exception->attendance_date->format('M j, Y') }}</td><td>{{ str_replace('_',' ',ucfirst($exception->requested_action)) }}</td><td>{{ $exception->explanation }}</td><td>{{ $exception->status }}</td><td>@if($exception->status === 'Pending')<form method="POST" action="{{ route('attendance.exceptions.review', $exception) }}" class="form-stack" data-confirm-type="approval" data-confirm-title="Review Attendance Exception?" data-confirm-message="Confirm this attendance exception decision." data-confirm-text="Save Decision">@csrf<select name="status" data-confirm-status><option>Approved</option><option>Rejected</option></select><textarea name="review_remarks" rows="2" maxlength="2000"></textarea><button class="button button-outline" data-loading-text="Saving…">Save review</button></form>@else{{ $exception->reviewer?->name }} · {{ $exception->reviewed_at?->format('M j, Y') }}@endif</td></tr>
                     @empty<tr><td colspan="6" class="empty-note">No attendance exception requests.</td></tr>@endforelse
                     </tbody></table>
                 </div>
@@ -473,14 +473,14 @@
             <section class="panel panel-wide">
                 <div class="panel-heading"><div><h2>Work schedules</h2><p>Schedule changes take effect only on their approved dates. Existing attendance calculations remain unchanged.</p></div></div>
                 <div class="info-note"><b>Default schedule:</b> Monday–Friday, 8:00 AM–5:00 PM; lunch 12:00–1:00 PM; zero-minute grace.</div>
-                <form method="POST" action="{{ route('attendance.schedules.store') }}" class="form-stack top-space">@csrf
+                <form method="POST" action="{{ route('attendance.schedules.store') }}" class="form-stack top-space" data-confirm-type="form" data-confirm-title="Save Approved Work Schedule?" data-confirm-message="Save this work schedule and its effective period for the selected employee or office?" data-confirm-text="Save Schedule">@csrf
                     <label>Schedule scope<select name="employee_id"><option value="">Office-wide default</option>@foreach($employees as $employee)<option value="{{ $employee->id }}">{{ $employee->employee_no }} · {{ $employee->full_name }}</option>@endforeach</select></label>
                     <div class="weekday-grid">@foreach([1=>'Monday',2=>'Tuesday',3=>'Wednesday',4=>'Thursday',5=>'Friday',6=>'Saturday',7=>'Sunday'] as $day=>$name)<label class="choice-card"><input type="checkbox" name="working_days[]" value="{{ $day }}" @checked(in_array($day, old('working_days', $defaultSchedule['working_days']), false))><span><b>{{ $name }}</b></span></label>@endforeach</div>
                     <div class="form-grid"><label>Start time *<input type="time" name="start_time" value="{{ old('start_time','08:00') }}" required></label><label>End time *<input type="time" name="end_time" value="{{ old('end_time','17:00') }}" required></label><label>Lunch starts<input type="time" name="lunch_start" value="{{ old('lunch_start','12:00') }}"></label><label>Lunch ends<input type="time" name="lunch_end" value="{{ old('lunch_end','13:00') }}"></label><label>Grace period (minutes) *<input type="number" name="grace_period_minutes" min="0" max="240" value="{{ old('grace_period_minutes',0) }}" required></label><label>Effective from *<input type="date" name="effective_from" value="{{ old('effective_from',today()->toDateString()) }}" required></label><label>Effective to<input type="date" name="effective_to"></label><label class="field-span">Approved reason *<textarea name="reason" rows="2" maxlength="2000" required></textarea></label></div>
-                    <button class="button button-primary" type="submit">Save approved schedule</button>
+                    <button class="button button-primary" type="submit" data-loading-text="Saving…">Save approved schedule</button>
                 </form>
                 <div class="table-wrap top-space"><table><thead><tr><th>SCOPE</th><th>WORKING DAYS</th><th>HOURS</th><th>EFFECTIVE PERIOD</th><th>APPROVED REASON</th><th></th></tr></thead><tbody>
-                    @forelse($workSchedules as $schedule)<tr><td>{{ $schedule->employee ? $schedule->employee->employee_no.' · '.$schedule->employee->full_name : 'Office-wide default' }}</td><td>{{ collect($schedule->working_days)->map(fn($day)=>[1=>'Mon',2=>'Tue',3=>'Wed',4=>'Thu',5=>'Fri',6=>'Sat',7=>'Sun'][$day]??'')->implode(', ') }}</td><td>{{ substr($schedule->start_time,0,5) }}–{{ substr($schedule->end_time,0,5) }} · {{ $schedule->grace_period_minutes }}m grace</td><td>{{ $schedule->effective_from->format('M j, Y') }} – {{ $schedule->effective_to?->format('M j, Y') ?? 'Current' }}</td><td>{{ $schedule->reason }}<small>Recorded by {{ $schedule->creator->name }}</small></td><td>@if(!$schedule->effective_to)<form method="POST" action="{{ route('attendance.schedules.end',$schedule) }}" class="form-stack">@csrf @method('PATCH')<label>End date<input type="date" name="effective_to" min="{{ $schedule->effective_from->toDateString() }}" required></label><button class="button button-outline">End schedule</button></form>@endif</td></tr>@empty<tr><td colspan="6" class="empty-note">No explicit schedule records.</td></tr>@endforelse
+                    @forelse($workSchedules as $schedule)<tr><td>{{ $schedule->employee ? $schedule->employee->employee_no.' · '.$schedule->employee->full_name : 'Office-wide default' }}</td><td>{{ collect($schedule->working_days)->map(fn($day)=>[1=>'Mon',2=>'Tue',3=>'Wed',4=>'Thu',5=>'Fri',6=>'Sat',7=>'Sun'][$day]??'')->implode(', ') }}</td><td>{{ substr($schedule->start_time,0,5) }}–{{ substr($schedule->end_time,0,5) }} · {{ $schedule->grace_period_minutes }}m grace</td><td>{{ $schedule->effective_from->format('M j, Y') }} – {{ $schedule->effective_to?->format('M j, Y') ?? 'Current' }}</td><td>{{ $schedule->reason }}<small>Recorded by {{ $schedule->creator->name }}</small></td><td>@if(!$schedule->effective_to)<form method="POST" action="{{ route('attendance.schedules.end',$schedule) }}" class="form-stack" data-confirm-type="warning" data-confirm-title="End Work Schedule?" data-confirm-message="Set an end date for this approved work schedule? The recorded schedule history will be retained." data-confirm-text="End Schedule">@csrf @method('PATCH')<label>End date<input type="date" name="effective_to" min="{{ $schedule->effective_from->toDateString() }}" required></label><button class="button button-outline" data-loading-text="Saving…">End schedule</button></form>@endif</td></tr>@empty<tr><td colspan="6" class="empty-note">No explicit schedule records.</td></tr>@endforelse
                 </tbody></table></div><div class="pagination-wrap">{{ $workSchedules->links() }}</div>
             </section>
         </div>

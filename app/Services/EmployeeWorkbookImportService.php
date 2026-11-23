@@ -40,6 +40,8 @@ class EmployeeWorkbookImportService
 
     private const IMPORT_BATCH_SIZE = 50;
 
+    private array $departmentCodeCache = [];
+
     public function __construct(
         private readonly EmployeeUsernameGenerator $usernameGenerator,
         private readonly EmployeeAssignmentHistoryRecorder $assignmentHistoryRecorder,
@@ -860,7 +862,7 @@ class EmployeeWorkbookImportService
         return [
             'department_id' => null,
             'department_name' => null,
-            'status' => $suggestions ? 'Needs HR Confirmation' : 'Unmatched',
+            'status' => 'Needs HR Confirmation',
             'reason' => $suggestions
                 ? 'Possible matches are suggestions only and require HR confirmation'
                 : 'No normalized name, approved alias, or sufficiently similar department was found',
@@ -892,9 +894,15 @@ class EmployeeWorkbookImportService
         }
 
         $normalizedTitle = $this->normalizeMatchValue($pair['position']);
-        $eligiblePositions = $positions
-            ->filter(fn (Position $position) => $position->department_id === null
-                || (int) $position->department_id === $departmentId);
+        $isVerifiedHeadDesignation = $this->isVerifiedOfficeHeadDesignation(
+            $pair['position'],
+            $this->departmentCode($departmentId)
+        );
+        $eligiblePositions = $positions->filter(fn (Position $position) => (
+            $position->department_id === null
+                ? ! $isVerifiedHeadDesignation
+                : (int) $position->department_id === $departmentId
+        ));
         $candidatePositions = $eligiblePositions->filter(fn (Position $position) => (
             $this->normalizeMatchValue($position->title) === $normalizedTitle
             || collect($position->aliases ?? [])
@@ -960,13 +968,31 @@ class EmployeeWorkbookImportService
             return [
                 'position_id' => $position->id,
                 'position_title' => $position->title,
-                'status' => $isTitleMatch ? 'Automatically Matched' : 'Matched by Approved Alias',
-                'reason' => $isTitleMatch
+                'status' => $isVerifiedHeadDesignation || $position->is_office_head_designation
+                    ? 'Verified Office Head Designation'
+                    : ($isTitleMatch ? 'Automatically Matched' : 'Matched by Approved Alias'),
+                'reason' => $isVerifiedHeadDesignation || $position->is_office_head_designation
+                    ? 'This position is verified as the Office Head designation for the confirmed department.'
+                    : ($isTitleMatch
                     ? 'Normalized position title in the confirmed department'
-                    : 'Matches an existing HR-approved position alias in the confirmed department',
+                    : 'Matches an existing HR-approved position alias in the confirmed department'),
                 'confidence' => 100,
                 'suggestions' => [],
                 'has_exact_match' => true,
+            ];
+        }
+
+        if ($candidatePositions->isEmpty()
+            && $isVerifiedHeadDesignation
+            && $sourceSalaryGrades->count() <= 1) {
+            return [
+                'position_id' => null,
+                'position_title' => trim($pair['position']),
+                'status' => 'Verified Office Head Designation',
+                'reason' => 'This exact department and position pair is HR-verified as an Office Head designation and can be added to the department.',
+                'confidence' => 100,
+                'suggestions' => [],
+                'has_exact_match' => false,
             ];
         }
 
@@ -1000,7 +1026,7 @@ class EmployeeWorkbookImportService
         return [
             'position_id' => null,
             'position_title' => null,
-            'status' => $suggestions ? 'Needs HR Confirmation' : 'Unmatched',
+            'status' => 'Needs HR Confirmation',
             'reason' => $ambiguousExactMatches
                 ? 'Multiple existing positions match within the confirmed department'
                 : ($sourceSalaryGrades->count() > 1
@@ -1145,7 +1171,7 @@ class EmployeeWorkbookImportService
             );
             if ($selectedId && $createdPositionId === $selectedId) {
                 $match['status'] = 'Automatically Matched – Newly Created HRIS Position';
-                $match['reason'] = 'Created during this import and automatically applied to every affected employee record';
+                $match['reason'] = 'Created during mapping review and automatically selected for affected employee records';
             }
             $match['affected_records'] = $pair['affected_records'];
 
@@ -1203,6 +1229,32 @@ class EmployeeWorkbookImportService
     private function activePositions(): Collection
     {
         return Position::query()->where('is_active', true)->with('department')->get();
+    }
+
+    private function departmentCode(int $departmentId): ?string
+    {
+        if (! array_key_exists($departmentId, $this->departmentCodeCache)) {
+            $this->departmentCodeCache[$departmentId] = Department::query()
+                ->whereKey($departmentId)
+                ->value('code');
+        }
+
+        return $this->departmentCodeCache[$departmentId];
+    }
+
+    private function isVerifiedOfficeHeadDesignation(string $positionTitle, ?string $departmentCode): bool
+    {
+        if (! $departmentCode) {
+            return false;
+        }
+
+        $normalizedTitle = $this->normalizeMatchValue($positionTitle);
+        $normalizedDepartmentCode = $this->normalizeMatchValue($departmentCode);
+
+        return collect(config('hris.employee_import.office_head_designations', []))
+            ->contains(fn ($designation) => is_array($designation)
+                && $this->normalizeMatchValue((string) ($designation['position_title'] ?? '')) === $normalizedTitle
+                && $this->normalizeMatchValue((string) ($designation['department_code'] ?? '')) === $normalizedDepartmentCode);
     }
 
     public function officialDepartments(): Collection
@@ -1305,9 +1357,6 @@ class EmployeeWorkbookImportService
             'failed' => $rows->where('status', 'failed')->count(),
             'possible_duplicates' => $possibleDuplicates,
             'mapping_blocked_records' => $mappingBlockedRows->count(),
-            'office_heads' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['role'] ?? null) === 'office_head')->count(),
-            'employees' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['role'] ?? 'employee') === 'employee'
-                && $row->status !== 'duplicate')->count(),
             'departments' => $officeColumn ? $this->officeValues($import, $officeColumn)->count() : 0,
             'positions_detected' => $positionCount,
             'matched_positions' => $mappedPositions,
@@ -1326,6 +1375,25 @@ class EmployeeWorkbookImportService
             'duplicates' => $rows->where('status', 'duplicate')->count(),
             'corrections' => $rows->filter(fn (EmployeeImportRow $row) => $this->needsEmployeeCorrection($row))->count(),
             'matched_departments' => $mappedDepartments,
+            'awaiting_role_confirmation' => $rows->filter(function (EmployeeImportRow $row) {
+                $classification = $row->review_data['classification'] ?? [];
+
+                return ($classification['suggested_role'] ?? null) === 'mayor'
+                    && ($classification['role'] ?? 'employee') !== 'mayor'
+                    && empty($row->review_data['role_review']['confirmed_role'])
+                    && ! in_array($row->status, ['duplicate', 'imported', 'updated'], true);
+            })->count(),
+            'office_heads' => $rows->filter(fn (EmployeeImportRow $row) => ($row->review_data['classification']['role'] ?? null) === 'office_head')->count(),
+            'employees' => $rows->filter(function (EmployeeImportRow $row) {
+                $classification = $row->review_data['classification'] ?? [];
+                $awaitingMayorReview = ($classification['suggested_role'] ?? null) === 'mayor'
+                    && ($classification['role'] ?? 'employee') !== 'mayor'
+                    && empty($row->review_data['role_review']['confirmed_role']);
+
+                return ($classification['role'] ?? 'employee') === 'employee'
+                    && $row->status !== 'duplicate'
+                    && ! $awaitingMayorReview;
+            })->count(),
         ];
     }
 
@@ -1442,9 +1510,10 @@ class EmployeeWorkbookImportService
                 $this->activePositions(),
                 $referenceCatalog
             );
-            if ($match['status'] !== 'Official Reference Match') {
+            if (! in_array($match['status'], ['Official Reference Match', 'Verified Office Head Designation'], true)) {
                 continue;
             }
+            $isVerifiedHeadDesignation = $match['status'] === 'Verified Office Head Designation';
             $position = $this->createPositionFromSource(
                 $pair['position'],
                 $departmentId,
@@ -1452,7 +1521,8 @@ class EmployeeWorkbookImportService
                     'title' => $match['position_title'],
                     'salary_grade' => $pair['salary_grade'],
                 ],
-                $key
+                $key,
+                $isVerifiedHeadDesignation
             );
             $positions[$key] = $position->id;
             if ($position->wasRecentlyCreated) {
@@ -1462,6 +1532,14 @@ class EmployeeWorkbookImportService
                     'title' => $position->title,
                     'department' => $position->department?->name,
                 ];
+            }
+            if ($isVerifiedHeadDesignation && $position->wasRecentlyCreated) {
+                $this->auditLogger->record('employee_import.office_head_designation_approved', $position, [
+                    'department_id' => $departmentId,
+                    'employee_import_id' => $import->id,
+                    'administrator_id' => $userId,
+                    'reason' => 'Created from an exact HR-verified department and Office Head position designation.',
+                ]);
             }
         }
         foreach ($this->positionPairs($import, $officeColumn) as $pair) {
@@ -1517,6 +1595,22 @@ class EmployeeWorkbookImportService
                 throw ValidationException::withMessages([
                     "position_map.{$key}" => "Select an existing position or confirm creating \"{$pair['position']}\" in its mapped department.",
                 ]);
+            }
+            if ($this->isVerifiedOfficeHeadDesignation($pair['position'], $this->departmentCode($departmentId))) {
+                if ((int) $position->department_id !== $departmentId) {
+                    throw ValidationException::withMessages([
+                        "position_map.{$key}" => 'An Office Head designation must use a position assigned specifically to its department.',
+                    ]);
+                }
+                if (! $position->is_office_head_designation) {
+                    $position->update(['is_office_head_designation' => true]);
+                    $this->auditLogger->record('employee_import.office_head_designation_approved', $position, [
+                        'department_id' => $departmentId,
+                        'employee_import_id' => $import->id,
+                        'administrator_id' => $userId,
+                        'reason' => 'Confirmed from an exact HR-verified department and Office Head position designation.',
+                    ]);
+                }
             }
         }
 
@@ -1790,6 +1884,14 @@ class EmployeeWorkbookImportService
                         : null;
                     $existingUser = $employee?->user;
                     $effectiveRole = $prepared['role'];
+                    if ($existingUser?->isMayor() && $effectiveRole !== 'mayor') {
+                        $row->update([
+                            'status' => 'needs_review',
+                            'issues' => ['This employee is linked to the protected Mayor account. The account role and final-approval permissions were not changed.'],
+                        ]);
+
+                        return;
+                    }
                     if ($effectiveRole === 'mayor' && User::query()
                         ->where('role', 'mayor')
                         ->when($existingUser, fn ($query) => $query->where('id', '!=', $existingUser->id))
@@ -1812,6 +1914,18 @@ class EmployeeWorkbookImportService
                             $row->update([
                                 'status' => 'needs_review',
                                 'issues' => ['This department has another assigned Office Head. Resolve the assignment before importing.'],
+                            ]);
+
+                            return;
+                        }
+                        if ($existingUser && Department::query()
+                            ->where('head_user_id', $existingUser->id)
+                            ->where('id', '!=', $targetDepartment->id)
+                            ->lockForUpdate()
+                            ->exists()) {
+                            $row->update([
+                                'status' => 'needs_review',
+                                'issues' => ['This account is already assigned as Office Head of another department. Resolve the existing assignment before importing.'],
                             ]);
 
                             return;
@@ -1874,7 +1988,9 @@ class EmployeeWorkbookImportService
                         $employee->update(['user_id' => $user->id]);
                         $accountCreated = true;
                     } else {
-                        $user->update(['name' => $employee->full_name, 'role' => $effectiveRole]);
+                        if (! $user->isMayor()) {
+                            $user->update(['name' => $employee->full_name, 'role' => $effectiveRole]);
+                        }
                     }
 
                     if ($previousRole === 'office_head' && $user->role !== 'office_head') {
@@ -2040,7 +2156,7 @@ class EmployeeWorkbookImportService
                     'name' => $correction['name'] ?? null,
                     'employee' => array_filter($correction['employee'] ?? [], fn ($value) => $value !== null && $value !== ''),
                     'profile' => array_filter($correction['profile'] ?? [], fn ($value) => $value !== null && $value !== ''),
-                    'role_review' => isset($correction['role'])
+                    'role_review' => in_array($correction['role'] ?? null, ['employee', 'office_head', 'mayor'], true)
                         ? [
                             'confirmed_role' => $correction['role'],
                             'reviewed_by' => $userId,
@@ -2065,25 +2181,37 @@ class EmployeeWorkbookImportService
         $classification = $row->review_data['classification'] ?? [];
         if (! $import->field_mappings) {
             $role = $row->employee?->user?->role ?? $classification['role'] ?? 'employee';
+            $suggestedRole = $classification['suggested_role'] ?? $role;
+            $awaitingRoleConfirmation = $suggestedRole === 'mayor'
+                && $role !== 'mayor'
+                && empty($row->review_data['role_review']['confirmed_role']);
 
             return [
                 'employee_number' => $row->employee?->employee_no,
                 'position' => $row->employee?->position?->title ?? $classification['position'] ?? null,
                 'department' => $row->employee?->department?->name ?? $classification['department'] ?? null,
-                'suggested_role' => $classification['suggested_role'] ?? $role,
-                'confirmed_role' => $row->employee?->user?->role ?? $classification['confirmed_role'] ?? $role,
+                'suggested_role' => $suggestedRole,
+                'confirmed_role' => $awaitingRoleConfirmation
+                    ? null
+                    : ($row->employee?->user?->role ?? $classification['confirmed_role'] ?? $role),
+                'awaiting_confirmation' => $awaitingRoleConfirmation,
                 'role_conflict' => $classification['role_conflict'] ?? null,
             ];
         }
 
         $prepared = $this->prepareEmployeeData($row, $import->field_mappings);
+        $linkedRole = $row->employee?->user?->role;
+        $awaitingRoleConfirmation = $prepared['suggested_role'] === 'mayor'
+            && ! $prepared['role_reviewed']
+            && ($linkedRole ?? $prepared['role']) !== 'mayor';
 
         return [
             'employee_number' => $prepared['employee']['employee_no'] ?: $row->employee?->employee_no,
             'position' => $prepared['position_title'] ?: $row->employee?->position?->title,
             'department' => $prepared['department_name'] ?: $row->employee?->department?->name,
             'suggested_role' => $prepared['suggested_role'],
-            'confirmed_role' => $row->employee?->user?->role ?? $prepared['role'],
+            'confirmed_role' => $awaitingRoleConfirmation ? null : ($linkedRole ?? $prepared['role']),
+            'awaiting_confirmation' => $awaitingRoleConfirmation,
             'role_conflict' => $prepared['role_conflict'],
         ];
     }
@@ -2117,6 +2245,11 @@ class EmployeeWorkbookImportService
             if ($user->isAdministrator()) {
                 throw ValidationException::withMessages(['role' => 'Protected Admin accounts cannot be changed through employee imports.']);
             }
+            if ($user->isMayor() && $role !== 'mayor') {
+                throw ValidationException::withMessages([
+                    'role' => 'The existing Mayor account and its final-approval permissions are protected from role changes through employee imports.',
+                ]);
+            }
             if ($role === 'mayor' && User::query()
                 ->where('role', 'mayor')
                 ->where('id', '!=', $user->id)
@@ -2132,9 +2265,23 @@ class EmployeeWorkbookImportService
                     throw ValidationException::withMessages(['role' => 'Assign the employee to a department before making them an Office Head.']);
                 }
                 $department = Department::query()->lockForUpdate()->findOrFail($employee->department_id);
+                $position = $employee->position;
+                if (! $position || (int) $position->department_id !== (int) $department->id) {
+                    throw ValidationException::withMessages([
+                        'role' => 'An Office Head must hold a position assigned specifically to their department.',
+                    ]);
+                }
                 if ($department->head_user_id && (int) $department->head_user_id !== (int) $user->id) {
                     throw ValidationException::withMessages([
                         'role' => 'This department already has an assigned Office Head. Resolve that assignment before changing roles.',
+                    ]);
+                }
+                if (Department::query()
+                    ->where('head_user_id', $user->id)
+                    ->where('id', '!=', $department->id)
+                    ->exists()) {
+                    throw ValidationException::withMessages([
+                        'role' => 'This account is already assigned as Office Head of another department.',
                     ]);
                 }
             }
@@ -2214,7 +2361,10 @@ class EmployeeWorkbookImportService
                     'account_action' => $prepared['account_action'],
                     'role' => $prepared['role'],
                     'suggested_role' => $prepared['suggested_role'],
-                    'confirmed_role' => $prepared['role'],
+                    'confirmed_role' => $prepared['suggested_role'] === 'mayor' && ! $prepared['role_reviewed']
+                        ? null
+                        : $prepared['role'],
+                    'role_reviewed' => $prepared['role_reviewed'],
                     'department' => $prepared['department_name'],
                     'position' => $prepared['position_title'],
                     'possible_name_matches' => $prepared['possible_name_matches'],
@@ -2476,10 +2626,10 @@ class EmployeeWorkbookImportService
         $position = $positionId ? Position::with('department')->find($positionId) : null;
         $suggestedRole = $this->suggestedRole($positionValue, $officeValue, $position, $department);
         $roleReview = $row->review_data['role_review'] ?? [];
-        $roleReviewed = isset($roleReview['confirmed_role']);
-        $role = $roleReviewed
-            ? $roleReview['confirmed_role']
-            : ($linkedUser?->role ?? 'employee');
+        $roleReviewed = in_array($roleReview['confirmed_role'] ?? null, ['employee', 'office_head', 'mayor'], true);
+        $role = $suggestedRole === 'office_head'
+            ? 'office_head'
+            : ($roleReviewed ? $roleReview['confirmed_role'] : ($linkedUser?->role ?? 'employee'));
         $roleConflict = null;
         $mayorRoleConflict = $suggestedRole === 'mayor' && User::query()->where('role', 'mayor')
             ->when($linkedUser, fn ($query) => $query->where('id', '!=', $linkedUser->id))
@@ -2487,17 +2637,28 @@ class EmployeeWorkbookImportService
         if ($mayorRoleConflict && (! $roleReviewed || $role === 'mayor')) {
             $roleConflict = 'A different Mayor account already exists. Preserve it and reconcile the official Mayor identity before assigning this role.';
         }
-        if (! $roleReviewed && in_array($suggestedRole, ['office_head', 'mayor'], true)
-            && $role !== $suggestedRole) {
-            $roleLabel = $suggestedRole === 'office_head' ? 'Office Head' : 'Mayor';
-            $issues[] = "The suggested {$roleLabel} role requires explicit HR Admin review before import.";
+        if (! $roleReviewed && $suggestedRole === 'mayor' && $role !== 'mayor') {
+            $issues[] = 'The suggested Mayor role requires explicit HR Admin review before import.';
         }
         if ($roleConflict) {
             $issues[] = $roleConflict;
         }
+        if ($linkedUser?->isMayor() && $role !== 'mayor') {
+            $issues[] = 'This employee is linked to the protected Mayor account; its role and final-approval permissions cannot be changed through workbook import.';
+        }
+        if ($role === 'office_head' && (! $department || ! $position
+            || (int) $position->department_id !== (int) $department->id)) {
+            $issues[] = 'An Office Head must hold a position assigned specifically to their department.';
+        }
         if ($role === 'office_head' && $department?->head_user_id
             && (int) $department->head_user_id !== (int) ($linkedUser?->id ?? 0)) {
             $issues[] = 'This department already has an assigned Office Head; confirm the correct assignment before importing another.';
+        }
+        if ($role === 'office_head' && $linkedUser && Department::query()
+            ->where('head_user_id', $linkedUser->id)
+            ->where('id', '!=', (int) $departmentId)
+            ->exists()) {
+            $issues[] = 'This account is already assigned as Office Head of another department; resolve the assignment before importing.';
         }
         $statusCell = $format === 'plantilla'
             ? null
@@ -2590,18 +2751,13 @@ class EmployeeWorkbookImportService
             return 'mayor';
         }
 
-        if ($position?->is_office_head_designation) {
+        if ($position?->is_office_head_designation
+            && (int) $position->department_id === (int) $department?->id) {
             return 'office_head';
         }
 
-        $departmentCode = $this->normalizeMatchValue((string) ($position?->department?->code ?? $department?->code));
-        $positionTitle = $this->normalizeMatchValue($positionTitle);
-        foreach (config('hris.employee_import.office_head_designations', []) as $designation) {
-            if (is_array($designation)
-                && $this->normalizeMatchValue((string) ($designation['position_title'] ?? '')) === $positionTitle
-                && $this->normalizeMatchValue((string) ($designation['department_code'] ?? '')) === $departmentCode) {
-                return 'office_head';
-            }
+        if ($this->isVerifiedOfficeHeadDesignation($positionTitle, $department?->code)) {
+            return 'office_head';
         }
 
         return 'employee';
@@ -2941,7 +3097,8 @@ class EmployeeWorkbookImportService
         string $sourceTitle,
         int $departmentId,
         array $newPosition,
-        string $key
+        string $key,
+        bool $departmentScopedOnly = false
     ): Position {
         $title = trim((string) ($newPosition['title'] ?? $sourceTitle));
         $salaryGrade = trim((string) ($newPosition['salary_grade'] ?? ''));
@@ -2967,8 +3124,11 @@ class EmployeeWorkbookImportService
         }
         $normalizedSource = $this->normalizeMatchValue($sourceTitle);
         $normalizedTitle = $this->normalizeMatchValue($title);
-        $matches = Position::query()->where(function ($query) use ($departmentId) {
-            $query->where('department_id', $departmentId)->orWhereNull('department_id');
+        $matches = Position::query()->where(function ($query) use ($departmentId, $departmentScopedOnly) {
+            $query->where('department_id', $departmentId);
+            if (! $departmentScopedOnly) {
+                $query->orWhereNull('department_id');
+            }
         })->lockForUpdate()->get()
             ->filter(fn (Position $position) => (
                 $this->normalizeMatchValue($position->title) === $normalizedSource
@@ -3003,6 +3163,7 @@ class EmployeeWorkbookImportService
             'salary_grade' => $salaryGrade !== '' ? $salaryGrade : null,
             'aliases' => $aliases,
             'is_active' => true,
+            'is_office_head_designation' => $departmentScopedOnly,
         ]);
     }
 

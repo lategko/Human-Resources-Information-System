@@ -52,6 +52,8 @@ class LeaveWorkflowService
                 abort_unless(
                     in_array($from, ['Under Office Head Review', 'Under Alternate Office Head Review'], true)
                         && $application->office_head_reviewer_id === $user->id
+                        && ($from === 'Under Alternate Office Head Review'
+                            || $application->employee->department?->head_user_id === $user->id)
                         && in_array($action, ['endorse', 'return'], true),
                     409,
                     'This application is no longer awaiting your authorized department review.'

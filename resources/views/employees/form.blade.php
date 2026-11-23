@@ -2,7 +2,11 @@
 @section('title', $employee->exists ? 'Edit employee' : 'Add employee')
 @section('content')
     <div class="page-heading"><div><span class="eyebrow">EMPLOYEE RECORD</span><h1>{{ $employee->exists ? 'Update employee' : 'Add employee' }}</h1><p>Maintain accurate personnel details and assignment information.</p></div><a class="button button-outline" href="{{ $employee->exists ? route('employees.show', $employee) : route('employees.index') }}">Cancel</a></div>
-    <form method="POST" action="{{ $employee->exists ? route('employees.update', $employee) : route('employees.store') }}" class="panel form-panel">
+    <form method="POST" action="{{ $employee->exists ? route('employees.update', $employee) : route('employees.store') }}" class="panel form-panel"
+        data-confirm-type="form"
+        data-confirm-title="{{ $employee->exists ? 'Save Employee Changes?' : 'Create Employee Record?' }}"
+        data-confirm-message="{{ $employee->exists ? 'Save the personnel and assignment information entered for this employee?' : 'Create an employee record using the verified information entered here?' }}"
+        data-confirm-text="{{ $employee->exists ? 'Save Changes' : 'Create Employee' }}">
         @csrf @if($employee->exists)@method('PUT')@endif
         <h2>Employment details</h2><p class="form-intro">Required fields are marked with an asterisk.</p>
         <div class="form-grid">
@@ -44,6 +48,6 @@
             <label>Emergency contact name<input name="emergency_contact_name" value="{{ old('emergency_contact_name', $employee->emergency_contact_name) }}"></label>
             <label>Emergency contact number<input name="emergency_contact_number" value="{{ old('emergency_contact_number', $employee->emergency_contact_number) }}"></label>
         </div>
-        <div class="form-actions"><a class="button button-outline" href="{{ $employee->exists ? route('employees.show', $employee) : route('employees.index') }}">Cancel</a><button type="submit" class="button button-primary">Save employee</button></div>
+        <div class="form-actions"><a class="button button-outline" href="{{ $employee->exists ? route('employees.show', $employee) : route('employees.index') }}">Cancel</a><button type="submit" class="button button-primary" data-loading-text="Saving…">Save employee</button></div>
     </form>
 @endsection

@@ -45,7 +45,7 @@
                                     @if(!$record->cancelled_at)
                                         <details class="correction-details">
                                             <summary>Edit</summary>
-                                            <form method="POST" action="{{ route('office-head-availability.update', $record) }}" class="form-stack">
+                                            <form method="POST" action="{{ route('office-head-availability.update', $record) }}" class="form-stack" data-confirm-type="form" data-confirm-title="Save Office Head Availability?" data-confirm-message="Save the availability period and any alternate reviewer assignment?" data-confirm-text="Save Changes">
                                                 @csrf
                                                 @method('PUT')
                                                 <label>Availability status *
@@ -67,18 +67,18 @@
                                                     </select>
                                                 </label>
                                                 <p class="privacy-note">Applications already assigned to an alternate will remain assigned; they are not automatically returned to the original Office Head.</p>
-                                                <button class="button button-outline" type="submit">Save changes</button>
+                                                <button class="button button-outline" type="submit" data-loading-text="Saving…">Save changes</button>
                                             </form>
                                         </details>
                                         <details class="correction-details">
                                             <summary>Cancel period</summary>
-                                            <form method="POST" action="{{ route('office-head-availability.cancel', $record) }}" class="form-stack">
+                                            <form method="POST" action="{{ route('office-head-availability.cancel', $record) }}" class="form-stack" data-confirm-type="warning" data-confirm-title="Cancel Availability Period?" data-confirm-message="Cancel this availability period? The cancellation will remain in the audit history, and existing alternate reviewer assignments will not be reversed automatically." data-confirm-text="Cancel Period">
                                                 @csrf
                                                 <label>Cancellation reason *
                                                     <textarea name="cancellation_reason" rows="2" maxlength="2000" required>{{ old('cancellation_reason') }}</textarea>
                                                 </label>
                                                 <p class="privacy-note">Cancellation is retained in history. Existing alternate reviewer assignments will not be reversed automatically.</p>
-                                                <button class="button button-outline" type="submit">Cancel availability</button>
+                                                <button class="button button-outline" type="submit" data-loading-text="Cancelling…">Cancel availability</button>
                                             </form>
                                         </details>
                                     @else
@@ -96,7 +96,7 @@
         </section>
         <aside class="panel">
             <div class="panel-heading"><div><h2>Record availability</h2><p>{{ auth()->user()->isOfficeHead() ? 'You may record availability for your assigned department.' : 'Admin may record availability for any assigned Office Head.' }}</p></div></div>
-            <form method="POST" action="{{ route('office-head-availability.store') }}" class="form-stack">
+            <form method="POST" action="{{ route('office-head-availability.store') }}" class="form-stack" data-confirm-type="form" data-confirm-title="Record Office Head Availability?" data-confirm-message="Record this Office Head availability period and any temporary alternate reviewer?" data-confirm-text="Record Availability">
                 @csrf
                 <label>Department and assigned Office Head *
                     <select name="department_id" required>
@@ -128,7 +128,7 @@
                         @endforeach
                     </select>
                 </label>
-                <button class="button button-primary" type="submit">Record availability</button>
+                <button class="button button-primary" type="submit" data-loading-text="Recording…">Record availability</button>
             </form>
         </aside>
     </div>

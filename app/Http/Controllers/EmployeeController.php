@@ -7,6 +7,7 @@ use App\Models\Employee;
 use App\Models\Position;
 use App\Services\AuditLogger;
 use App\Services\EmployeeAssignmentHistoryRecorder;
+use App\Services\OfficeHeadRoleAssignmentService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -142,11 +143,16 @@ class EmployeeController extends Controller
         Request $request,
         Employee $employee,
         AuditLogger $auditLogger,
-        EmployeeAssignmentHistoryRecorder $historyRecorder
+        EmployeeAssignmentHistoryRecorder $historyRecorder,
+        OfficeHeadRoleAssignmentService $officeHeadRoleAssignmentService
     ): RedirectResponse {
         $this->authorize('update', $employee);
         $data = $this->validated($request, $employee);
         $this->assertPositionDepartment($data, $employee);
+        $employee->loadMissing('position');
+        $previousPositionId = $employee->position_id;
+        $previousDepartmentId = $employee->department_id;
+        $previousPositionWasOfficeHeadDesignation = (bool) $employee->position?->is_office_head_designation;
         $previousAssignment = $historyRecorder->snapshot($employee);
         $effectiveDate = $data['assignment_effective_date'] ?? today()->toDateString();
         $reason = $data['assignment_change_reason'] ?? null;
@@ -157,11 +163,33 @@ class EmployeeController extends Controller
             $request,
             $auditLogger,
             $historyRecorder,
+            $officeHeadRoleAssignmentService,
+            $previousPositionId,
+            $previousDepartmentId,
+            $previousPositionWasOfficeHeadDesignation,
             $previousAssignment,
             $effectiveDate,
             $reason
         ): void {
             $employee->update($data);
+            $employee->refresh();
+            $employee->load('position');
+            $assignmentChanged = $previousPositionId !== $employee->position_id
+                || $previousDepartmentId !== $employee->department_id;
+            if ($previousPositionWasOfficeHeadDesignation && $previousPositionId !== null && $assignmentChanged) {
+                $officeHeadRoleAssignmentService->revokeEmployeeFromPosition(
+                    $employee->id,
+                    $previousPositionId,
+                    $previousDepartmentId,
+                    $request->user()
+                );
+            }
+            if ($employee->position?->is_office_head_designation) {
+                $officeHeadRoleAssignmentService->synchronizeVerifiedPosition(
+                    $employee->position,
+                    $request->user()
+                );
+            }
             $historyRecorder->recordChange(
                 $employee,
                 $previousAssignment,

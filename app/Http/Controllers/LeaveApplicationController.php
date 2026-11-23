@@ -35,7 +35,14 @@ class LeaveApplicationController extends Controller
         } elseif ($user->isOfficeHead()) {
             $query->where(function ($applications) use ($user) {
                 $applications->where('employee_id', $user->employee?->id ?? 0)
-                    ->orWhere('office_head_reviewer_id', $user->id)
+                    ->orWhere(function ($assigned) use ($user) {
+                        $assigned->where('office_head_reviewer_id', $user->id)
+                            ->where(function ($workflow) use ($user) {
+                                $workflow->where('status', '!=', 'Under Office Head Review')
+                                    ->orWhereHas('employee.department', fn ($department) => $department
+                                        ->where('head_user_id', $user->id));
+                            });
+                    })
                     ->orWhereHas('employee.department', fn ($department) => $department->where('head_user_id', $user->id));
             });
         } elseif ($user->isMayor()) {

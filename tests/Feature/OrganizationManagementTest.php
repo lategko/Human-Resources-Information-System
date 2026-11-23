@@ -59,6 +59,98 @@ class OrganizationManagementTest extends TestCase
         $this->get(route('positions.index'))->assertForbidden();
     }
 
+    public function test_department_office_head_options_and_updates_are_scoped_to_the_verified_department(): void
+    {
+        $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+        $treasury = Department::create(['name' => 'A Test Treasury Office', 'code' => 'MTO-SCOPE']);
+        $otherOffice = Department::create(['name' => 'B Test Other Office', 'code' => 'OTH-SCOPE']);
+        $unassignedOffice = Department::create(['name' => 'C Test Unassigned Office', 'code' => 'UNA-SCOPE']);
+        $treasurerPosition = Position::create([
+            'department_id' => $treasury->id,
+            'title' => 'Municipal Treasurer',
+            'is_office_head_designation' => true,
+        ]);
+        $otherHeadPosition = Position::create([
+            'department_id' => $otherOffice->id,
+            'title' => 'Verified Other Office Head',
+            'is_office_head_designation' => true,
+        ]);
+        $treasurer = User::factory()->create([
+            'name' => 'Lourdes Unciano Cepeda',
+            'role' => 'office_head',
+            'is_active' => true,
+        ]);
+        $otherHead = User::factory()->create([
+            'name' => 'Other Office Head',
+            'role' => 'office_head',
+            'is_active' => true,
+        ]);
+        Employee::create([
+            'user_id' => $treasurer->id,
+            'department_id' => $treasury->id,
+            'position_id' => $treasurerPosition->id,
+            'employee_no' => 'MTO-HEAD-001',
+            'first_name' => 'Lourdes',
+            'last_name' => 'Unciano Cepeda',
+            'employment_status' => 'Active',
+        ]);
+        Employee::create([
+            'user_id' => $otherHead->id,
+            'department_id' => $otherOffice->id,
+            'position_id' => $otherHeadPosition->id,
+            'employee_no' => 'OTH-HEAD-001',
+            'first_name' => 'Other',
+            'last_name' => 'Office Head',
+            'employment_status' => 'Active',
+        ]);
+        $treasury->update(['head_user_id' => $treasurer->id]);
+        $otherOffice->update(['head_user_id' => $otherHead->id]);
+
+        $response = $this->actingAs($admin)->get(route('departments.index'))->assertOk();
+        $response->assertSee('Lourdes Unciano Cepeda')
+            ->assertSee('Other Office Head')
+            ->assertSee('No Office Head')
+            ->assertViewHas('departments', function ($departments) use ($otherHead, $otherOffice, $treasurer, $treasury, $unassignedOffice): bool {
+                $rows = $departments->getCollection();
+                $treasuryRow = $rows->firstWhere('id', $treasury->id);
+                $otherOfficeRow = $rows->firstWhere('id', $otherOffice->id);
+                $unassignedRow = $rows->firstWhere('id', $unassignedOffice->id);
+
+                return $treasuryRow->verifiedHead?->id === $treasurer->id
+                    && $treasuryRow->eligibleOfficeHeads->modelKeys() === [$treasurer->id]
+                    && $otherOfficeRow->verifiedHead?->id === $otherHead->id
+                    && ! $otherOfficeRow->eligibleOfficeHeads->contains('id', $treasurer->id)
+                    && $unassignedRow->verifiedHead === null
+                    && $unassignedRow->eligibleOfficeHeads->isEmpty();
+            });
+
+        $this->put(route('departments.update', $otherOffice), [
+            'name' => $otherOffice->name,
+            'code' => $otherOffice->code,
+            'head_user_id' => $treasurer->id,
+            'is_active' => '1',
+        ])->assertSessionHasErrors('head_user_id');
+        $this->assertSame($otherHead->id, $otherOffice->fresh()->head_user_id);
+
+        $this->put(route('departments.update', $treasury), [
+            'name' => $treasury->name,
+            'code' => $treasury->code,
+            'head_user_id' => null,
+            'is_active' => '1',
+        ])->assertRedirect();
+        $this->assertNull($treasury->fresh()->head_user_id);
+        $this->assertSame($otherHead->id, $otherOffice->fresh()->head_user_id);
+
+        $this->put(route('departments.update', $treasury), [
+            'name' => $treasury->name,
+            'code' => $treasury->code,
+            'head_user_id' => $treasurer->id,
+            'is_active' => '1',
+        ])->assertRedirect();
+        $this->assertSame($treasurer->id, $treasury->fresh()->head_user_id);
+        $this->assertSame($otherHead->id, $otherOffice->fresh()->head_user_id);
+    }
+
     public function test_position_directory_filters_by_search_department_salary_grade_and_status(): void
     {
         $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);

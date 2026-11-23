@@ -7,6 +7,7 @@ use App\Models\Employee;
 use App\Models\User;
 use App\Services\AuditLogger;
 use App\Services\EmployeeUsernameGenerator;
+use App\Services\OfficeHeadRoleAssignmentService;
 use Illuminate\Contracts\Auth\PasswordBroker;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -54,17 +55,28 @@ class UserController extends Controller
     public function create(Request $request): View
     {
         $selectedEmployee = $request->integer('employee_id')
-            ? Employee::whereNull('user_id')->whereNull('archived_at')->find($request->integer('employee_id'))
+            ? Employee::with(['department', 'position'])->whereNull('user_id')->whereNull('archived_at')->find($request->integer('employee_id'))
             : null;
 
         return view('users.form', [
             'user' => new User([
                 'is_active' => true,
-                'role' => $selectedEmployee ? 'employee' : null,
+                'role' => $selectedEmployee
+                    ? ($selectedEmployee->position?->is_office_head_designation ? 'office_head' : 'employee')
+                    : null,
                 'email' => $selectedEmployee?->email,
             ]),
             'selectedEmployeeId' => $selectedEmployee?->id,
-            'employees' => Employee::whereNull('user_id')->whereNull('archived_at')->orderBy('last_name')->get(),
+            'assignedDepartmentId' => $selectedEmployee?->department_id,
+            'employees' => Employee::with(['department', 'position'])->whereNull('user_id')->whereNull('archived_at')->orderBy('last_name')->get(),
+            'officeHeadEmployees' => Employee::with(['department', 'position'])
+                ->whereNull('archived_at')
+                ->whereHas('position', fn ($query) => $query->where('is_office_head_designation', true))
+                ->where(function ($query) {
+                    $query->whereNull('user_id');
+                })
+                ->orderBy('last_name')
+                ->get(),
             'departments' => Department::where('is_active', true)->orderBy('name')->get(),
             'allowedRoles' => $this->allowedRoles($request->user()),
         ]);
@@ -73,12 +85,19 @@ class UserController extends Controller
     public function store(
         Request $request,
         AuditLogger $auditLogger,
-        EmployeeUsernameGenerator $usernameGenerator
+        EmployeeUsernameGenerator $usernameGenerator,
+        OfficeHeadRoleAssignmentService $officeHeadRoleAssignmentService
     ): RedirectResponse {
         $data = $this->validated($request);
-        $user = DB::transaction(function () use ($data, $usernameGenerator) {
+        $employeeAccountCreated = $data['role'] === 'employee';
+        $user = DB::transaction(function () use (
+            $data,
+            $usernameGenerator,
+            $request,
+            $officeHeadRoleAssignmentService,
+            $employeeAccountCreated
+        ) {
             $employee = ! empty($data['employee_id']) ? Employee::findOrFail($data['employee_id']) : null;
-            $isEmployeeAccount = $data['role'] === 'employee';
             $user = User::create([
                 'name' => $this->accountName($data),
                 'username' => filled($data['username'] ?? null) ? $data['username'] : ($employee
@@ -98,24 +117,34 @@ class UserController extends Controller
                 'suffix' => $data['role'] === 'employee' ? null : ($data['suffix'] ?? null),
                 'is_active' => $data['is_active'] ?? true,
                 'can_final_approve' => $data['role'] === 'admin' && ($data['can_final_approve'] ?? false),
-                'password' => $isEmployeeAccount ? Str::random(64) : $data['password'],
-                'must_change_password' => $isEmployeeAccount,
-                'account_setup_completed' => ! $isEmployeeAccount,
+                'password' => $employeeAccountCreated ? Str::random(64) : $data['password'],
+                'must_change_password' => $employeeAccountCreated,
+                'account_setup_completed' => ! $employeeAccountCreated,
             ]);
             if (array_key_exists('employee_id', $data)) {
                 $this->assignEmployee($user, $data['employee_id'] ?? null);
             }
             $this->assignOfficeHeadDepartment($user, $data['role'] === 'office_head' ? $data['department_id'] : null);
+            $linkedEmployee = $user->employee()->with('position')->first();
+            if ($linkedEmployee?->position?->is_office_head_designation) {
+                $officeHeadRoleAssignmentService->synchronizeVerifiedPosition(
+                    $linkedEmployee->position,
+                    $request->user()
+                );
+            }
 
             return $user;
         });
+        $user->refresh();
+        $activationRequired = $user->must_change_password && ! $user->account_setup_completed;
         $auditLogger->record('user.created', $user, [
             'role' => $user->role,
             'username' => $user->username,
-            'activation_pending' => $user->isEmployee() && ! $user->email,
+            'department_id' => Department::where('head_user_id', $user->id)->value('id'),
+            'activation_pending' => $activationRequired && ! $user->email,
         ]);
 
-        if ($user->isEmployee() && $user->email) {
+        if ($activationRequired && $user->email) {
             try {
                 $status = Password::sendResetLink(['email' => $user->email]);
             } catch (TransportExceptionInterface $exception) {
@@ -139,8 +168,8 @@ class UserController extends Controller
         }
 
         return redirect()->route('users.index')->with(
-            $user->isEmployee() ? 'warning' : 'success',
-            $user->isEmployee()
+            $activationRequired ? 'warning' : 'success',
+            $activationRequired
                 ? 'Employee account created without an email. Add a verified contact address and send an activation link from account management.'
                 : 'User account created.'
         );
@@ -153,7 +182,15 @@ class UserController extends Controller
         return view('users.form', [
             'user' => $user->load('employee'),
             'selectedEmployeeId' => $user->employee?->id,
-            'employees' => Employee::whereNull('archived_at')
+            'employees' => Employee::with(['department', 'position'])->whereNull('archived_at')
+                ->where(function ($query) use ($user) {
+                    $query->whereNull('user_id')->orWhere('user_id', $user->id);
+                })
+                ->orderBy('last_name')
+                ->get(),
+            'officeHeadEmployees' => Employee::with(['department', 'position'])
+                ->whereNull('archived_at')
+                ->whereHas('position', fn ($query) => $query->where('is_office_head_designation', true))
                 ->where(function ($query) use ($user) {
                     $query->whereNull('user_id')->orWhere('user_id', $user->id);
                 })
@@ -168,8 +205,12 @@ class UserController extends Controller
         ]);
     }
 
-    public function update(Request $request, User $user, AuditLogger $auditLogger): RedirectResponse
-    {
+    public function update(
+        Request $request,
+        User $user,
+        AuditLogger $auditLogger,
+        OfficeHeadRoleAssignmentService $officeHeadRoleAssignmentService
+    ): RedirectResponse {
         $this->authorizeAccountManagement($request->user(), $user);
         $data = $this->validated($request, $user);
         if ($user->id === $request->user()->id && $user->role !== $data['role']) {
@@ -181,7 +222,7 @@ class UserController extends Controller
         $previousRole = $user->role;
         $previousEffectiveRole = $user->canFinalApprove() ? 'mayor' : $user->role;
         $previousStatus = $user->is_active;
-        DB::transaction(function () use ($user, $data, $previousStatus) {
+        DB::transaction(function () use ($user, $data, $previousStatus, $request, $officeHeadRoleAssignmentService) {
             $user->fill([
                 'name' => $this->accountName($data),
                 'username' => $data['username'] ?? $user->username,
@@ -208,7 +249,16 @@ class UserController extends Controller
                 $this->assignEmployee($user, $data['employee_id'] ?? null);
             }
             $this->assignOfficeHeadDepartment($user, $data['role'] === 'office_head' ? $data['department_id'] : null);
+            $linkedEmployee = $user->employee()->with('position')->first();
+            if ($linkedEmployee?->position?->is_office_head_designation) {
+                $officeHeadRoleAssignmentService->synchronizeVerifiedPosition(
+                    $linkedEmployee->position,
+                    $request->user(),
+                    false
+                );
+            }
         });
+        $user->refresh();
         $newEffectiveRole = $user->canFinalApprove() ? 'mayor' : $user->role;
         if ($previousEffectiveRole !== $newEffectiveRole) {
             $auditLogger->record('user.role_changed', $user, [
@@ -224,7 +274,11 @@ class UserController extends Controller
                 'new_status' => $user->is_active ? 'active' : 'inactive',
             ]);
         }
-        $auditLogger->record('user.updated', $user, ['role' => $user->role, 'is_active' => $user->is_active]);
+        $auditLogger->record('user.updated', $user, [
+            'role' => $user->role,
+            'is_active' => $user->is_active,
+            'department_id' => Department::where('head_user_id', $user->id)->value('id'),
+        ]);
 
         return redirect()->route('users.index')->with('success', 'User account updated.');
     }
@@ -296,9 +350,10 @@ class UserController extends Controller
                 : null,
         ]);
         $employeeRole = $request->input('role') === 'employee';
-        $namePartsRequired = ! $user && ! $employeeRole ? 'required' : 'nullable';
+        $employeeIdentityRole = $employeeRole || $request->input('role') === 'office_head';
+        $namePartsRequired = ! $user && ! $employeeIdentityRole ? 'required' : 'nullable';
         $data = $request->validate([
-            'name' => [$employeeRole ? 'nullable' : 'required', 'string', 'max:150'],
+            'name' => [$employeeIdentityRole ? 'nullable' : 'required', 'string', 'max:150'],
             'email' => ['nullable', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user?->id)],
             'username' => [
                 Rule::requiredIf(fn () => ! $employeeRole && ! filled($request->input('email'))),
@@ -306,9 +361,9 @@ class UserController extends Controller
                 Rule::unique('users', 'username')->ignore($user?->id),
             ],
             'role' => ['required', Rule::in($this->allowedRoles($request->user(), $user))],
-            'first_name' => [$employeeRole ? 'nullable' : $namePartsRequired, 'string', 'max:100'],
+            'first_name' => [$employeeIdentityRole ? 'nullable' : $namePartsRequired, 'string', 'max:100'],
             'middle_name' => ['nullable', 'string', 'max:100'],
-            'last_name' => [$employeeRole ? 'nullable' : $namePartsRequired, 'string', 'max:100'],
+            'last_name' => [$employeeIdentityRole ? 'nullable' : $namePartsRequired, 'string', 'max:100'],
             'suffix' => ['nullable', 'string', 'max:20'],
             'can_final_approve' => [
                 'nullable',
@@ -316,7 +371,7 @@ class UserController extends Controller
                 Rule::prohibitedIf($request->input('role') !== 'admin'),
             ],
             'employee_id' => [
-                Rule::requiredIf($employeeRole),
+                Rule::requiredIf($employeeRole || $request->input('role') === 'office_head'),
                 'nullable',
                 'integer',
                 Rule::exists('employees', 'id')->whereNull('deleted_at')->whereNull('archived_at'),
@@ -339,10 +394,24 @@ class UserController extends Controller
             ->whereNotNull('user_id')->where('user_id', '!=', $user?->id)->exists()) {
             throw ValidationException::withMessages(['employee_id' => 'This employee record is already linked to another account.']);
         }
-        if ($employeeRole && $user && $user->employee && (int) $data['employee_id'] !== $user->employee->id) {
+        if (in_array($data['role'], ['employee', 'office_head'], true)
+            && $user
+            && $user->employee
+            && (int) $data['employee_id'] !== $user->employee->id) {
             throw ValidationException::withMessages([
                 'employee_id' => 'An existing employee account cannot be linked to a different employee record.',
             ]);
+        }
+        if ($data['role'] === 'office_head') {
+            $employee = Employee::with('position')->findOrFail($data['employee_id']);
+            if (! $employee->position?->is_office_head_designation
+                || ! $employee->department_id
+                || (int) $employee->department_id !== (int) $employee->position->department_id
+                || (int) $employee->department_id !== (int) $data['department_id']) {
+                throw ValidationException::withMessages([
+                    'employee_id' => 'Office Head access requires an employee record with an HR-approved position designation in the selected department.',
+                ]);
+            }
         }
         $departmentHeadId = ! empty($data['department_id'])
             ? Department::whereKey($data['department_id'])->value('head_user_id')
@@ -372,7 +441,7 @@ class UserController extends Controller
 
     private function accountName(array $data): string
     {
-        if ($data['role'] === 'employee') {
+        if (in_array($data['role'], ['employee', 'office_head'], true)) {
             return Employee::findOrFail($data['employee_id'])->full_name;
         }
 

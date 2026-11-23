@@ -123,8 +123,8 @@
         </section>
         <div class="section-7-preview"><span class="section-number">07</span><div><b>7. Details of action on application</b><p>Leave credit certification, recommendation, approval, and disapproval fields are reserved for HRMO and authorized approvers.</p></div></div>
         <div class="form-actions"><a class="button button-outline" href="{{ $application->exists ? route('leave.show', $application) : route('leave.index') }}">Cancel</a>
-            <button class="button button-outline" type="submit" name="intent" value="draft" formnovalidate>Save draft</button>
-            <button class="button button-primary" type="submit" name="intent" value="submit">Review and submit <span>→</span></button>
+            <button class="button button-outline" type="submit" name="intent" value="draft" formnovalidate data-confirm-type="form" data-confirm-title="Save Leave Application Draft?" data-confirm-message="Save the information currently entered as a draft? You can return and complete it later." data-confirm-text="Save Draft" data-loading-text="Saving draft…">Save draft</button>
+            <button class="button button-primary" type="submit" name="intent" value="submit" data-confirm-type="form" data-confirm-title="Submit Leave Application?" data-confirm-message="Submit this leave application to the HRMO and approval workflow for review?" data-confirm-text="Submit Application" data-loading-text="Submitting…">Review and submit <span>→</span></button>
         </div>
     </form>
 @endsection

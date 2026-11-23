@@ -36,6 +36,202 @@ window.applyHrisChartTheme = () => {
 
 window.applyHrisChartTheme();
 
+const modal = document.querySelector('[data-hris-modal]');
+const modalTitle = modal?.querySelector('[data-hris-modal-title]');
+const modalKind = modal?.querySelector('[data-hris-modal-kind]');
+const modalDescription = modal?.querySelector('[data-hris-modal-description]');
+const modalIndicator = modal?.querySelector('[data-hris-modal-indicator]');
+const modalCancel = modal?.querySelector('[data-hris-modal-cancel]');
+const modalConfirm = modal?.querySelector('[data-hris-modal-confirm]');
+let modalResolver = null;
+
+const modalTypes = {
+    confirmation: { label: 'Confirmation', tone: 'info', role: 'alertdialog' },
+    form: { label: 'Confirm changes', tone: 'info', role: 'alertdialog' },
+    delete: { label: 'Delete confirmation', tone: 'danger', role: 'alertdialog' },
+    approval: { label: 'Approval confirmation', tone: 'success', role: 'alertdialog' },
+    rejection: { label: 'Rejection confirmation', tone: 'danger', role: 'alertdialog' },
+    import: { label: 'Import confirmation', tone: 'info', role: 'alertdialog' },
+    success: { label: 'Success', tone: 'success', role: 'dialog' },
+    warning: { label: 'Warning', tone: 'warning', role: 'alertdialog' },
+    error: { label: 'Error', tone: 'danger', role: 'alertdialog' },
+    info: { label: 'Information', tone: 'info', role: 'dialog' },
+};
+
+const finishModal = (confirmed) => {
+    if (!modal || !modal.open) return;
+    const resolve = modalResolver;
+    modalResolver = null;
+    modal.close();
+    resolve?.(confirmed);
+};
+
+const openModal = (options = {}, confirmation = false) => {
+    if (!modal || !modal.showModal || !modalTitle || !modalDescription || !modalConfirm) {
+        window.hrisNotify?.(
+            'error',
+            'Confirmation unavailable',
+            'The dialog could not be opened, so the requested action was not submitted.'
+        );
+        return Promise.resolve(false);
+    }
+
+    if (modal.open) finishModal(false);
+
+    const type = modalTypes[options.type] ? options.type : 'confirmation';
+    const typeInfo = modalTypes[type];
+    modal.dataset.tone = typeInfo.tone;
+    modal.setAttribute('role', typeInfo.role);
+    modalKind.textContent = options.kind || typeInfo.label;
+    modalTitle.textContent = options.title || (confirmation ? 'Confirm action' : typeInfo.label);
+    modalDescription.textContent = options.message || 'Please review this action before continuing.';
+    modalConfirm.textContent = options.confirmText || (confirmation ? 'Confirm' : 'Close');
+    modalConfirm.classList.toggle('button-danger', typeInfo.tone === 'danger');
+    modalConfirm.classList.toggle('button-primary', typeInfo.tone !== 'danger');
+    modalCancel.hidden = !confirmation;
+    modalCancel.textContent = options.cancelText || 'Cancel';
+    modalIndicator?.setAttribute('aria-label', typeInfo.label);
+
+    return new Promise((resolve) => {
+        modalResolver = resolve;
+        modal.showModal();
+        modalConfirm.focus();
+    });
+};
+
+window.HrisModal = {
+    confirm: (options) => openModal(options, true),
+    show: (options) => openModal(options, false),
+};
+
+window.hrisNotify = (type, title, message) => {
+    const region = document.getElementById('hris-toast-region');
+    if (!region) {
+        console.error(`[HRIS ${type}] ${title}: ${message}`);
+        return;
+    }
+
+    const notice = document.createElement('section');
+    notice.className = `hris-toast hris-toast-${modalTypes[type]?.tone ?? 'info'}`;
+    notice.setAttribute('role', type === 'error' ? 'alert' : 'status');
+    notice.dataset.notificationKey = `${type}\u0000${title}\u0000${message}`;
+
+    const copy = document.createElement('div');
+    copy.className = 'hris-toast-copy';
+    const heading = document.createElement('strong');
+    heading.textContent = title;
+    const description = document.createElement('p');
+    description.textContent = message;
+    copy.append(heading, description);
+
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'hris-notice-dismiss';
+    dismiss.textContent = 'Dismiss';
+    dismiss.setAttribute('aria-label', 'Dismiss notification');
+    dismiss.addEventListener('click', () => notice.remove());
+    notice.append(copy, dismiss);
+
+    const duplicate = [...region.children].find((item) => item.dataset.notificationKey === notice.dataset.notificationKey);
+    duplicate?.remove();
+    region.append(notice);
+
+    if (type !== 'error') {
+        window.setTimeout(() => notice.remove(), type === 'warning' ? 10000 : 7000);
+    }
+};
+
+document.addEventListener('click', (event) => {
+    if (!(event.target instanceof Element)) return;
+    event.target.closest('[data-dismiss-notice]')?.closest('.hris-notice')?.remove();
+});
+
+modalCancel?.addEventListener('click', () => finishModal(false));
+modalConfirm?.addEventListener('click', () => finishModal(true));
+modal?.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    finishModal(false);
+});
+modal?.addEventListener('click', (event) => {
+    if (event.target === modal) finishModal(false);
+});
+modal?.addEventListener('close', () => {
+    const resolve = modalResolver;
+    modalResolver = null;
+    resolve?.(false);
+});
+
+document.addEventListener('submit', (event) => {
+    if (event.defaultPrevented || !(event.target instanceof HTMLFormElement)) return;
+
+    const form = event.target;
+    if (form.method.toUpperCase() === 'GET') return;
+
+    const submitter = event.submitter;
+    const confirmSource = submitter?.hasAttribute('data-confirm-title') ? submitter : form;
+    const confirmTitle = confirmSource.dataset.confirmTitle;
+
+    if (confirmTitle && form.dataset.hrisConfirmed !== 'true') {
+        event.preventDefault();
+        if (form.dataset.hrisConfirmPending === 'true' || form.dataset.hrisSubmitting === 'true') return;
+
+        const statusChoice = form.querySelector('[data-confirm-status]');
+        let message = confirmSource.dataset.confirmMessage || 'Please confirm that you want to continue.';
+        let title = confirmTitle;
+        let type = confirmSource.dataset.confirmType || 'form';
+        let confirmText = confirmSource.dataset.confirmText || 'Continue';
+
+        if (statusChoice?.value === 'Approved') {
+            title = 'Approve Attendance Exception?';
+            message = 'Confirm that this attendance exception should be approved for HR review.';
+            type = 'approval';
+            confirmText = 'Approve Exception';
+        } else if (statusChoice?.value === 'Rejected') {
+            title = 'Reject Attendance Exception?';
+            message = 'Confirm that this attendance exception should be rejected.';
+            type = 'rejection';
+            confirmText = 'Reject Exception';
+        }
+
+        form.dataset.hrisConfirmPending = 'true';
+        window.HrisModal.confirm({
+            type,
+            title,
+            message,
+            confirmText,
+            cancelText: confirmSource.dataset.cancelText || 'Cancel',
+        }).then((confirmed) => {
+            delete form.dataset.hrisConfirmPending;
+            if (!confirmed) return;
+
+            form.dataset.hrisConfirmed = 'true';
+            if (submitter) form.requestSubmit(submitter);
+            else form.requestSubmit();
+        }).catch((error) => {
+            delete form.dataset.hrisConfirmPending;
+            window.hrisNotify('error', 'Confirmation failed', error.message || 'The action was not submitted.');
+        });
+
+        return;
+    }
+
+    if (form.dataset.hrisConfirmed === 'true') delete form.dataset.hrisConfirmed;
+    if (form.dataset.hrisSubmitting === 'true') {
+        event.preventDefault();
+        return;
+    }
+
+    form.dataset.hrisSubmitting = 'true';
+    form.setAttribute('aria-busy', 'true');
+    form.querySelectorAll('button[type="submit"], button:not([type]), input[type="submit"]').forEach((button) => {
+        const loadingText = button === submitter ? button.dataset.loadingText : null;
+        if (button === submitter && button instanceof HTMLButtonElement && !button.querySelector('[x-text]')) {
+            button.textContent = loadingText || 'Processing…';
+        }
+        button.disabled = true;
+    });
+});
+
 window.publicNavigation = () => ({
     menuOpen: false,
     activeSection: 'home',
@@ -424,31 +620,69 @@ window.workplaceAssignments = (options) => ({
             ? [...new Set([...this.selectedEmployeeIds, ...this.visibleEmployeeIds])]
             : this.selectedEmployeeIds.filter((id) => !visible.has(id));
     },
-    confirmDepartmentAssignment(event) {
+    async confirmDepartmentAssignment(event) {
         const roster = this.departmentRoster();
         if (this.previewBusy || this.previewError) {
-            window.alert(this.previewError || 'Wait for the affected employee list to finish loading.');
+            window.hrisNotify('error', 'Workplace assignment unavailable', this.previewError || 'Wait for the affected employee list to finish loading.');
             return;
         }
         if (!roster.length) {
-            window.alert('There are no active employees in the selected department.');
+            window.hrisNotify('warning', 'No employees to update', 'There are no active employees in the selected department.');
             return;
         }
-        const replaced = event.currentTarget.querySelector('[name="replace_individual_assignments"]')?.checked
+        const form = event.currentTarget;
+        if (form.dataset.hrisSubmitting === 'true') return;
+        const replaced = form.querySelector('[name="replace_individual_assignments"]')?.checked
             ? this.individualOverrideCount()
             : 0;
-        if (window.confirm(`Apply this workplace default to ${roster.length} employees? ${replaced} individual assignments will be replaced.`)) {
-            event.currentTarget.submit();
-        }
-    },
-    confirmBulkAssignment(event) {
-        if (!this.selectedEmployeeIds.length) {
-            window.alert('Select at least one employee.');
+        let confirmed;
+        try {
+            confirmed = await window.HrisModal.confirm({
+                type: 'form',
+                title: 'Apply Department Workplace?',
+                message: `This will assign the selected workplace to ${roster.length} employees.${replaced ? ` It will replace ${replaced} individual assignments.` : ''}`,
+                confirmText: 'Apply Assignment',
+            });
+        } catch (error) {
+            window.hrisNotify('error', 'Confirmation failed', error.message || 'The assignment was not submitted.');
             return;
         }
-        if (window.confirm(`Assign the selected workplace to ${this.selectedEmployeeIds.length} employee(s)?`)) {
-            event.currentTarget.submit();
+        if (!confirmed) return;
+        form.dataset.hrisSubmitting = 'true';
+        const submitButton = form.querySelector('[type="submit"]');
+        if (submitButton instanceof HTMLButtonElement) {
+            submitButton.disabled = true;
+            submitButton.textContent = 'Assigning…';
         }
+        form.submit();
+    },
+    async confirmBulkAssignment(event) {
+        if (!this.selectedEmployeeIds.length) {
+            window.hrisNotify('warning', 'No employees selected', 'Select at least one employee before assigning a workplace.');
+            return;
+        }
+        const form = event.currentTarget;
+        if (form.dataset.hrisSubmitting === 'true') return;
+        let confirmed;
+        try {
+            confirmed = await window.HrisModal.confirm({
+                type: 'form',
+                title: 'Assign Workplace to Employees?',
+                message: `The selected workplace will be assigned to ${this.selectedEmployeeIds.length} employee(s).`,
+                confirmText: 'Assign Workplace',
+            });
+        } catch (error) {
+            window.hrisNotify('error', 'Confirmation failed', error.message || 'The assignment was not submitted.');
+            return;
+        }
+        if (!confirmed) return;
+        form.dataset.hrisSubmitting = 'true';
+        const submitButton = form.querySelector('[type="submit"]');
+        if (submitButton instanceof HTMLButtonElement) {
+            submitButton.disabled = true;
+            submitButton.textContent = 'Assigning…';
+        }
+        form.submit();
     },
 });
 

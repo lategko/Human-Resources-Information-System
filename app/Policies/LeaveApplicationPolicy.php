@@ -18,8 +18,9 @@ class LeaveApplicationPolicy
         }
 
         if ($user->isOfficeHead()) {
-            return $application->office_head_reviewer_id === $user->id
-                || $application->employee?->department?->head_user_id === $user->id;
+            return $application->employee?->department?->head_user_id === $user->id
+                || ($application->office_head_reviewer_id === $user->id
+                    && $application->status !== 'Under Office Head Review');
         }
 
         if ($user->canFinalApprove()) {
@@ -58,8 +59,11 @@ class LeaveApplicationPolicy
         }
 
         if ($user->isOfficeHead()) {
-            return in_array($application->status, ['Under Office Head Review', 'Under Alternate Office Head Review'], true)
-                && $application->office_head_reviewer_id === $user->id;
+            return ($application->status === 'Under Office Head Review'
+                    && $application->office_head_reviewer_id === $user->id
+                    && $application->employee?->department?->head_user_id === $user->id)
+                || ($application->status === 'Under Alternate Office Head Review'
+                    && $application->office_head_reviewer_id === $user->id);
         }
 
         if ($user->isMayor() && $application->status === 'Under Alternate Office Head Review') {

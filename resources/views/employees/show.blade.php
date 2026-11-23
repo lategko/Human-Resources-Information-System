@@ -68,6 +68,15 @@
         @forelse($employee->leaveCredits as $credit)<div class="credit-row"><span><b>{{ $credit->leaveType->name }}</b><small>Effective {{ $credit->effective_date?->format('M j, Y') ?? '—' }}</small></span><strong>{{ number_format($credit->balance, 2) }} <small>days</small></strong></div>@empty<p class="empty-note">No credits recorded.</p>@endforelse</section>
     @endif
     @can('archive', $employee)
-        @if(!$employee->trashed())<form class="archive-form" method="POST" action="{{ route('employees.archive', $employee) }}" onsubmit="return confirm('Archive this employee record? It will be retained and can no longer be selected as active personnel.')">@csrf<button class="button button-danger" type="submit">Archive employee</button></form>@endif
+        @if(!$employee->trashed())
+            <form class="archive-form" method="POST" action="{{ route('employees.archive', $employee) }}"
+                data-confirm-type="delete"
+                data-confirm-title="Archive Employee Record?"
+                data-confirm-message="This employee record will be retained but can no longer be selected as active personnel."
+                data-confirm-text="Archive Employee">
+                @csrf
+                <button class="button button-danger" type="submit" data-loading-text="Archiving…">Archive employee</button>
+            </form>
+        @endif
     @endcan
 @endsection
