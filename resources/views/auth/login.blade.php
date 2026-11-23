@@ -8,7 +8,7 @@
     <title>Sign in · Municipality of Camalaniugan HRMO</title>
     @vite(['resources/css/app.css', 'resources/js/app.js'])
 </head>
-<body class="login-page" style="--login-image: url('{{ asset('image/login.background.jpg') }}')" x-data="{ showPassword: false, isSubmitting: false }">
+<body class="login-page" style="--login-image: url('{{ asset('image/backgroundlanding.jpg') }}')" x-data="{ showPassword: false, isSubmitting: false }">
     <main class="login-panel">
         <a href="{{ route('home') }}" class="login-back">Back to portal</a>
         <div class="login-brand">
