@@ -5,13 +5,14 @@ namespace App\Http\Controllers;
 use App\Models\SystemSetting;
 use App\Models\User;
 use App\Services\AuditLogger;
+use App\Services\DatabaseBackupService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
 
 class SystemSettingsController extends Controller
 {
-    public function index(): View
+    public function index(DatabaseBackupService $backupService): View
     {
         return view('settings.system', [
             'workweekDays' => SystemSetting::find('workweek_days')?->value ?? [1, 2, 3, 4, 5],
@@ -20,6 +21,7 @@ class SystemSettingsController extends Controller
             'hrReviewers' => User::query()->where('role', 'admin')->where('is_active', true)->orderBy('name')->get(),
             'designatedApprovers' => User::query()->where('role', 'admin')->where('can_final_approve', true)
                 ->where('is_active', true)->orderBy('name')->get(),
+            'databaseBackups' => $backupService->history(),
         ]);
     }
 

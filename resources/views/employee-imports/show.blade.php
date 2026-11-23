@@ -257,7 +257,7 @@
                 </details>
             </article>
         </div>
-        <p class="info-note top-space">Email is optional during import. Each new account receives a unique, randomly generated temporary credential and must complete secure password setup; HR can send an activation link after an email is added. Only HR-approved Office Head designations receive that role.</p>
+        <p class="info-note top-space">Email is optional during import. Each imported employee account uses the configured temporary password and must change it at first sign-in before accessing HRIS modules. Re-importing a linked employee also resets that account to the temporary password. HR sends a password setup link when an email is available. Protected Admin accounts are not changed. Only HR-approved Office Head designations receive that role.</p>
     </section>
 
     @if($canEditMappings)

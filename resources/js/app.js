@@ -60,44 +60,44 @@ window.hrisWorkflow = () => ({
         {
             title: 'Secure Account Access',
             role: 'Employees and authorized municipal personnel',
-            action: 'Sign in with a registered email address and password. The HRIS verifies credentials, account status, and assigned permissions.',
+            action: 'Sign in using a registered username or email address and password. The HRIS verifies credentials, account status, and assigned permissions.',
             next: 'Users enter only the system areas permitted for their account role.',
         },
         {
             title: 'Employee Information Management',
             role: 'HRMO and authorized administrators; employees for their own permitted information',
             action: 'Authorized personnel manage employee profiles, employment details, department assignments, and personnel records. Employees can view and update permitted personal information.',
-            next: 'Employees can use available services, including submitting a leave application.',
+            next: 'Employees with a linked employee record can use available services, including submitting a leave application.',
         },
         {
             title: 'Leave Application Submission',
             role: 'Any eligible user with a linked employee record',
             action: 'Complete the leave application, provide the required information, attach applicable supporting documents, and submit the request.',
-            next: 'For a standard employee request, the application is routed to the assigned Office Head.',
+            next: 'Submitted applications enter HRMO verification first. Drafts remain drafts until submitted.',
+        },
+        {
+            title: 'HRMO Verification and Processing',
+            role: 'Admin / HRMO or a separately assigned alternate HR reviewer when required',
+            action: 'Verify eligibility, applicable leave credits, working days, and supporting documents; record certification or return the application. HRMO certification is not final approval.',
+            next: 'After verification, the application is routed for Office Head review. Required alternate reviewers are explicitly assigned.',
         },
         {
             title: 'Office Head Review',
-            role: 'Assigned Office Head, or Mayor acting as an authorized alternate when unavailable',
-            action: 'Review department staffing and application completeness, then endorse or return the application. An Office Head does not endorse their own application.',
-            next: 'An Office Head endorsement moves the application to HRMO verification. An Office Head applying for leave goes directly to HRMO.',
+            role: 'Assigned Office Head or an authorized alternate when the Office Head is unavailable',
+            action: 'Review the department application and endorse it for a decision or return it for correction. The assigned Office Head cannot review their own application.',
+            next: 'The Mayor makes the separate final decision. A Mayor’s personal application requires an explicitly designated authorized final approver.',
         },
         {
-            title: 'HRMO Verification',
-            role: 'Admin / HRMO or an assigned alternate HR reviewer for an Admin applicant',
-            action: 'Verify eligibility, applicable leave credits, working days, and supporting documents; record certification or return the application. Certification is not final approval.',
-            next: 'After certification, the application proceeds to the Mayor for a separate final decision.',
+            title: 'Attendance and Leave Monitoring',
+            role: 'Employees and authorized municipal personnel',
+            action: 'Employees use GPS checks at configured workplaces to record attendance. Authorized HRMO personnel monitor records, process permitted corrections, and manage leave credits.',
+            next: 'Configured workweeks and holidays inform applicable personnel processes; monthly leave accrual is managed by the system.',
         },
         {
-            title: 'Final Approval',
-            role: "Mayor for standard applications; a separately designated authority for the Mayor's own application",
-            action: 'Review the certified application and record approval, disapproval, or a permitted return for clarification. No user may approve their own application.',
-            next: 'The decision and application status are recorded, applicable leave credits are finalized once, and the employee is notified.',
-        },
-        {
-            title: 'Application Status and Records',
-            role: 'Employee and authorized HR personnel',
-            action: 'Employees check their application status. Authorized HRMO personnel maintain application records and monitor leave transactions and related HR activity.',
-            next: 'The application history remains available to permitted users for follow-up and accountability.',
+            title: 'Reports and Administrative Management',
+            role: 'Authorized administrators, HRMO, and other permitted municipal roles',
+            action: 'Review available employee, attendance, and leave reports. Admin / HRMO personnel manage organization records, accounts, notifications, and system settings within their permissions.',
+            next: 'Access to reports and administrative functions follows each account’s designated role permissions.',
         },
     ],
     selectStep(index) {
@@ -142,6 +142,315 @@ if (themeToggle) {
         window.applyHrisChartTheme();
     });
 }
+
+window.gpsAttendance = (timeInUrl, timeOutUrl) => ({
+    busy: false,
+    message: '',
+    async submit(action) {
+        if (!navigator.geolocation) {
+            this.message = 'Unable to retrieve your current location. Please try again.';
+            return;
+        }
+        this.busy = true;
+        this.message = 'Retrieving your verified location…';
+        navigator.geolocation.getCurrentPosition(async (position) => {
+            try {
+                const response = await fetch(action === 'time-in' ? timeInUrl : timeOutUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Accept': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content,
+                    },
+                    body: new URLSearchParams({
+                        latitude: String(position.coords.latitude),
+                        longitude: String(position.coords.longitude),
+                        accuracy_meters: String(position.coords.accuracy),
+                    }),
+                });
+                const contentType = response.headers.get('content-type') || '';
+                if (response.ok) {
+                    window.location.reload();
+                    return;
+                }
+                const result = contentType.includes('application/json')
+                    ? await response.json()
+                    : null;
+                this.message = Object.values(result?.errors ?? {})[0]?.[0]
+                    ?? 'Unable to record attendance. Please try again.';
+            } catch (error) {
+                this.message = 'Unable to retrieve your current location. Please try again.';
+            } finally {
+                this.busy = false;
+            }
+        }, (error) => {
+            this.busy = false;
+            this.message = error.code === error.PERMISSION_DENIED
+                ? 'Location access is required to record your attendance. Please enable location services and allow location access.'
+                : 'Unable to retrieve your current location. Please try again.';
+        }, {
+            enableHighAccuracy: true,
+            timeout: 15000,
+            maximumAge: 0,
+        });
+    },
+});
+
+window.workplaceMapPicker = (options) => {
+    let L;
+    let map;
+    let marker;
+    let geofence;
+
+    return {
+        searchUrl: options.searchUrl,
+        reverseUrl: options.reverseUrl,
+        latitude: options.latitude ?? '',
+        longitude: options.longitude ?? '',
+        address: options.address ?? '',
+        radius: Number(options.radius ?? 100),
+        searchTerm: '',
+        searchResults: [],
+        busy: false,
+        message: '',
+        async init() {
+            try {
+                const [leafletModule] = await Promise.all([
+                    import('leaflet'),
+                    import('leaflet/dist/leaflet.css'),
+                ]);
+                L = leafletModule.default;
+                map = L.map(this.$refs.map).setView(
+                    this.hasCoordinates() ? [Number(this.latitude), Number(this.longitude)] : [18.2, 121.65],
+                    this.hasCoordinates() ? 17 : 12,
+                );
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    maxZoom: 19,
+                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                }).addTo(map);
+                map.on('click', (event) => this.updatePosition(event.latlng.lat, event.latlng.lng));
+                if (this.hasCoordinates()) this.setMarker(Number(this.latitude), Number(this.longitude));
+                new ResizeObserver(() => this.invalidateMap()).observe(this.$refs.map);
+            } catch {
+                this.message = 'The map could not be loaded. Check your connection and try again.';
+            }
+        },
+        hasCoordinates() {
+            return this.latitude !== '' && this.longitude !== '';
+        },
+        invalidateMap() {
+            map?.invalidateSize();
+        },
+        setMarker(latitude, longitude) {
+            const point = [latitude, longitude];
+            if (!marker) {
+                marker = L.marker(point, {
+                    draggable: true,
+                    icon: L.divIcon({
+                        className: 'workplace-map-marker',
+                        html: '<span></span>',
+                        iconSize: [22, 22],
+                        iconAnchor: [11, 11],
+                    }),
+                }).addTo(map);
+                marker.on('dragend', (event) => {
+                    const position = event.target.getLatLng();
+                    this.updatePosition(position.lat, position.lng);
+                });
+            } else {
+                marker.setLatLng(point);
+            }
+
+            if (!geofence) {
+                geofence = L.circle(point, {
+                    radius: this.radius,
+                    color: '#17689c',
+                    weight: 2,
+                    fillColor: '#3b82f6',
+                    fillOpacity: 0.12,
+                }).addTo(map);
+            } else {
+                geofence.setLatLng(point);
+                geofence.setRadius(this.radius);
+            }
+        },
+        async updatePosition(latitude, longitude, reverse = true) {
+            this.latitude = Number(latitude).toFixed(7);
+            this.longitude = Number(longitude).toFixed(7);
+            this.setMarker(Number(this.latitude), Number(this.longitude));
+            map.setView([Number(this.latitude), Number(this.longitude)], Math.max(map.getZoom(), 17));
+            this.message = '';
+            if (reverse) await this.reverseGeocode();
+        },
+        updateRadius() {
+            if (geofence) geofence.setRadius(Number(this.radius));
+        },
+        async search() {
+            const query = this.searchTerm.trim();
+            if (!query) {
+                this.message = 'Enter a workplace name or address to search.';
+                this.searchResults = [];
+                return;
+            }
+            this.busy = true;
+            this.message = 'Searching OpenStreetMap…';
+            this.searchResults = [];
+            try {
+                const response = await fetch(`${this.searchUrl}?q=${encodeURIComponent(query)}`, {
+                    headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                });
+                const results = await response.json();
+                if (!response.ok) throw new Error(results.message || 'Location search is temporarily unavailable.');
+                this.searchResults = results;
+                this.message = results.length ? '' : 'No matching places found. Try a more specific name or address.';
+            } catch (error) {
+                this.message = error.message || 'Location search is temporarily unavailable.';
+            } finally {
+                this.busy = false;
+            }
+        },
+        selectResult(result) {
+            this.searchResults = [];
+            this.searchTerm = result.display_name;
+            this.address = result.display_name.slice(0, 255);
+            this.updatePosition(result.latitude, result.longitude, false);
+        },
+        async reverseGeocode() {
+            try {
+                const params = new URLSearchParams({ latitude: this.latitude, longitude: this.longitude });
+                const response = await fetch(`${this.reverseUrl}?${params}`, {
+                    headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                });
+                const result = await response.json();
+                if (response.ok && result.display_name) {
+                    this.address = result.display_name.slice(0, 255);
+                    this.searchTerm = result.display_name;
+                }
+            } catch {
+                this.message = 'Coordinates were updated, but the address could not be retrieved.';
+            }
+        },
+        useCurrentLocation() {
+            this.message = '';
+            if (!navigator.geolocation) {
+                this.message = 'Location services are not available in this browser.';
+                return;
+            }
+            this.busy = true;
+            navigator.geolocation.getCurrentPosition(
+                async (position) => {
+                    await this.updatePosition(position.coords.latitude, position.coords.longitude);
+                    this.busy = false;
+                },
+                (error) => {
+                    this.busy = false;
+                    this.message = error.code === error.PERMISSION_DENIED
+                        ? 'Location access was denied. Allow location access in your browser and try again.'
+                        : 'Unable to retrieve your current location. Please try again.';
+                },
+                { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
+            );
+        },
+    };
+};
+
+window.workplaceAssignments = (options) => ({
+    activeTab: options.activeTab,
+    departmentEmployees: options.departmentEmployees,
+    departmentPreviewUrl: options.departmentPreviewUrl,
+    employees: options.employees,
+    visibleEmployeeIds: options.visibleEmployeeIds.map(String),
+    selectedEmployeeIds: [],
+    selectedDepartment: options.selectedDepartment ? String(options.selectedDepartment) : '',
+    selectedEffectiveDate: options.selectedEffectiveDate,
+    previewBusy: false,
+    previewError: '',
+    previewRequestId: 0,
+    selectedEmployee: options.selectedEmployee ? String(options.selectedEmployee) : '',
+    employeeSearch: '',
+    async init() {
+        if (this.selectedDepartment) await this.refreshDepartmentRoster();
+    },
+    departmentRoster() {
+        return this.departmentEmployees[this.selectedDepartment] ?? [];
+    },
+    individualOverrideCount() {
+        return this.departmentRoster().filter((employee) => ['individual', 'bulk'].includes(employee.assignment_type)).length;
+    },
+    filteredEmployees() {
+        const query = this.employeeSearch.trim().toLowerCase();
+        return Object.entries(this.employees)
+            .filter(([id, employee]) => !query || `${employee.employee_no} ${employee.name}`.toLowerCase().includes(query))
+            .map(([id, employee]) => ({ id, ...employee }));
+    },
+    selectedEmployeeDetails() {
+        return this.employees[this.selectedEmployee] ?? null;
+    },
+    async refreshDepartmentRoster() {
+        const requestId = ++this.previewRequestId;
+        if (!this.selectedDepartment || !this.selectedEffectiveDate) {
+            this.departmentEmployees = { ...this.departmentEmployees, [this.selectedDepartment]: [] };
+            this.previewBusy = false;
+            this.previewError = '';
+            return;
+        }
+        this.previewBusy = true;
+        this.previewError = '';
+        try {
+            const query = new URLSearchParams({
+                department_id: this.selectedDepartment,
+                effective_from: this.selectedEffectiveDate,
+            });
+            const response = await fetch(`${this.departmentPreviewUrl}?${query}`, {
+                headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.message || 'Unable to load affected employees.');
+            if (requestId !== this.previewRequestId) return;
+            this.departmentEmployees = {
+                ...this.departmentEmployees,
+                [this.selectedDepartment]: result.employees,
+            };
+        } catch (error) {
+            if (requestId !== this.previewRequestId) return;
+            this.previewError = error.message || 'Unable to load affected employees.';
+        } finally {
+            if (requestId === this.previewRequestId) this.previewBusy = false;
+        }
+    },
+    selectVisibleEmployees(event) {
+        const visible = new Set(this.visibleEmployeeIds);
+        this.selectedEmployeeIds = event.target.checked
+            ? [...new Set([...this.selectedEmployeeIds, ...this.visibleEmployeeIds])]
+            : this.selectedEmployeeIds.filter((id) => !visible.has(id));
+    },
+    confirmDepartmentAssignment(event) {
+        const roster = this.departmentRoster();
+        if (this.previewBusy || this.previewError) {
+            window.alert(this.previewError || 'Wait for the affected employee list to finish loading.');
+            return;
+        }
+        if (!roster.length) {
+            window.alert('There are no active employees in the selected department.');
+            return;
+        }
+        const replaced = event.currentTarget.querySelector('[name="replace_individual_assignments"]')?.checked
+            ? this.individualOverrideCount()
+            : 0;
+        if (window.confirm(`Apply this workplace default to ${roster.length} employees? ${replaced} individual assignments will be replaced.`)) {
+            event.currentTarget.submit();
+        }
+    },
+    confirmBulkAssignment(event) {
+        if (!this.selectedEmployeeIds.length) {
+            window.alert('Select at least one employee.');
+            return;
+        }
+        if (window.confirm(`Assign the selected workplace to ${this.selectedEmployeeIds.length} employee(s)?`)) {
+            event.currentTarget.submit();
+        }
+    },
+});
 
 window.leaveApplicationForm = (types, selectedId, workingDaysUrl) => ({
     types,

@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Department;
 use App\Models\Employee;
+use App\Models\EmployeeAssignmentHistory;
 use App\Models\EmployeeEmploymentHistory;
 use App\Models\EmployeeImport;
 use App\Models\EmployeeServiceProfile;
@@ -37,7 +38,7 @@ class EmployeeWorkbookImportTest extends TestCase
     {
         parent::setUp();
         $this->seed();
-        config(['hris.employee_import.default_password' => 'P@assword!']);
+        config(['hris.employee_import.default_password' => 'P@ssword123']);
         User::create([
             'name' => 'Test HRMO User',
             'email' => 'hrmo@example.test',
@@ -100,6 +101,7 @@ class EmployeeWorkbookImportTest extends TestCase
 
     public function test_admin_approves_mappings_and_imports_valid_names_without_individual_review(): void
     {
+        Notification::fake();
         $department = $this->officialDepartment();
         $position = Position::create([
             'department_id' => $department->id,
@@ -138,6 +140,7 @@ class EmployeeWorkbookImportTest extends TestCase
             ->assertSee('Person')
             ->assertDontSee('Pending HRMO Review');
 
+        $temporaryPassword = config('hris.employee_import.default_password');
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
             ->assertRedirect();
@@ -156,15 +159,74 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame('employee', $employee->user->role);
         $this->assertSame($employee->email, $employee->user->email);
         $this->assertSame('test.person', $employee->user->username);
+        $this->assertTrue($employee->user->is_active);
         $this->assertTrue($employee->user->must_change_password);
         $this->assertFalse($employee->user->account_setup_completed);
-        $this->assertTrue(Hash::check('P@assword!', $employee->user->password));
+        $this->assertTrue(Hash::check($temporaryPassword, $employee->user->password));
+        $this->assertFalse(Hash::check('WrongTemporaryPassword123!', $employee->user->password));
         $this->post(route('logout'));
-        $this->post(route('login'), [
+        $this->post(route('login.store'), [
+            'login' => ' '.$employee->user->username.' ',
+            'password' => 'incorrect-temporary-password',
+        ])->assertSessionHasErrors('login');
+        $this->post(route('login.store'), [
             'login' => $employee->user->username,
-            'password' => 'P@assword!',
+            'password' => $temporaryPassword,
         ])->assertRedirect(route('account.setup'));
         $this->get(route('dashboard'))->assertRedirect(route('account.setup'));
+        $this->get(route('account.profile'))->assertRedirect(route('account.setup'));
+        $this->post(route('logout'));
+        $this->post(route('login.store'), [
+            'login' => ' '.mb_strtoupper($employee->user->email).' ',
+            'password' => $temporaryPassword,
+        ])->assertRedirect(route('account.setup'));
+        $this->assertAuthenticatedAs($employee->user);
+
+        $this->get(route('account.setup'))
+            ->assertOk()
+            ->assertSee('Change your temporary password')
+            ->assertSee('Current Password')
+            ->assertSee('New Password')
+            ->assertSee('Confirm New Password')
+            ->assertSee('Show new password');
+
+        $setupData = [
+            'username' => $employee->user->username,
+            'email' => $employee->user->email,
+            'contact_number' => '',
+            'address' => '',
+            'current_password' => 'WrongTemporaryPassword123!',
+            'new_password' => 'EmployeeNewSecurePass123!',
+            'new_password_confirmation' => 'EmployeeNewSecurePass123!',
+        ];
+        $this->put(route('account.setup.update'), $setupData)
+            ->assertSessionHasErrors('current_password');
+        $this->assertTrue($employee->user->fresh()->must_change_password);
+
+        $setupData['current_password'] = $temporaryPassword;
+        $setupData['new_password_confirmation'] = 'DifferentNewSecurePass123!';
+        $this->put(route('account.setup.update'), $setupData)
+            ->assertSessionHasErrors('new_password');
+        $this->assertTrue($employee->user->fresh()->must_change_password);
+
+        $setupData['new_password_confirmation'] = $setupData['new_password'];
+        $this->put(route('account.setup.update'), $setupData)
+            ->assertRedirect(route('dashboard'));
+        $employee->user->refresh();
+        $this->assertFalse($employee->user->must_change_password);
+        $this->assertTrue($employee->user->account_setup_completed);
+        $this->assertTrue(Hash::check('EmployeeNewSecurePass123!', $employee->user->password));
+        $this->assertFalse(Hash::check($temporaryPassword, $employee->user->password));
+
+        $this->post(route('logout'));
+        $this->post(route('login.store'), [
+            'login' => $employee->user->username,
+            'password' => 'EmployeeNewSecurePass123!',
+        ])->assertRedirect(route('dashboard'));
+        $this->assertAuthenticatedAs($employee->user);
+        $this->get(route('dashboard'))->assertOk();
+        $this->post(route('logout'));
+
         $row = $import->rows()->firstOrFail();
         $this->assertSame('01/02/2024', $row->source_data[23]['display_value']);
         $this->assertSame('imported', $row->status);
@@ -187,7 +249,7 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame('bcrypt', Hash::info(Hash::make('test-only-password'))['algoName']);
     }
 
-    public function test_large_imports_are_saved_in_resumable_batches_and_hash_once_per_batch(): void
+    public function test_large_imports_use_the_configured_hashed_password_and_are_saved_in_batches(): void
     {
         $department = $this->officialDepartment();
         Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
@@ -210,6 +272,9 @@ class EmployeeWorkbookImportTest extends TestCase
         {
             public int $makeCalls = 0;
 
+            /** @var list<string> */
+            public array $passwords = [];
+
             public function __construct(private readonly Hasher $hasher) {}
 
             public function info($hashedValue): array
@@ -220,6 +285,7 @@ class EmployeeWorkbookImportTest extends TestCase
             public function make(#[\SensitiveParameter] $value, array $options = []): string
             {
                 $this->makeCalls++;
+                $this->passwords[] = $value;
 
                 return $this->hasher->make($value, $options);
             }
@@ -253,7 +319,17 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame(120, $import->rows()->where('status', 'imported')->count());
         $this->assertSame($initialEmployeeCount + 120, Employee::count());
         $this->assertSame($initialUserCount + 120, User::count());
-        $this->assertSame(3, $countingHasher->makeCalls);
+        $this->assertSame(120, $countingHasher->makeCalls);
+        $this->assertSame(['P@ssword123'], array_values(array_unique($countingHasher->passwords)));
+        $importedEmployees = Employee::query()
+            ->whereIn('employee_no', array_map(fn (int $number) => sprintf('IMP-%04d', $number), range(1, 120)))
+            ->with('user')
+            ->orderBy('employee_no')
+            ->get();
+        $this->assertCount(120, $importedEmployees);
+        foreach ($importedEmployees as $index => $employee) {
+            $this->assertTrue(Hash::check($countingHasher->passwords[$index], $employee->user->password));
+        }
         config(['hashing.driver' => 'bcrypt']);
         $hashManager->forgetDrivers();
     }
@@ -1078,8 +1154,6 @@ class EmployeeWorkbookImportTest extends TestCase
             $this->assertSame('employee', $employee->user->role);
             $this->assertTrue($employee->user->must_change_password);
         }
-        $passwordHashes = $employees->pluck('user.password', 'id')->all();
-
         $reimport = $this->stage($this->plantillaWorkbookUpload());
         $this->assertSame(['existing_to_update', 'existing_to_update'], $reimport->rows()->orderBy('source_row')->pluck('status')->all());
         $this->putMapping($reimport, ['office_source_column' => 1])->assertRedirect();
@@ -1091,7 +1165,9 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame(2, $reimport->fresh()->updated_count);
         $this->assertSame(0, $reimport->fresh()->accounts_created_count);
         foreach (Employee::with('user')->get() as $employee) {
-            $this->assertSame($passwordHashes[$employee->id], $employee->user->password);
+            $this->assertTrue(Hash::check('P@ssword123', $employee->user->password));
+            $this->assertTrue($employee->user->must_change_password);
+            $this->assertFalse($employee->user->account_setup_completed);
         }
     }
 
@@ -1275,6 +1351,10 @@ class EmployeeWorkbookImportTest extends TestCase
     {
         $department = $this->officialDepartment();
         $position = Position::create(['department_id' => $department->id, 'title' => 'Existing Position']);
+        $targetPosition = Position::create([
+            'department_id' => $department->id,
+            'title' => 'Import Target Position',
+        ]);
         $existing = Employee::create([
             'department_id' => $department->id,
             'position_id' => $position->id,
@@ -1316,20 +1396,32 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->putMapping($import, [
             'office_source_column' => 8,
             'department_map' => [hash('sha256', 'Office H source') => $department->id],
-            'position_map' => [hash('sha256', "Office H source\0Import Test Position") => $position->id],
+            'position_map' => [hash('sha256', "Office H source\0Import Test Position") => $targetPosition->id],
         ])->assertRedirect();
         $this->assertSame('ready_to_update', $import->rows()->firstOrFail()->status);
-        $this->actingAs(User::where('role', 'admin')->firstOrFail())
-            ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
+        $importAdmin = User::where('role', 'admin')->firstOrFail();
+        $this->actingAs($importAdmin)->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
             ->assertRedirect();
 
         $existing->refresh();
         $this->assertSame('Test', $existing->first_name);
+        $this->assertSame($department->id, $existing->department_id);
+        $this->assertSame($targetPosition->id, $existing->position_id);
         $this->assertNotNull($existing->user_id);
         $this->assertSame('employee', $existing->user->role);
         $this->assertSame(1, $import->fresh()->updated_count);
         $this->assertSame(1, $import->fresh()->accounts_created_count);
         $this->assertDatabaseCount('employees', 1);
+        $this->assertDatabaseHas('employee_assignment_histories', [
+            'employee_id' => $existing->id,
+            'change_type' => 'updated',
+            'previous_department_id' => $department->id,
+            'previous_position_id' => $position->id,
+            'department_id' => $department->id,
+            'position_id' => $targetPosition->id,
+            'changed_by' => $importAdmin->id,
+        ]);
+        $this->assertSame(1, EmployeeAssignmentHistory::where('employee_id', $existing->id)->count());
         $this->actingAs(User::where('role', 'admin')->firstOrFail())
             ->get(route('employee-imports.show', $import))
             ->assertOk()
@@ -1340,7 +1432,7 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->putMapping($reimport, [
             'office_source_column' => 8,
             'department_map' => [hash('sha256', 'Office H source') => $department->id],
-            'position_map' => [hash('sha256', "Office H source\0Import Test Position") => $position->id],
+            'position_map' => [hash('sha256', "Office H source\0Import Test Position") => $targetPosition->id],
         ])->assertRedirect();
         $reimport->refresh();
         $this->assertSame('ready_to_update', $reimport->rows()->firstOrFail()->status);
@@ -1350,6 +1442,7 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame(1, Employee::count());
         $this->assertSame(1, $reimport->fresh()->updated_count);
         $this->assertSame(0, $reimport->fresh()->accounts_created_count);
+        $this->assertSame(1, EmployeeAssignmentHistory::where('employee_id', $existing->id)->count());
     }
 
     public function test_import_skips_protected_admin_accounts_without_modifying_employee_or_login_data(): void
@@ -1394,6 +1487,63 @@ class EmployeeWorkbookImportTest extends TestCase
         $this->assertSame(0, $import->fresh()->accounts_created_count);
         $this->assertSame(1, $import->fresh()->skipped_count);
         Notification::assertNothingSent();
+    }
+
+    public function test_reimport_resets_linked_employee_password_and_requires_change_without_creating_an_account(): void
+    {
+        $department = $this->officialDepartment();
+        $position = Position::create(['department_id' => $department->id, 'title' => 'Import Test Position']);
+        $admin = User::where('role', 'admin')->firstOrFail();
+        $adminPasswordHash = $admin->password;
+        $user = User::create([
+            'name' => 'Existing Employee',
+            'username' => 'existing.employee',
+            'email' => null,
+            'password' => 'ExistingEmployeePassword123!',
+            'role' => 'employee',
+            'is_active' => true,
+            'can_final_approve' => false,
+        ]);
+        $employee = Employee::create([
+            'user_id' => $user->id,
+            'department_id' => $department->id,
+            'position_id' => $position->id,
+            'employee_no' => 'IMP-0001',
+            'first_name' => 'Existing',
+            'last_name' => 'Employee',
+            'employment_status' => 'Active',
+        ]);
+        $import = $this->stage($this->workbookUpload());
+        $this->putMapping($import, [
+            'office_source_column' => 8,
+            'department_map' => [hash('sha256', 'Office H source') => $department->id],
+            'position_map' => [hash('sha256', "Office H source\0Import Test Position") => $position->id],
+        ])->assertRedirect();
+
+        $this->actingAs($admin)
+            ->post(route('employee-imports.confirm', $import), ['confirm_import' => '1'])
+            ->assertRedirect();
+
+        $user->refresh();
+        $employee->refresh();
+        $this->assertSame($user->id, $employee->user_id);
+        $this->assertSame(2, User::count());
+        $this->assertSame('employee', $user->role);
+        $this->assertFalse($user->can_final_approve);
+        $this->assertNull($user->email);
+        $this->assertTrue($user->is_active);
+        $this->assertTrue($user->must_change_password);
+        $this->assertFalse($user->account_setup_completed);
+        $this->assertTrue(Hash::check('P@ssword123', $user->password));
+        $this->assertFalse(Hash::check('ExistingEmployeePassword123!', $user->password));
+        $this->assertSame($adminPasswordHash, $admin->fresh()->password);
+        $this->assertSame(0, $import->fresh()->accounts_created_count);
+
+        $this->post(route('logout'));
+        $this->post(route('login.store'), [
+            'login' => $user->username,
+            'password' => 'P@ssword123',
+        ])->assertRedirect(route('account.setup'));
     }
 
     public function test_workbook_employment_status_is_normalized_and_unsupported_values_need_correction(): void

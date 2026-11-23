@@ -28,6 +28,23 @@
                 <div class="application-row"><span class="row-date">{{ $history->appointment_date?->format('M j, Y') ?? 'Date not recorded' }}</span><span class="row-main"><b>{{ $history->position_title }}</b><small>History entry {{ $history->sequence }}</small></span></div>
             @empty<p class="empty-note">No employment history has been recorded.</p>@endforelse
         </section>
+        <section class="panel panel-spaced">
+            <div class="panel-heading"><div><h2>Department and position assignments</h2><p>Assignment changes recorded from this release forward; imported appointment history remains separate.</p></div></div>
+            @forelse($employee->assignmentHistories as $history)
+                <div class="application-row">
+                    <span class="row-date">{{ $history->effective_date->format('M j, Y') }}</span>
+                    <span class="row-main">
+                        <b>{{ $history->change_type === 'initial' ? 'Initial assignment' : 'Assignment change' }}</b>
+                        <small>
+                            {{ $history->previous_position_title ?? 'No previous position' }} · {{ $history->previous_department_name ?? 'No previous department' }}
+                            to {{ $history->position_title ?? 'No position' }} · {{ $history->department_name ?? 'No department' }}
+                            · Recorded by {{ $history->changedBy?->name ?? 'System' }}
+                            @if($history->reason) · {{ $history->reason }}@endif
+                        </small>
+                    </span>
+                </div>
+            @empty<p class="empty-note">No department or position assignment history has been recorded.</p>@endforelse
+        </section>
         @if($employee->serviceProfile)
             <section class="panel panel-spaced">
                 <div class="panel-heading"><div><h2>Qualifications and service information</h2><p>Restricted to authorized HRMO and administrators.</p></div></div>

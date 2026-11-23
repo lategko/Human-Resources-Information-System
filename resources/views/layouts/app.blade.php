@@ -13,6 +13,7 @@
 @php
     $currentUser = auth()->user();
     $unreadCount = $currentUser->unreadNotifications()->count();
+    $dropdownNotifications = $currentUser->notifications()->latest()->limit(8)->get();
     $roleTheme = $currentUser->canFinalApprove() ? 'mayor' : ($currentUser->isAdministrator() ? 'administrator' : $currentUser->role);
     $roleLabel = match ($roleTheme) {
         'administrator' => 'ADMIN · HR OFFICE',
@@ -22,7 +23,7 @@
         default => 'Municipal HRIS',
     };
 @endphp
-<body data-role-theme="{{ $roleTheme }}" x-data="{ sidebarOpen: false, sidebarCollapsed: false, profileOpen: false, init() { const resetCollapsedSidebar = () => { if (window.matchMedia('(max-width: 1060px)').matches) this.sidebarCollapsed = false; }; resetCollapsedSidebar(); window.addEventListener('resize', resetCollapsedSidebar, { passive: true }); } }">
+<body data-role-theme="{{ $roleTheme }}" x-data="{ sidebarOpen: false, sidebarCollapsed: false, profileOpen: false, notificationOpen: false, notificationUnreadCount: {{ $unreadCount }}, init() { const resetCollapsedSidebar = () => { if (window.matchMedia('(max-width: 1060px)').matches) this.sidebarCollapsed = false; }; resetCollapsedSidebar(); window.addEventListener('resize', resetCollapsedSidebar, { passive: true }); }, async markNotification(url, redirectUrl = null) { const response = await fetch(url, { method: 'POST', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content } }); if (!response.ok) throw new Error('Unable to update notification.'); const result = await response.json(); this.notificationUnreadCount = result.unread_count; if (redirectUrl) window.location.assign(redirectUrl); else window.location.reload(); }, async markAllNotifications() { const response = await fetch('{{ route('notifications.read-all') }}', { method: 'POST', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content } }); if (!response.ok) throw new Error('Unable to mark notifications as read.'); const result = await response.json(); this.notificationUnreadCount = result.unread_count; document.querySelectorAll('.notification-dropdown-item').forEach((row) => row.classList.remove('is-unread')); document.querySelectorAll('.notification-dropdown-dot').forEach((dot) => dot.classList.remove('is-unread')); document.querySelectorAll('.notification-dropdown-mark').forEach((button) => button.remove()); } }" @keydown.escape.window="notificationOpen=false">
     <div class="app-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
         <aside id="primary-navigation" class="sidebar" :class="{ 'sidebar-open': sidebarOpen }" :inert="sidebarCollapsed" aria-label="Primary navigation">
             <a class="brand" href="{{ route('dashboard') }}" @click="sidebarOpen=false">
@@ -119,10 +120,6 @@
                     <a href="{{ route('leave-credits.index', ['mine' => 1]) }}" class="{{ request()->routeIs('leave-credits.*') && request()->boolean('mine') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="wallet" aria-hidden="true"></i><span>My leave credits</span></a>
                 @endif
                 <a href="{{ route('account.profile') }}" class="{{ request()->routeIs('account.profile') ? 'active' : '' }}" @click="sidebarOpen=false"><i data-lucide="user-round" aria-hidden="true"></i><span>My profile</span></a>
-                <a href="{{ route('notifications.index') }}" class="{{ request()->routeIs('notifications.*') ? 'active' : '' }}" @click="sidebarOpen=false">
-                    <i data-lucide="bell" aria-hidden="true"></i><span>Notifications</span>
-                    @if($unreadCount)<span class="nav-badge" aria-label="{{ $unreadCount }} unread notifications">{{ $unreadCount > 99 ? '99+' : $unreadCount }}</span>@endif
-                </a>
             </nav>
             <div class="sidebar-bottom">
                 <div class="user-mini">
@@ -150,10 +147,63 @@
                         <i class="theme-icon-sun" data-lucide="sun" aria-hidden="true"></i>
                         <span>Dark mode</span>
                     </button>
-                    <a class="icon-button" href="{{ route('notifications.index') }}" aria-label="Notifications{{ $unreadCount ? ', '.$unreadCount.' unread' : '' }}">
-                        <i data-lucide="bell" aria-hidden="true"></i>
-                        @if($unreadCount)<span class="notification-count">{{ $unreadCount > 99 ? '99+' : $unreadCount }}</span>@endif
-                    </a>
+                    <div class="notification-menu" @click.outside="notificationOpen=false">
+                        <button class="icon-button notification-button" type="button" @click="notificationOpen=!notificationOpen" :aria-expanded="notificationOpen.toString()" aria-haspopup="dialog" aria-controls="notification-panel" aria-label="Notifications{{ $unreadCount ? ', '.$unreadCount.' unread' : '' }}">
+                            <i data-lucide="bell" aria-hidden="true"></i>
+                            <span class="notification-count" x-show="notificationUnreadCount > 0" x-text="notificationUnreadCount > 99 ? '99+' : notificationUnreadCount" x-cloak></span>
+                        </button>
+                        <div id="notification-panel" class="notification-dropdown" x-show="notificationOpen" x-cloak role="dialog" aria-label="Notifications">
+                            <div class="notification-dropdown-header">
+                                <div>
+                                    <strong>Notifications</strong>
+                                    <span x-text="notificationUnreadCount === 1 ? '1 unread' : notificationUnreadCount + ' unread'"></span>
+                                </div>
+                                <button type="button" class="notification-mark-all" @click="markAllNotifications()" :disabled="notificationUnreadCount === 0">Mark all as read</button>
+                            </div>
+                            <div class="notification-dropdown-body">
+                                @forelse($dropdownNotifications as $notification)
+                                    @php
+                                        $status = (string) ($notification->data['status'] ?? '');
+                                        $message = (string) ($notification->data['message'] ?? 'You have an HRIS update.');
+                                        $category = match (true) {
+                                            str_contains(strtolower($message), 'approved') || $status === 'Approved' => 'Leave application approved',
+                                            str_contains(strtolower($message), 'disapproved') || $status === 'Disapproved' => 'Leave application disapproved',
+                                            str_contains(strtolower($message), 'returned') || $status === 'Returned for Correction' => 'Leave application returned',
+                                            str_contains(strtolower($message), 'endorsed') || str_contains(strtolower($message), 'hrmo') => 'HRMO verification update',
+                                            str_contains(strtolower($status), 'alternate office head') || str_contains(strtolower($message), 'reassigned') => 'Alternate Office Head review',
+                                            in_array($status, ['Awaiting Alternate HR Reviewer Assignment', 'Awaiting Authorized Final Approver Assignment'], true) => 'Reviewer assignment required',
+                                            str_contains(strtolower($status), 'attendance') => 'Attendance update',
+                                            isset($notification->data['availability_id']) => 'Office Head availability',
+                                            isset($notification->data['application_id']) => 'Leave application submitted',
+                                            default => 'System update',
+                                        };
+                                        $description = $status !== '' ? 'Status: '.$status : 'Review this HRIS update.';
+                                        $applicationUrl = isset($notification->data['application_id'])
+                                            ? route('leave.show', $notification->data['application_id'])
+                                            : ($notification->data['availability_url'] ?? null);
+                                    @endphp
+                                    <article class="notification-dropdown-item {{ $notification->read_at ? '' : 'is-unread' }}">
+                                        <span class="notification-dropdown-dot {{ $notification->read_at ? '' : 'is-unread' }}" aria-hidden="true"></span>
+                                        <button type="button" class="notification-dropdown-main" @click="markNotification('{{ route('notifications.read', $notification->id) }}', {{ $applicationUrl ? "'" . e($applicationUrl) . "'" : 'null' }})">
+                                            <span class="notification-category">{{ $category }}</span>
+                                            <strong>{{ $message }}</strong>
+                                            <small>{{ $description }}</small>
+                                            <time datetime="{{ $notification->created_at->toIso8601String() }}">{{ $notification->created_at->format('M j, Y · g:i A') }}</time>
+                                        </button>
+                                        @unless($notification->read_at)
+                                            <button type="button" class="notification-dropdown-mark" @click.stop="markNotification('{{ route('notifications.read', $notification->id) }}')">Mark as read</button>
+                                        @endunless
+                                    </article>
+                                @empty
+                                    <div class="notification-empty">
+                                        <i data-lucide="bell" aria-hidden="true"></i>
+                                        <strong>You have no notifications.</strong>
+                                    </div>
+                                @endforelse
+                            </div>
+                            <a class="notification-view-all" href="{{ route('notifications.index') }}">View all notifications</a>
+                        </div>
+                    </div>
                     <div class="profile-menu" @click.outside="profileOpen=false">
                         <button class="topbar-user" type="button" @click="profileOpen=!profileOpen" :aria-expanded="profileOpen.toString()">
                             @include('shared.avatar', ['user' => $currentUser, 'size' => 'avatar-small'])

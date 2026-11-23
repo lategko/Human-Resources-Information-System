@@ -95,7 +95,7 @@ class LeaveApplicationPolicy
     public function cancel(User $user, LeaveApplication $application): bool
     {
         return $user->employee?->id === $application->employee_id
-            && in_array($application->status, ['Draft', 'Submitted', 'Under Office Head Review', 'Returned for Correction'], true);
+            && in_array($application->status, ['Draft', 'Submitted', 'Under HRMO Verification', 'Under Office Head Review', 'Returned for Correction'], true);
     }
 
     public function viewDocument(User $user, LeaveApplication $application, bool $sensitive): bool

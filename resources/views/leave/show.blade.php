@@ -1,6 +1,16 @@
 @extends('layouts.app')
 @section('title', 'Leave application #'.$application->id)
 @section('content')
+    @php
+        $submittedComplete = !in_array($application->status, ['Draft', 'Cancelled'], true);
+        $hrmoComplete = $application->certified_at !== null;
+        $officeComplete = in_array($application->status, ['Pending Final Approval', 'Pending Authorized Final Approval', 'Approved', 'Disapproved'], true)
+            || ($application->recommendation !== null && $application->recommended_at !== null);
+        $officePending = in_array($application->status, ['Under Office Head Review', 'Under Alternate Office Head Review'], true);
+        $mayorComplete = $application->status === 'Approved';
+        $mayorPending = in_array($application->status, ['Pending Final Approval', 'Pending Authorized Final Approval'], true);
+        $mayorDisapproved = $application->status === 'Disapproved';
+    @endphp
     <div class="page-heading"><div><span class="eyebrow">APPLICATION #{{ str_pad($application->id, 5, '0', STR_PAD_LEFT) }}</span><h1>{{ $application->leaveType->name }}{{ $application->other_leave_type ? ' · '.$application->other_leave_type : '' }}</h1><p>{{ $application->employee->full_name }} <span class="muted-separator">·</span> Filed {{ $application->filed_at?->format('F j, Y') ?? $application->created_at->format('F j, Y') }}</p></div>
         <div class="heading-actions"><span class="status-tag status-{{ \Illuminate\Support\Str::slug($application->status) }}">{{ $application->status }}</span><a class="button button-outline" href="{{ route('leave.print', $application) }}" target="_blank">Print / Save PDF</a>@can('update', $application)<a class="button button-primary" href="{{ route('leave.edit', $application) }}">Edit application</a>@endcan
             @can('cancel', $application)<form method="POST" action="{{ route('leave.cancel', $application) }}" onsubmit="return confirm('Cancel this leave application? This cannot be undone.')">@csrf<button class="button button-danger" type="submit">Cancel request</button></form>@endcan
@@ -8,6 +18,15 @@
     </div>
     <div class="application-layout leave-application-layout">
         <div class="application-main">
+            <section class="panel approval-tracker-panel" aria-label="Leave approval progress">
+                <div class="panel-heading"><div><h2>Approval progress</h2><p>Official workflow: Employee → HRMO → Office Head → Mayor</p></div></div>
+                <ol class="approval-tracker">
+                    <li class="{{ $submittedComplete ? 'is-complete' : '' }}"><span>{{ $submittedComplete ? '✓' : '○' }}</span><div><b>Employee submission</b><small>{{ $submittedComplete ? 'Submitted' : 'Not submitted' }}</small></div></li>
+                    <li class="{{ $hrmoComplete ? 'is-complete' : ($application->status === 'Under HRMO Verification' || str_starts_with($application->status, 'Awaiting') ? 'is-pending' : '') }}"><span>{{ $hrmoComplete ? '✓' : ($application->status === 'Under HRMO Verification' ? '●' : '○') }}</span><div><b>HRMO certification / verification</b><small>{{ $hrmoComplete ? 'Verified' : ($application->status === 'Under HRMO Verification' ? 'Pending verification' : 'Waiting') }}</small></div></li>
+                    <li class="{{ $officeComplete ? 'is-complete' : ($officePending ? 'is-pending' : '') }}"><span>{{ $officeComplete ? '✓' : ($officePending ? '●' : '○') }}</span><div><b>Office Head verification / approval</b><small>{{ $officeComplete ? 'Approved' : ($officePending ? 'Pending' : 'Waiting') }}</small></div></li>
+                    <li class="{{ $mayorComplete ? 'is-complete' : ($mayorPending ? 'is-pending' : ($mayorDisapproved ? 'is-disapproved' : '')) }}"><span>{{ $mayorComplete ? '✓' : ($mayorPending ? '●' : ($mayorDisapproved ? '×' : '○')) }}</span><div><b>Mayor final approval</b><small>{{ $mayorComplete ? 'Approved' : ($mayorPending ? 'Pending' : ($mayorDisapproved ? 'Disapproved' : 'Waiting')) }}</small></div></li>
+                </ol>
+            </section>
             <section class="panel form-panel">
                 <div class="panel-heading"><div><h2>Application details</h2><p>Employee information snapshot captured when filed.</p></div></div>
                 <div class="detail-grid">
@@ -69,7 +88,7 @@
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf
                             <label>{{ $application->status === 'Under Alternate Office Head Review' ? 'Alternate recommendation' : 'Recommendation' }}<select name="recommendation" required><option value="For approval">For approval</option><option value="For disapproval">For disapproval</option></select></label>
                             <label>Remarks<textarea name="remarks" rows="3" placeholder="Required for disapproval or return"></textarea></label>
-                            <button class="button button-primary button-wide" name="action" value="endorse">Send for HRMO review</button>
+                            <button class="button button-primary button-wide" name="action" value="endorse">Approve and send to Mayor</button>
                             <button class="button button-outline button-wide" name="action" value="return">Return for correction</button>
                         </form>
                     </section>
@@ -123,7 +142,7 @@
                                     <label>Eligibility review remarks<textarea name="eligibility_remarks" rows="2">{{ $application->eligibility_remarks }}</textarea></label>
                                 </div>
                             @endif
-                            <button class="button button-primary button-wide" type="submit">Certify and send for approval</button>
+                            <button class="button button-primary button-wide" type="submit">Certify and send to Office Head</button>
                         </form>
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack review-divider">@csrf
                             <input type="hidden" name="action" value="return">
@@ -136,7 +155,7 @@
                         <form method="POST" action="{{ route('leave.review', $application) }}" class="form-stack">@csrf
                             <input type="hidden" name="recommendation" value="For approval">
                             <label>Remarks<textarea name="remarks" rows="3"></textarea></label>
-                            <button class="button button-primary button-wide" name="action" value="endorse">Endorse to HR Office</button>
+                            <button class="button button-primary button-wide" name="action" value="endorse">Approve and send to Mayor</button>
                             <button class="button button-outline button-wide" name="action" value="return">Return for correction</button>
                         </form>
                     </section>

@@ -9,3 +9,4 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 Schedule::command('leave:accrue-monthly')->monthlyOn(1, '01:00')->withoutOverlapping();
+Schedule::command('hris:backup --source=scheduled')->dailyAt('02:00')->withoutOverlapping();

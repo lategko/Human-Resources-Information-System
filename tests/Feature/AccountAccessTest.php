@@ -12,6 +12,14 @@ class AccountAccessTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_login_password_keeps_text_show_hide_control(): void
+    {
+        $this->get(route('login'))
+            ->assertOk()
+            ->assertSee('password-toggle')
+            ->assertSee('x-text="showPassword ? \'Hide\' : \'Show\'"', false);
+    }
+
     public function test_each_role_logs_in_to_its_assigned_dashboard_and_logout_invalidates_the_session(): void
     {
         $department = Department::create(['name' => 'Administration']);

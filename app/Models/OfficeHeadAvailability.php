@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class OfficeHeadAvailability extends Model
 {
@@ -16,6 +17,9 @@ class OfficeHeadAvailability extends Model
         'reason',
         'alternate_user_id',
         'updated_by',
+        'cancelled_at',
+        'cancelled_by',
+        'cancellation_reason',
     ];
 
     protected function casts(): array
@@ -23,6 +27,7 @@ class OfficeHeadAvailability extends Model
         return [
             'start_date' => 'date',
             'end_date' => 'date',
+            'cancelled_at' => 'datetime',
         ];
     }
 
@@ -44,5 +49,15 @@ class OfficeHeadAvailability extends Model
     public function updater(): BelongsTo
     {
         return $this->belongsTo(User::class, 'updated_by');
+    }
+
+    public function cancelledBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'cancelled_by');
+    }
+
+    public function history(): HasMany
+    {
+        return $this->hasMany(OfficeHeadAvailabilityHistory::class, 'availability_id')->oldest();
     }
 }

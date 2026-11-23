@@ -2,22 +2,29 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AttendanceException;
 use App\Models\AttendanceRecord;
-use App\Models\BiometricImport;
+use App\Models\AttendanceWorkplace;
+use App\Models\AttendanceWorkplaceAssignmentHistory;
+use App\Models\AttendanceWorkplaceHistory;
 use App\Models\Department;
 use App\Models\Employee;
-use App\Models\Holiday;
 use App\Models\SystemSetting;
 use App\Models\WorkSchedule;
 use App\Services\AttendanceWorkHoursCalculator;
+use App\Services\AttendanceWorkplaceAssignmentService;
 use App\Services\AuditLogger;
-use App\Services\BiometricCsvImportService;
-use Illuminate\Support\Carbon;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Http\Response;
+use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
 class AttendanceController extends Controller
@@ -25,6 +32,73 @@ class AttendanceController extends Controller
     public function index(Request $request): View
     {
         $user = $request->user();
+        $employees = $user->canManageHr() || $user->isAdministrator()
+            ? Employee::with(['department', 'attendanceWorkplace'])->whereNull('archived_at')->orderBy('last_name')->get()
+            : collect();
+        $assignmentRoster = $employees->where('employment_status', 'Active')->values();
+        $assignmentMap = $user->isAdministrator()
+            ? app(AttendanceWorkplaceAssignmentService::class)->effectiveAssignments($assignmentRoster, today()->toDateString())
+            : [];
+        $assignmentCandidates = $assignmentRoster->filter(function (Employee $employee) use ($request, $assignmentMap) {
+            $search = mb_strtolower(trim((string) $request->query('assignment_search', '')));
+            if ($search !== '' && ! str_contains(mb_strtolower($employee->employee_no.' '.$employee->full_name), $search)) {
+                return false;
+            }
+            if ($request->filled('assignment_department')
+                && (int) $employee->department_id !== $request->integer('assignment_department')) {
+                return false;
+            }
+
+            $assignment = $assignmentMap[$employee->id] ?? ['workplace' => null];
+            $workplaceFilter = $request->query('assignment_workplace');
+            if ($workplaceFilter === 'unassigned' && $assignment['workplace']) {
+                return false;
+            }
+            if (is_numeric($workplaceFilter) && (int) $assignment['workplace']?->id !== (int) $workplaceFilter) {
+                return false;
+            }
+
+            $statusFilter = $request->query('assignment_status');
+            if ($statusFilter === 'assigned' && ! $assignment['workplace']) {
+                return false;
+            }
+            if ($statusFilter === 'unassigned' && $assignment['workplace']) {
+                return false;
+            }
+
+            return true;
+        })->values();
+        $assignmentPage = LengthAwarePaginator::resolveCurrentPage('assignments_page');
+        $assignmentEmployees = new LengthAwarePaginator(
+            $assignmentCandidates->forPage($assignmentPage, 100)->values(),
+            $assignmentCandidates->count(),
+            100,
+            $assignmentPage,
+            [
+                'path' => LengthAwarePaginator::resolveCurrentPath(),
+                'pageName' => 'assignments_page',
+                'query' => $request->except('assignments_page'),
+            ],
+        );
+        $employeeAssignmentLookup = $assignmentRoster->mapWithKeys(fn (Employee $employee) => [
+            $employee->id => [
+                'name' => $employee->full_name,
+                'employee_no' => $employee->employee_no,
+                'workplace' => $assignmentMap[$employee->id]['workplace']?->name,
+                'assignment_type' => $assignmentMap[$employee->id]['assignment_type'],
+                'effective_from' => $assignmentMap[$employee->id]['effective_from']?->format('M j, Y'),
+            ],
+        ])->all();
+        $departmentAssignmentPreview = $assignmentRoster
+            ->filter(fn (Employee $employee) => $employee->department_id)
+            ->groupBy('department_id')
+            ->map(fn ($departmentEmployees) => $departmentEmployees->map(fn (Employee $employee) => [
+                'name' => $employee->full_name,
+                'employee_no' => $employee->employee_no,
+                'workplace' => $assignmentMap[$employee->id]['workplace']?->name,
+                'assignment_type' => $assignmentMap[$employee->id]['assignment_type'],
+            ])->values()->all())
+            ->all();
         $query = AttendanceRecord::with('employee.department');
         if ($user->isEmployee()) {
             $query->where('employee_id', $user->employee?->id ?? 0);
@@ -43,6 +117,12 @@ class AttendanceController extends Controller
         if ($request->filled('status')) {
             $query->where('status', $request->string('status'));
         }
+        if ($request->filled('employee_id') && ! $user->isEmployee()) {
+            $query->where('employee_id', $request->integer('employee_id'));
+        }
+        if ($request->filled('gps_status')) {
+            $query->where('gps_verification_status', $request->string('gps_status'));
+        }
         if ($request->filled('q')) {
             $search = $request->string('q')->toString();
             $query->whereHas('employee', fn ($employee) => $employee->where('employee_no', 'like', "%{$search}%")->orWhere('last_name', 'like', "%{$search}%"));
@@ -53,54 +133,488 @@ class AttendanceController extends Controller
             'departments' => Department::where('is_active', true)
                 ->when($user->isOfficeHead(), fn ($departments) => $departments->where('head_user_id', $user->id))
                 ->orderBy('name')->get(),
-            'employees' => $user->canManageHr() || $user->isAdministrator()
-                ? Employee::whereNull('archived_at')->orderBy('last_name')->get()
+            'employees' => $employees,
+            'assignmentEmployees' => $assignmentEmployees,
+            'effectiveWorkplaceAssignments' => $assignmentMap,
+            'employeeAssignmentLookup' => (object) $employeeAssignmentLookup,
+            'departmentAssignmentPreview' => (object) $departmentAssignmentPreview,
+            'assignmentHistory' => $user->isAdministrator()
+                ? AttendanceWorkplaceAssignmentHistory::with([
+                    'employee', 'department', 'previousWorkplace', 'newWorkplace', 'assignedBy',
+                ])->latest()->paginate(10, ['*'], 'assignment_history_page')->withQueryString()
                 : collect(),
             'workSchedules' => $user->canManageHr() || $user->isAdministrator()
                 ? WorkSchedule::with(['employee', 'creator'])->latest('effective_from')->paginate(10, ['*'], 'schedules_page')
                 : collect(),
             'defaultSchedule' => WorkSchedule::defaults(),
-            'imports' => $user->canManageHr() || $user->isAdministrator()
-                ? BiometricImport::withCount('records')->latest()->limit(5)->get()
+            'workplaces' => $user->isAdministrator()
+                ? AttendanceWorkplace::withCount('employees')->latest()->get()
                 : collect(),
+            'todayRecord' => $user->employee
+                ? AttendanceRecord::where('employee_id', $user->employee->id)->whereDate('work_date', today())->first()
+                : null,
+            'attendanceExceptions' => AttendanceException::query()
+                ->with(['employee.department', 'record', 'reviewer'])
+                ->when($user->isEmployee(), fn ($exceptions) => $exceptions->where('employee_id', $user->employee?->id ?? 0))
+                ->when($user->isOfficeHead(), fn ($exceptions) => $exceptions->whereHas(
+                    'employee.department',
+                    fn ($department) => $department->where('head_user_id', $user->id)
+                ))
+                ->latest()
+                ->limit(10)
+                ->get(),
         ]);
     }
 
-    public function import(
+    public function timeIn(
         Request $request,
-        BiometricCsvImportService $importer,
         AttendanceWorkHoursCalculator $hoursCalculator,
+        AttendanceWorkplaceAssignmentService $assignmentService,
         AuditLogger $auditLogger
     ): RedirectResponse {
-        $request->validate([
-            'file' => ['required', 'file', 'max:10240', 'mimes:csv,txt'],
-        ]);
-        $import = $importer->import($request->file('file'), $request->user()->id, $hoursCalculator);
-        $auditLogger->record('attendance.biometric_imported', $import, [
-            'imported' => $import->imported_count,
-            'errors' => $import->error_count,
-        ]);
+        $employee = $request->user()->employee;
+        abort_unless($employee, 403, 'Your account is not linked to an employee record.');
+        $data = $this->validateGpsPayload($request);
+        $workplace = $this->verifiedWorkplace($employee, $data, $assignmentService);
 
-        return redirect()->route('attendance.index')->with('success', "Import #{$import->id}: {$import->imported_count} row(s) imported, {$import->error_count} error(s).");
+        DB::transaction(function () use ($employee, $workplace, $data, $hoursCalculator, $auditLogger) {
+            $record = AttendanceRecord::query()->where('employee_id', $employee->id)->whereDate('work_date', today())->lockForUpdate()->first();
+            if ($record?->time_in) {
+                throw ValidationException::withMessages(['attendance' => 'You have already recorded time in for today.']);
+            }
+            $resolved = WorkSchedule::resolveFor($employee, today()->toDateString());
+            $now = now();
+            $timeIn = $now->format('H:i:s');
+            $metrics = $hoursCalculator->calculateMetrics($timeIn, $record?->time_out, $resolved['schedule'], $resolved['calendar_classification']);
+            $record ??= new AttendanceRecord(['employee_id' => $employee->id, 'work_date' => today()]);
+            $record->fill([
+                'time_in' => $timeIn,
+                'status' => $metrics['late_minutes'] > 0 ? 'Late' : 'Present',
+                'source' => 'gps',
+                'calendar_classification' => $resolved['calendar_classification'],
+                'schedule_snapshot' => $resolved['schedule'],
+                ...$metrics,
+                'time_in_latitude' => $data['latitude'],
+                'time_in_longitude' => $data['longitude'],
+                'time_in_accuracy_meters' => $data['accuracy_meters'],
+                'time_in_distance_meters' => $data['distance_meters'],
+                'time_in_workplace_id' => $workplace->id,
+                'time_in_verified_at' => $now,
+                'gps_verification_status' => 'Verified',
+            ]);
+            $record->save();
+            $auditLogger->record('attendance.gps_time_in', $record, [
+                'workplace_id' => $workplace->id,
+                'distance_meters' => $data['distance_meters'],
+                'accuracy_meters' => $data['accuracy_meters'],
+            ]);
+        });
+
+        return back()->with('success', 'Time in recorded and location verified.');
     }
 
-    public function importDetails(BiometricImport $biometricImport): View
-    {
-        abort_unless(auth()->user()->canManageHr() || auth()->user()->isAdministrator(), 403);
+    public function timeOut(
+        Request $request,
+        AttendanceWorkHoursCalculator $hoursCalculator,
+        AttendanceWorkplaceAssignmentService $assignmentService,
+        AuditLogger $auditLogger
+    ): RedirectResponse {
+        $employee = $request->user()->employee;
+        abort_unless($employee, 403, 'Your account is not linked to an employee record.');
+        $data = $this->validateGpsPayload($request);
+        $workplace = $this->verifiedWorkplace($employee, $data, $assignmentService);
 
-        return view('attendance.import', [
-            'import' => $biometricImport->load('records.employee'),
+        DB::transaction(function () use ($employee, $workplace, $data, $hoursCalculator, $auditLogger) {
+            $record = AttendanceRecord::query()->where('employee_id', $employee->id)->whereDate('work_date', today())->lockForUpdate()->first();
+            abort_unless($record && $record->time_in, 409, 'You must record time in before time out.');
+            if ($record->time_out) {
+                throw ValidationException::withMessages(['attendance' => 'You have already recorded time out for today.']);
+            }
+            $now = now();
+            $resolved = WorkSchedule::resolveFor($employee, today()->toDateString());
+            $metrics = $hoursCalculator->calculateMetrics(
+                $record->time_in,
+                $now->format('H:i:s'),
+                $record->schedule_snapshot ?? $resolved['schedule'],
+                $record->calendar_classification ?? $resolved['calendar_classification']
+            );
+            $record->fill([
+                'time_out' => $now->format('H:i:s'),
+                ...$metrics,
+                'time_out_latitude' => $data['latitude'],
+                'time_out_longitude' => $data['longitude'],
+                'time_out_accuracy_meters' => $data['accuracy_meters'],
+                'time_out_distance_meters' => $data['distance_meters'],
+                'time_out_workplace_id' => $workplace->id,
+                'time_out_verified_at' => $now,
+                'gps_verification_status' => 'Verified',
+            ]);
+            $record->save();
+            $auditLogger->record('attendance.gps_time_out', $record, [
+                'workplace_id' => $workplace->id,
+                'distance_meters' => $data['distance_meters'],
+                'accuracy_meters' => $data['accuracy_meters'],
+            ]);
+        });
+
+        return back()->with('success', 'Time out recorded and location verified.');
+    }
+
+    private function validateGpsPayload(Request $request): array
+    {
+        $data = $request->validate([
+            'latitude' => ['required', 'numeric', 'between:-90,90'],
+            'longitude' => ['required', 'numeric', 'between:-180,180'],
+            'accuracy_meters' => ['required', 'numeric', 'min:0', 'max:100000'],
+        ]);
+        $accuracy = (float) $data['accuracy_meters'];
+        if (! is_finite($accuracy) || $accuracy <= 0) {
+            throw ValidationException::withMessages([
+                'accuracy_meters' => 'Your location accuracy is insufficient. Please try again in an area with a better GPS signal.',
+            ]);
+        }
+
+        return [
+            'latitude' => (float) $data['latitude'],
+            'longitude' => (float) $data['longitude'],
+            'accuracy_meters' => $accuracy,
+        ];
+    }
+
+    private function verifiedWorkplace(
+        Employee $employee,
+        array &$data,
+        AttendanceWorkplaceAssignmentService $assignmentService
+    ): AttendanceWorkplace {
+        $workplace = $assignmentService->resolve($employee, today()->toDateString());
+        if (! $workplace) {
+            throw ValidationException::withMessages([
+                'workplace' => 'No authorized active workplace is assigned to your employee record.',
+            ]);
+        }
+        if ($data['accuracy_meters'] > (float) $workplace->required_accuracy_meters) {
+            throw ValidationException::withMessages([
+                'accuracy_meters' => 'Your location accuracy is insufficient. Please try again in an area with a better GPS signal.',
+            ]);
+        }
+        $distance = $this->distanceMeters(
+            $data['latitude'],
+            $data['longitude'],
+            (float) $workplace->latitude,
+            (float) $workplace->longitude
+        );
+        if ($distance > (float) $workplace->radius_meters) {
+            throw ValidationException::withMessages([
+                'location' => 'You are outside the authorized attendance area. Please move within the approved workplace location.',
+            ]);
+        }
+        $data['distance_meters'] = round($distance, 2);
+
+        return $workplace;
+    }
+
+    private function distanceMeters(float $lat1, float $lon1, float $lat2, float $lon2): float
+    {
+        $earthRadius = 6371000;
+        $latDelta = deg2rad($lat2 - $lat1);
+        $lonDelta = deg2rad($lon2 - $lon1);
+        $a = sin($latDelta / 2) ** 2
+            + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($lonDelta / 2) ** 2;
+
+        return $earthRadius * 2 * atan2(sqrt($a), sqrt(max(0, 1 - $a)));
+    }
+
+    public function storeWorkplace(Request $request, AuditLogger $auditLogger): RedirectResponse
+    {
+        abort_unless($request->user()->isAdministrator(), 403);
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:150'],
+            'address' => ['nullable', 'string', 'max:255'],
+            'latitude' => ['required', 'numeric', 'between:-90,90'],
+            'longitude' => ['required', 'numeric', 'between:-180,180'],
+            'radius_meters' => ['required', 'integer', 'between:10,10000'],
+            'required_accuracy_meters' => ['required', 'integer', 'between:5,1000'],
+            'is_active' => ['required', 'boolean'],
+        ]);
+        $data['created_by'] = $request->user()->id;
+
+        DB::transaction(function () use ($data, $request, $auditLogger) {
+            $workplace = AttendanceWorkplace::create($data);
+            AttendanceWorkplaceHistory::create([
+                'attendance_workplace_id' => $workplace->id,
+                'changed_by' => $request->user()->id,
+                'latitude' => $workplace->latitude,
+                'longitude' => $workplace->longitude,
+                'radius_meters' => $workplace->radius_meters,
+                'required_accuracy_meters' => $workplace->required_accuracy_meters,
+                'is_active' => $workplace->is_active,
+            ]);
+            $auditLogger->record('attendance.workplace_created', $workplace);
+        });
+
+        return back()->with('success', 'Authorized workplace location saved.');
+    }
+
+    public function updateWorkplace(Request $request, AttendanceWorkplace $workplace, AuditLogger $auditLogger): RedirectResponse
+    {
+        abort_unless($request->user()->isAdministrator(), 403);
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:150'],
+            'address' => ['nullable', 'string', 'max:255'],
+            'latitude' => ['required', 'numeric', 'between:-90,90'],
+            'longitude' => ['required', 'numeric', 'between:-180,180'],
+            'radius_meters' => ['required', 'integer', 'between:10,10000'],
+            'required_accuracy_meters' => ['required', 'integer', 'between:5,1000'],
+            'is_active' => ['required', 'boolean'],
+        ]);
+
+        DB::transaction(function () use ($workplace, $data, $request, $auditLogger) {
+            $workplace = AttendanceWorkplace::query()->lockForUpdate()->findOrFail($workplace->id);
+            $workplace->update($data);
+            AttendanceWorkplaceHistory::create([
+                'attendance_workplace_id' => $workplace->id,
+                'changed_by' => $request->user()->id,
+                'latitude' => $workplace->latitude,
+                'longitude' => $workplace->longitude,
+                'radius_meters' => $workplace->radius_meters,
+                'required_accuracy_meters' => $workplace->required_accuracy_meters,
+                'is_active' => $workplace->is_active,
+            ]);
+            $auditLogger->record('attendance.workplace_updated', $workplace);
+        });
+
+        return back()->with('success', 'Authorized workplace location updated.');
+    }
+
+    public function assignWorkplace(Request $request, Employee $employee, AuditLogger $auditLogger): RedirectResponse
+    {
+        $data = $request->validate([
+            'attendance_workplace_id' => ['nullable', 'integer', Rule::exists('attendance_workplaces', 'id')->where('is_active', true)],
+            'effective_from' => ['required', 'date_format:Y-m-d'],
+            'reason' => ['required', 'string', 'max:2000'],
+        ]);
+        app(AttendanceWorkplaceAssignmentService::class)->assignIndividual(
+            $employee->id,
+            $data['attendance_workplace_id'] ? (int) $data['attendance_workplace_id'] : null,
+            $data['effective_from'],
+            $request->user()->id,
+            $data['reason'],
+            $auditLogger,
+        );
+
+        return back()->with('success', 'Individual workplace assignment saved with its effective date.');
+    }
+
+    public function assignDepartmentWorkplace(Request $request, AuditLogger $auditLogger): RedirectResponse
+    {
+        $data = $request->validate([
+            'department_id' => ['required', 'integer', Rule::exists('departments', 'id')->where('is_active', true)],
+            'attendance_workplace_id' => ['required', 'integer', Rule::exists('attendance_workplaces', 'id')->where('is_active', true)],
+            'effective_from' => ['required', 'date_format:Y-m-d'],
+            'reason' => ['required', 'string', 'max:2000'],
+            'replace_individual_assignments' => ['nullable', 'boolean'],
+        ]);
+        $result = app(AttendanceWorkplaceAssignmentService::class)->assignDepartment(
+            (int) $data['department_id'],
+            (int) $data['attendance_workplace_id'],
+            $data['effective_from'],
+            $request->user()->id,
+            $data['reason'],
+            (bool) ($data['replace_individual_assignments'] ?? false),
+            $auditLogger,
+        );
+
+        return back()->with(
+            'success',
+            "Department workplace default saved for {$result['employees']} employee(s); {$result['replaced']} individual override(s) were explicitly replaced."
+        );
+    }
+
+    public function departmentWorkplaceAssignmentPreview(
+        Request $request,
+        AttendanceWorkplaceAssignmentService $assignmentService,
+    ): JsonResponse {
+        $data = $request->validate([
+            'department_id' => ['required', 'integer', Rule::exists('departments', 'id')->where('is_active', true)],
+            'effective_from' => ['required', 'date_format:Y-m-d'],
+        ]);
+        $employees = Employee::query()
+            ->where('department_id', $data['department_id'])
+            ->whereNull('archived_at')
+            ->where('employment_status', 'Active')
+            ->with('department')
+            ->orderBy('last_name')
+            ->get();
+        $assignments = $assignmentService->effectiveAssignments($employees, $data['effective_from']);
+
+        return response()->json([
+            'employees' => $employees->map(fn (Employee $employee) => [
+                'employee_no' => $employee->employee_no,
+                'name' => $employee->full_name,
+                'workplace' => $assignments[$employee->id]['workplace']?->name,
+                'assignment_type' => $assignments[$employee->id]['assignment_type'],
+            ])->values(),
         ]);
     }
 
-    public function template(): Response
+    public function bulkAssignWorkplaces(Request $request, AuditLogger $auditLogger): RedirectResponse
     {
-        return response()->streamDownload(function () {
-            $stream = fopen('php://output', 'wb');
-            fputcsv($stream, ['biometric_id', 'date', 'time_in', 'time_out']);
-            fputcsv($stream, ['BIO-0001', '2026-01-15', '08:00', '17:00']);
-            fclose($stream);
-        }, 'biometric-attendance-template.csv', ['Content-Type' => 'text/csv; charset=UTF-8']);
+        $data = $request->validate([
+            'employee_ids' => ['required', 'array', 'min:1', 'max:500'],
+            'employee_ids.*' => ['required', 'integer', 'distinct', 'exists:employees,id'],
+            'attendance_workplace_id' => ['required', 'integer', Rule::exists('attendance_workplaces', 'id')->where('is_active', true)],
+            'effective_from' => ['required', 'date_format:Y-m-d'],
+            'reason' => ['required', 'string', 'max:2000'],
+        ]);
+        $count = app(AttendanceWorkplaceAssignmentService::class)->assignEmployees(
+            array_map('intval', $data['employee_ids']),
+            (int) $data['attendance_workplace_id'],
+            $data['effective_from'],
+            $request->user()->id,
+            $data['reason'],
+            $auditLogger,
+        );
+
+        return back()->with('success', "{$count} employee workplace assignment(s) saved.");
+    }
+
+    public function searchWorkplaceLocations(Request $request): JsonResponse
+    {
+        abort_unless($request->user()->isAdministrator(), 403);
+        $data = $request->validate([
+            'q' => ['required', 'string', 'min:2', 'max:200'],
+        ]);
+
+        return $this->lookupOpenStreetMap('search', [
+            'q' => trim($data['q']),
+            'format' => 'jsonv2',
+            'addressdetails' => 1,
+            'limit' => 5,
+            'countrycodes' => 'ph',
+        ]);
+    }
+
+    public function reverseWorkplaceLocation(Request $request): JsonResponse
+    {
+        abort_unless($request->user()->isAdministrator(), 403);
+        $data = $request->validate([
+            'latitude' => ['required', 'numeric', 'between:-90,90'],
+            'longitude' => ['required', 'numeric', 'between:-180,180'],
+        ]);
+
+        return $this->lookupOpenStreetMap('reverse', [
+            'lat' => $data['latitude'],
+            'lon' => $data['longitude'],
+            'format' => 'jsonv2',
+            'addressdetails' => 1,
+        ]);
+    }
+
+    private function lookupOpenStreetMap(string $type, array $parameters): JsonResponse
+    {
+        $cacheKey = 'attendance-workplace-geocode:'.hash('sha256', $type.json_encode($parameters));
+        $result = Cache::remember($cacheKey, now()->addDay(), function () use ($type, $parameters) {
+            return Cache::lock('attendance-workplace-geocode-nominatim', 10)->block(8, function () use ($type, $parameters) {
+                $lastRequestAt = (float) Cache::get('attendance-workplace-geocode-last-request', 0);
+                $waitMicros = max(0, (int) (1_100_000 - ((microtime(true) - $lastRequestAt) * 1_000_000)));
+                if ($waitMicros > 0) {
+                    usleep($waitMicros);
+                }
+
+                try {
+                    $response = Http::acceptJson()
+                        ->withHeaders([
+                            'User-Agent' => 'Camalaniugan-Municipal-HRIS/1.0 ('.config('app.url').')',
+                            'Referer' => config('app.url'),
+                        ])
+                        ->timeout(8)
+                        ->get('https://nominatim.openstreetmap.org/'.$type, $parameters);
+                } catch (ConnectionException) {
+                    return ['error' => 'OpenStreetMap location search is temporarily unavailable. Please try again.'];
+                } finally {
+                    Cache::put('attendance-workplace-geocode-last-request', microtime(true), now()->addMinute());
+                }
+
+                if (! $response->successful()) {
+                    return ['error' => 'OpenStreetMap location search is temporarily unavailable. Please try again.'];
+                }
+
+                $body = $response->json();
+                if ($type === 'reverse') {
+                    return [
+                        'display_name' => is_array($body) ? ($body['display_name'] ?? null) : null,
+                    ];
+                }
+
+                return collect(is_array($body) ? $body : [])
+                    ->filter(fn ($place) => isset($place['lat'], $place['lon'], $place['display_name']))
+                    ->map(fn ($place) => [
+                        'latitude' => (float) $place['lat'],
+                        'longitude' => (float) $place['lon'],
+                        'display_name' => (string) $place['display_name'],
+                    ])
+                    ->values()
+                    ->all();
+            });
+        });
+
+        if (isset($result['error'])) {
+            Cache::forget($cacheKey);
+
+            return response()->json(['message' => $result['error']], 502);
+        }
+
+        return response()->json($result);
+    }
+
+    public function storeException(Request $request): RedirectResponse
+    {
+        $employee = $request->user()->employee;
+        abort_unless($employee, 403);
+        $data = $request->validate([
+            'attendance_date' => ['required', 'date'],
+            'requested_action' => ['required', Rule::in(['time_in', 'time_out', 'correction'])],
+            'explanation' => ['required', 'string', 'max:2000'],
+            'supporting_document' => ['nullable', 'file', 'max:5120', 'mimes:pdf,jpg,jpeg,png'],
+        ]);
+        $path = isset($data['supporting_document'])
+            ? $data['supporting_document']->store('attendance-exceptions/'.$employee->id, 'local')
+            : null;
+        AttendanceException::create([
+            'employee_id' => $employee->id,
+            'attendance_record_id' => AttendanceRecord::where('employee_id', $employee->id)->whereDate('work_date', $data['attendance_date'])->value('id'),
+            'attendance_date' => $data['attendance_date'],
+            'requested_action' => $data['requested_action'],
+            'explanation' => $data['explanation'],
+            'supporting_document_path' => $path,
+        ]);
+
+        return back()->with('success', 'Attendance exception request submitted for HRMO review.');
+    }
+
+    public function reviewException(Request $request, AttendanceException $exception, AuditLogger $auditLogger): RedirectResponse
+    {
+        abort_unless($request->user()->isAdministrator(), 403);
+        $data = $request->validate([
+            'status' => ['required', Rule::in(['Approved', 'Rejected'])],
+            'review_remarks' => ['nullable', 'string', 'max:2000'],
+        ]);
+        abort_unless($exception->status === 'Pending', 409, 'This exception request has already been reviewed.');
+        DB::transaction(function () use ($exception, $data, $request, $auditLogger) {
+            $locked = AttendanceException::query()->lockForUpdate()->findOrFail($exception->id);
+            $locked->update([
+                'status' => $data['status'],
+                'reviewed_by' => $request->user()->id,
+                'reviewed_at' => now(),
+                'review_remarks' => $data['review_remarks'] ?? null,
+            ]);
+            $auditLogger->record('attendance.exception_reviewed', $locked, [
+                'status' => $data['status'],
+                'remarks' => $data['review_remarks'] ?? null,
+            ]);
+        });
+
+        return back()->with('success', 'Attendance exception request reviewed.');
     }
 
     public function storeSchedule(Request $request, AuditLogger $auditLogger): RedirectResponse
@@ -133,7 +647,7 @@ class AttendanceController extends Controller
             if ($lunchEnd->lessThanOrEqualTo($lunchStart)
                 || $lunchStart->lessThan($shiftStart)
                 || $lunchEnd->greaterThan($shiftEnd)) {
-                throw \Illuminate\Validation\ValidationException::withMessages([
+                throw ValidationException::withMessages([
                     'lunch_start' => 'The lunch interval must be after the shift starts and finish before the shift ends.',
                 ]);
             }
@@ -161,7 +675,7 @@ class AttendanceController extends Controller
                 : $overlapQuery->where('employee_id', $data['employee_id']);
 
             if ($overlapQuery->lockForUpdate()->exists()) {
-                throw \Illuminate\Validation\ValidationException::withMessages([
+                throw ValidationException::withMessages([
                     'effective_from' => 'This schedule overlaps an existing schedule for the selected scope. End the existing schedule first.',
                 ]);
             }

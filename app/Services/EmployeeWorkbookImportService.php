@@ -40,7 +40,10 @@ class EmployeeWorkbookImportService
 
     private const IMPORT_BATCH_SIZE = 50;
 
-    public function __construct(private readonly EmployeeUsernameGenerator $usernameGenerator) {}
+    public function __construct(
+        private readonly EmployeeUsernameGenerator $usernameGenerator,
+        private readonly EmployeeAssignmentHistoryRecorder $assignmentHistoryRecorder
+    ) {}
 
     public function stage(UploadedFile $file, int $userId): EmployeeImport
     {
@@ -1720,7 +1723,6 @@ class EmployeeWorkbookImportService
                 ->map(fn (Collection $profiles) => $profiles->pluck('employee_id')->all())
                 ->all()
             : [];
-        $passwordHash = null;
         $rows = $lockedImport->rows()
             ->whereIn('status', ['ready', 'ready_to_update', 'pending_review'])
             ->orderBy('id')
@@ -1734,8 +1736,8 @@ class EmployeeWorkbookImportService
                     $rowId,
                     $lockedImport,
                     $mapping,
+                    $userId,
                     &$plantillaItemOwners,
-                    &$passwordHash,
                     &$itemOwnerToAdd
                 ): void {
                     $row = EmployeeImportRow::query()->lockForUpdate()->findOrFail($rowId);
@@ -1782,6 +1784,9 @@ class EmployeeWorkbookImportService
 
                     $isExisting = $employee !== null;
                     $previousDepartmentId = $employee?->department_id;
+                    $previousAssignment = $employee
+                        ? $this->assignmentHistoryRecorder->snapshot($employee)
+                        : null;
                     $existingUser = $employee?->user;
                     $effectiveRole = $existingUser?->role ?? $prepared['role'];
                     $targetDepartment = null;
@@ -1815,17 +1820,27 @@ class EmployeeWorkbookImportService
                         }
                         $employee = Employee::create($employeeData);
                     }
+                    if ($isExisting) {
+                        $this->assignmentHistoryRecorder->recordChange(
+                            $employee,
+                            $previousAssignment ?? [],
+                            $userId,
+                            today()->toDateString(),
+                            'Updated through employee workbook import #'.$lockedImport->id
+                        );
+                    } else {
+                        $this->assignmentHistoryRecorder->recordInitial($employee, $userId);
+                    }
 
                     $user = $employee->user;
                     $accountCreated = false;
+                    $temporaryPassword = config('hris.employee_import.default_password');
+                    if (! is_string($temporaryPassword) || $temporaryPassword === '') {
+                        throw new \LogicException('The employee import default password is not configured.');
+                    }
+                    $passwordHash = Hash::make($temporaryPassword);
+
                     if (! $user) {
-                        if ($passwordHash === null) {
-                            $temporaryPassword = config('hris.employee_import.default_password');
-                            if (! is_string($temporaryPassword) || $temporaryPassword === '') {
-                                throw new \LogicException('The employee import default password is not configured.');
-                            }
-                            $passwordHash = Hash::make($temporaryPassword);
-                        }
                         $user = User::create([
                             'name' => $employee->full_name,
                             'username' => $this->usernameGenerator->generateForNameParts(
@@ -1846,7 +1861,12 @@ class EmployeeWorkbookImportService
                         $employee->update(['user_id' => $user->id]);
                         $accountCreated = true;
                     } else {
-                        $user->update(['name' => $employee->full_name]);
+                        $user->update([
+                            'name' => $employee->full_name,
+                            'password' => $passwordHash,
+                            'must_change_password' => true,
+                            'account_setup_completed' => false,
+                        ]);
                     }
 
                     if ($user->role === 'office_head') {

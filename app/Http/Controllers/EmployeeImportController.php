@@ -363,7 +363,7 @@ class EmployeeImportController extends Controller
             'account_activation_pending' => $activationPending,
         ]);
 
-        $message = "Import finished: {$completed->imported_count} new employee(s), {$completed->updated_count} updated, {$completed->accounts_created_count} account(s) created, {$completed->skipped_count} duplicate(s) skipped, ".($completed->review_count - $failedCount)." record(s) requiring correction, {$failedCount} failed. {$setupLinksSent} setup link(s) sent; {$activationPending} account(s) need an email address before HR can send an activation link.";
+        $message = "Import finished: {$completed->imported_count} new employee(s), {$completed->updated_count} updated, {$completed->accounts_created_count} account(s) created, {$completed->skipped_count} duplicate(s) skipped, ".($completed->review_count - $failedCount)." record(s) requiring correction, {$failedCount} failed. {$setupLinksSent} setup link(s) sent; {$activationPending} account(s) need an email address for an activation link or an HR-issued one-time credential.";
         if ($setupLinksFailed > 0) {
             return redirect()->route('employee-imports.show', $completed)
                 ->with('warning', "{$message} {$setupLinksFailed} account(s) did not receive a setup link; retry password setup after checking the mail service.");

@@ -237,7 +237,7 @@
     <article class="stat-card"><span class="stat-label">RECORDED ABSENCES</span><strong>{{ number_format($absentCount) }}</strong><small>absence records for today</small><span class="stat-icon"><i data-lucide="circle-alert"></i></span></article>
     <article class="stat-card"><span class="stat-label">ON APPROVED LEAVE</span><strong>{{ number_format($leaveTodayCount) }}</strong><small>approved leave covering today</small><span class="stat-icon"><i data-lucide="calendar-days"></i></span></article>
     @if(auth()->user()->canApproveMayorLeave())
-    <article class="stat-card"><span class="stat-label">MAYOR LEAVE DECISIONS</span><strong>{{ number_format($pendingAuthorizedFinalTasks->count()) }}</strong><small>assigned for your separate authorized decision</small><span class="stat-icon"><i data-lucide="stamp"></i></span></article>
+    <article class="stat-card"><span class="stat-label">MAYOR LEAVE DECISIONS</span><strong>{{ number_format($pendingAuthorizedFinalCount) }}</strong><small>assigned for your separate authorized decision</small><span class="stat-icon"><i data-lucide="stamp"></i></span></article>
     @endif
 </div>
 <div class="content-grid dashboard-content-grid">
@@ -355,8 +355,8 @@
     <article class="stat-card"><span class="stat-label">INACTIVE EMPLOYEES</span><strong>{{ number_format($inactiveEmployeeCount) }}</strong><small>non-archived records not marked active</small><span class="stat-icon"><i data-lucide="user-round-x"></i></span></article>
     <article class="stat-card"><span class="stat-label">PRESENT TODAY</span><strong>{{ number_format($presentCount) }}</strong><small>recorded present or late</small><span class="stat-icon"><i data-lucide="circle-check"></i></span></article>
     <article class="stat-card"><span class="stat-label">RECORDED ABSENCES</span><strong>{{ number_format($absentCount) }}</strong><small>absence records for today</small><span class="stat-icon"><i data-lucide="circle-alert"></i></span></article>
-    <article class="stat-card"><span class="stat-label">PENDING FINAL DECISIONS</span><strong>{{ number_format($pendingFinalTasks->count()) }}</strong><small>leave applications awaiting your decision</small><span class="stat-icon"><i data-lucide="file-clock"></i></span></article>
-    <article class="stat-card"><span class="stat-label">ESCALATED OFFICE REVIEWS</span><strong>{{ number_format($pendingAlternateTasks->count()) }}</strong><small>routed to you as alternate approver</small><span class="stat-icon"><i data-lucide="user-round-check"></i></span></article>
+    <article class="stat-card"><span class="stat-label">PENDING FINAL DECISIONS</span><strong>{{ number_format($pendingFinalCount) }}</strong><small>leave applications awaiting your decision</small><span class="stat-icon"><i data-lucide="file-clock"></i></span></article>
+    <article class="stat-card"><span class="stat-label">ESCALATED OFFICE REVIEWS</span><strong>{{ number_format($pendingAlternateCount) }}</strong><small>routed to you as alternate approver</small><span class="stat-icon"><i data-lucide="user-round-check"></i></span></article>
     <article class="stat-card"><span class="stat-label">ON APPROVED LEAVE</span><strong>{{ number_format($leaveTodayCount) }}</strong><small>approved leave covering today</small><span class="stat-icon"><i data-lucide="calendar-days"></i></span></article>
 </div>
 <div class="content-grid dashboard-content-grid">

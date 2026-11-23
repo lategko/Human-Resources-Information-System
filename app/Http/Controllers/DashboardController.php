@@ -125,58 +125,70 @@ class DashboardController extends Controller
             $user->isHrmo() => 'Under HRMO Verification',
             default => 'Pending Final Approval',
         };
-        if ($user->isAdministrator() && ! $user->canFinalApprove()) {
-            $pendingTasks = collect();
+        if ($user->isAdministrator()) {
+            $pendingReviewQuery = (clone $leaves)
+                ->where('status', 'Under HRMO Verification')
+                ->where(function ($query) use ($user) {
+                    $query->whereNull('assigned_hr_reviewer_id')
+                        ->orWhere('assigned_hr_reviewer_id', $user->id);
+                });
         } elseif ($user->canFinalApprove()) {
-            $pendingTasks = (clone $leaves)
+            $pendingReviewQuery = (clone $leaves)
                 ->where(function ($query) use ($user) {
                     $query->where('status', 'Pending Final Approval')
                         ->orWhere(function ($alternate) use ($user) {
                             $alternate->where('status', 'Under Alternate Office Head Review')
                                 ->where('office_head_reviewer_id', $user->id);
                         });
-                })
-                ->with(['employee.department', 'leaveType'])
-                ->oldest('created_at')
-                ->limit(8)
-                ->get();
+                });
         } elseif ($user->isOfficeHead()) {
-            $pendingTasks = LeaveApplication::query()
+            $pendingReviewQuery = LeaveApplication::query()
                 ->where('office_head_reviewer_id', $user->id)
-                ->whereIn('status', ['Under Office Head Review', 'Under Alternate Office Head Review'])
-                ->with(['employee.department', 'leaveType'])
-                ->oldest('created_at')
-                ->limit(8)
-                ->get();
+                ->whereIn('status', ['Under Office Head Review', 'Under Alternate Office Head Review']);
         } else {
-            $pendingTasks = (clone $leaves)
-                ->where('status', $pendingStatus)
-                ->with(['employee.department', 'leaveType'])
-                ->oldest('created_at')
-                ->limit(8)
-                ->get();
+            $pendingReviewQuery = (clone $leaves)->where('status', $pendingStatus);
         }
-        $pendingFinalTasks = $user->canFinalApprove()
-            ? (clone $leaves)
-                ->where('status', 'Pending Final Approval')
+        $pendingCount = (clone $pendingReviewQuery)->count();
+        $pendingTasks = (clone $pendingReviewQuery)
+            ->with(['employee.department', 'leaveType'])
+            ->oldest('created_at')
+            ->limit(8)
+            ->get();
+
+        $pendingFinalQuery = $user->canFinalApprove()
+            ? (clone $leaves)->where('status', 'Pending Final Approval')
+            : null;
+        $pendingFinalCount = $pendingFinalQuery?->count() ?? 0;
+        $pendingFinalTasks = $pendingFinalQuery
+            ? (clone $pendingFinalQuery)
                 ->with(['employee.department', 'leaveType'])
                 ->oldest('created_at')
                 ->limit(8)
                 ->get()
             : collect();
-        $pendingAuthorizedFinalTasks = $user->canApproveMayorLeave()
+
+        $pendingAuthorizedFinalQuery = $user->canApproveMayorLeave()
             ? LeaveApplication::query()
                 ->where('status', 'Pending Authorized Final Approval')
                 ->where('assigned_final_approver_id', $user->id)
+            : null;
+        $pendingAuthorizedFinalCount = $pendingAuthorizedFinalQuery?->count() ?? 0;
+        $pendingAuthorizedFinalTasks = $pendingAuthorizedFinalQuery
+            ? (clone $pendingAuthorizedFinalQuery)
                 ->with(['employee.department', 'leaveType'])
                 ->oldest('created_at')
                 ->limit(8)
                 ->get()
             : collect();
-        $pendingAlternateTasks = $user->canFinalApprove()
+
+        $pendingAlternateQuery = $user->canFinalApprove()
             ? (clone $leaves)
                 ->where('status', 'Under Alternate Office Head Review')
                 ->where('office_head_reviewer_id', $user->id)
+            : null;
+        $pendingAlternateCount = $pendingAlternateQuery?->count() ?? 0;
+        $pendingAlternateTasks = $pendingAlternateQuery
+            ? (clone $pendingAlternateQuery)
                 ->with(['employee.department', 'leaveType'])
                 ->oldest('created_at')
                 ->limit(8)
@@ -230,23 +242,15 @@ class DashboardController extends Controller
             'leaveTodayCount' => (clone $leaves)->where('status', 'Approved')
                 ->whereDate('start_date', '<=', today())
                 ->whereDate('end_date', '>=', today())
-                ->count(),
-            'pendingCount' => $user->isAdministrator() && ! $user->canFinalApprove()
-                ? 0
-                : ($user->canFinalApprove()
-                    ? (clone $leaves)->where(function ($query) use ($user) {
-                        $query->where('status', 'Pending Final Approval')
-                            ->orWhere(function ($alternate) use ($user) {
-                                $alternate->where('status', 'Under Alternate Office Head Review')
-                                    ->where('office_head_reviewer_id', $user->id);
-                            });
-                    })->count()
-                    : ($user->isOfficeHead()
-                    ? (clone $pendingTasks)->count()
-                    : (clone $leaves)->where('status', $pendingStatus)->count())),
+                ->distinct()
+                ->count('employee_id'),
+            'pendingCount' => $pendingCount,
             'pendingTasks' => $pendingTasks,
+            'pendingFinalCount' => $pendingFinalCount,
             'pendingFinalTasks' => $pendingFinalTasks,
+            'pendingAlternateCount' => $pendingAlternateCount,
             'pendingAlternateTasks' => $pendingAlternateTasks,
+            'pendingAuthorizedFinalCount' => $pendingAuthorizedFinalCount,
             'pendingAuthorizedFinalTasks' => $pendingAuthorizedFinalTasks,
             'upcomingLeaves' => (clone $leaves)
                 ->where('status', 'Approved')

@@ -173,6 +173,14 @@ class LeaveAccrualTest extends TestCase
             'role' => 'admin',
             'is_active' => true,
         ]);
+        $officeHead = User::create([
+            'name' => 'Accrual Office Head',
+            'email' => 'accrual-office-head@example.test',
+            'password' => 'test-password',
+            'role' => 'office_head',
+            'is_active' => true,
+        ]);
+        $this->department->update(['head_user_id' => $officeHead->id]);
         app(LeaveWorkflowService::class)->act($application, $hrmo, [
             'action' => 'verify',
             'verified_working_days' => 1,
@@ -180,6 +188,22 @@ class LeaveAccrualTest extends TestCase
             'certifier_signature' => 'HRMO Officer',
             'eligibility_verified' => true,
         ]);
+        $verified = $application->fresh();
+        if ($verified->status === 'Under Alternate Office Head Review'
+            && $verified->office_head_reviewer_id === $approver->id) {
+            app(LeaveWorkflowService::class)->act($verified, $approver, [
+                'action' => 'endorse',
+                'recommendation' => 'For approval',
+            ]);
+        } else {
+            $officeHead = User::where('role', 'office_head')->first();
+            if ($officeHead) {
+                app(LeaveWorkflowService::class)->act($verified, $officeHead, [
+                    'action' => 'endorse',
+                    'recommendation' => 'For approval',
+                ]);
+            }
+        }
         app(LeaveWorkflowService::class)->act($application->fresh(), $approver, [
             'action' => 'approve',
             'days_with_pay' => 1,

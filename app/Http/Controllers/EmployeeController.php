@@ -6,8 +6,10 @@ use App\Models\Department;
 use App\Models\Employee;
 use App\Models\Position;
 use App\Services\AuditLogger;
+use App\Services\EmployeeAssignmentHistoryRecorder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
@@ -64,21 +66,33 @@ class EmployeeController extends Controller
         ]);
     }
 
-    public function store(Request $request, AuditLogger $auditLogger): RedirectResponse
-    {
+    public function store(
+        Request $request,
+        AuditLogger $auditLogger,
+        EmployeeAssignmentHistoryRecorder $historyRecorder
+    ): RedirectResponse {
         $this->authorize('create', Employee::class);
         $data = $this->validated($request);
         $this->assertPositionDepartment($data);
-        $employee = Employee::create($data);
-        $auditLogger->record('employee.created', $employee);
+        unset($data['assignment_effective_date'], $data['assignment_change_reason']);
+        $employee = DB::transaction(function () use ($data, $request, $auditLogger, $historyRecorder) {
+            $employee = Employee::create($data);
+            $historyRecorder->recordInitial($employee, $request->user()->id);
+            $auditLogger->record('employee.created', $employee);
+
+            return $employee;
+        });
 
         return redirect()->route('employees.show', $employee)->with('success', 'Employee record created.');
     }
 
-    public function show(Employee $employee): View
+    public function show(Request $request, Employee $employee): View
     {
         $this->authorize('view', $employee);
         $employee->load(['department', 'position', 'leaveCredits.leaveType', 'employmentHistories', 'serviceProfile']);
+        if ($request->user()->canManageHr()) {
+            $employee->load('assignmentHistories.changedBy');
+        }
 
         return view('employees.show', compact('employee'));
     }
@@ -115,18 +129,48 @@ class EmployeeController extends Controller
 
         return view('employees.form', [
             'employee' => $employee,
-            'departments' => Department::where('is_active', true)->orderBy('name')->get(),
-            'positions' => Position::where('is_active', true)->orderBy('title')->get(),
+            'departments' => Department::query()->where('is_active', true)
+                ->when($employee->department_id, fn ($query) => $query->orWhereKey($employee->department_id))
+                ->orderBy('name')->get(),
+            'positions' => Position::query()->where('is_active', true)
+                ->when($employee->position_id, fn ($query) => $query->orWhereKey($employee->position_id))
+                ->orderBy('title')->get(),
         ]);
     }
 
-    public function update(Request $request, Employee $employee, AuditLogger $auditLogger): RedirectResponse
-    {
+    public function update(
+        Request $request,
+        Employee $employee,
+        AuditLogger $auditLogger,
+        EmployeeAssignmentHistoryRecorder $historyRecorder
+    ): RedirectResponse {
         $this->authorize('update', $employee);
         $data = $this->validated($request, $employee);
-        $this->assertPositionDepartment($data);
-        $employee->update($data);
-        $auditLogger->record('employee.updated', $employee);
+        $this->assertPositionDepartment($data, $employee);
+        $previousAssignment = $historyRecorder->snapshot($employee);
+        $effectiveDate = $data['assignment_effective_date'] ?? today()->toDateString();
+        $reason = $data['assignment_change_reason'] ?? null;
+        unset($data['assignment_effective_date'], $data['assignment_change_reason']);
+        DB::transaction(function () use (
+            $data,
+            $employee,
+            $request,
+            $auditLogger,
+            $historyRecorder,
+            $previousAssignment,
+            $effectiveDate,
+            $reason
+        ): void {
+            $employee->update($data);
+            $historyRecorder->recordChange(
+                $employee,
+                $previousAssignment,
+                $request->user()->id,
+                $effectiveDate,
+                $reason
+            );
+            $auditLogger->record('employee.updated', $employee);
+        });
 
         return redirect()->route('employees.show', $employee)->with('success', 'Employee record updated.');
     }
@@ -147,7 +191,6 @@ class EmployeeController extends Controller
             'employee_no' => ['required', 'string', 'max:50', Rule::unique('employees')->ignore($employee?->id)],
             'department_id' => ['required', 'exists:departments,id'],
             'position_id' => ['nullable', 'exists:positions,id'],
-            'biometric_id' => ['nullable', 'string', 'max:80', Rule::unique('employees')->ignore($employee?->id)],
             'first_name' => ['required', 'string', 'max:100'],
             'middle_name' => ['nullable', 'string', 'max:100'],
             'last_name' => ['required', 'string', 'max:100'],
@@ -167,13 +210,31 @@ class EmployeeController extends Controller
             'government_ids' => ['nullable', 'string', 'max:1000'],
             'emergency_contact_name' => ['nullable', 'string', 'max:150'],
             'emergency_contact_number' => ['nullable', 'string', 'max:40'],
+            'assignment_effective_date' => ['nullable', 'date', 'before_or_equal:today'],
+            'assignment_change_reason' => ['nullable', 'string', 'max:2000'],
         ]);
     }
 
-    private function assertPositionDepartment(array $data): void
+    private function assertPositionDepartment(array $data, ?Employee $employee = null): void
     {
-        if (! empty($data['position_id']) && Position::whereKey($data['position_id'])
-            ->whereNotNull('department_id')->where('department_id', '!=', $data['department_id'])->exists()) {
+        $department = Department::findOrFail($data['department_id']);
+        if (! $department->is_active && (int) $department->id !== (int) ($employee?->department_id ?? 0)) {
+            throw ValidationException::withMessages([
+                'department_id' => 'New employee assignments must use an active department.',
+            ]);
+        }
+
+        if (empty($data['position_id'])) {
+            return;
+        }
+
+        $position = Position::findOrFail($data['position_id']);
+        if (! $position->is_active && (int) $position->id !== (int) ($employee?->position_id ?? 0)) {
+            throw ValidationException::withMessages([
+                'position_id' => 'New employee assignments must use an active position.',
+            ]);
+        }
+        if ($position->department_id !== null && (int) $position->department_id !== (int) $data['department_id']) {
             throw ValidationException::withMessages([
                 'position_id' => 'The selected position belongs to a different department.',
             ]);

@@ -25,6 +25,7 @@
             <a href="#services" :aria-current="activeSection === 'services' ? 'page' : null" @click="menuOpen = false">Services</a>
             <a href="#features" :aria-current="activeSection === 'features' ? 'page' : null" @click="menuOpen = false">Features</a>
             <a href="#how-it-works" :aria-current="activeSection === 'how-it-works' ? 'page' : null" @click="menuOpen = false">How It Works</a>
+            <a href="#roles" :aria-current="activeSection === 'roles' ? 'page' : null" @click="menuOpen = false">Roles</a>
             <a href="#contact" :aria-current="activeSection === 'contact' ? 'page' : null" @click="menuOpen = false">Contact</a>
             <a class="button button-primary public-sign-in" href="{{ route('login') }}">Sign in</a>
         </nav>
@@ -36,7 +37,7 @@
                 <div class="public-hero-copy">
                     <span class="public-eyebrow"><span class="public-eyebrow-mark" aria-hidden="true"></span> Municipality of Camalaniugan · HRMO</span>
                     <h1 id="hero-title">Municipal Service.<br><span>People First.</span></h1>
-                    <p>A unified Human Resource Information System designed to improve employee services, personnel management, and administrative efficiency in the Municipality of Camalaniugan.</p>
+                    <p>A centralized Human Resource Information System designed to improve employee services, personnel management, attendance monitoring, and administrative efficiency in the Municipality of Camalaniugan.</p>
                     <div class="public-hero-actions">
                         <a class="button button-primary public-hero-primary" href="{{ route('login') }}">Access HRIS Portal</a>
                         <a class="button public-hero-secondary" href="#services">Explore Our Services</a>
@@ -68,10 +69,12 @@
                     <p class="public-lead">A centralized digital platform supporting the Municipality of Camalaniugan's human resource operations.</p>
                     <p>The HRIS brings essential personnel processes together in one organized system. It helps the Human Resource Management Office manage employee information and supports municipal personnel through clearer, more efficient service workflows.</p>
                     <ul class="public-check-list">
-                        <li>Organized employee records and employment information</li>
-                        <li>Efficient leave applications and review workflows</li>
+                        <li>Centralized employee information and records management</li>
+                        <li>Digital leave applications, review, and approval workflows</li>
                         <li>Attendance monitoring and leave credit tracking</li>
-                        <li>Transparent review, approval, and personnel administration</li>
+                        <li>Administrative workflows supported by notifications and records</li>
+                        <li>Personnel services for employees and authorized municipal reviewers</li>
+                        <li>More organized personnel administration for the HRMO</li>
                     </ul>
                 </div>
             </div>
@@ -95,11 +98,11 @@
                     </article>
                     <article class="public-service-card">
                         <h3>Attendance Monitoring</h3>
-                        <p>Attendance records, biometric CSV imports, attendance corrections, and monitoring.</p>
+                        <p>GPS-verified attendance, workplace geofencing, attendance corrections, and monitoring.</p>
                     </article>
                     <article class="public-service-card">
-                        <h3>Leave Credits</h3>
-                        <p>Employee leave balances, credit adjustments, and transaction history.</p>
+                        <h3>Leave Credits Management</h3>
+                        <p>Employee leave balances, monthly accrual, authorized adjustments, and transaction history.</p>
                     </article>
                     <article class="public-service-card">
                         <h3>Reports and Analytics</h3>
@@ -121,14 +124,18 @@
                     <p>Tools that support secure access, accountable processes, and dependable personnel information.</p>
                 </div>
                 <div class="public-feature-grid">
-                    <article class="public-feature"><div><h3>Centralized Employee Information</h3><p>Keep employee profiles and work information organized in one system.</p></div></article>
-                    <article class="public-feature"><div><h3>Role-Based Access Control</h3><p>Access is assigned according to authorized account roles.</p></div></article>
-                    <article class="public-feature"><div><h3>Digital Leave Application and Approval</h3><p>Submit applications and follow review and approval progress.</p></div></article>
-                    <article class="public-feature"><div><h3>Attendance and Leave Monitoring</h3><p>Review attendance records and leave credit information.</p></div></article>
-                    <article class="public-feature"><div><h3>Document Management</h3><p>Supporting documents stay within authorized HRIS workflows.</p></div></article>
-                    <article class="public-feature"><div><h3>Audit Trail and Accountability</h3><p>Recorded activity supports accountability and review.</p></div></article>
-                    <article class="public-feature"><div><h3>System Notifications</h3><p>System notifications help users follow relevant application updates.</p></div></article>
-                    <article class="public-feature"><div><h3>Administrative Reporting</h3><p>Access employee, attendance, and leave reports with CSV exports.</p></div></article>
+                    <article class="public-feature"><div><h3>Employee Profile Management</h3><p>Maintain personnel records and employment information; employees can manage permitted personal details.</p></div></article>
+                    <article class="public-feature"><div><h3>Department and Position Management</h3><p>Manage the municipal organizational structure and employee department and position records.</p></div></article>
+                    <article class="public-feature"><div><h3>Leave Application and Approval</h3><p>Submit applications with supporting documents and follow the established review and decision process.</p></div></article>
+                    <article class="public-feature"><div><h3>Leave Cancellation and Returned Applications</h3><p>Cancel eligible requests or update applications returned for correction through existing workflows.</p></div></article>
+                    <article class="public-feature"><div><h3>Office Head Availability and Routing</h3><p>Route applications to assigned Office Heads or configured authorized alternates when unavailable.</p></div></article>
+                    <article class="public-feature"><div><h3>GPS Attendance Monitoring</h3><p>Record attendance using configured workplace locations and GPS-based proximity checks.</p></div></article>
+                    <article class="public-feature"><div><h3>Attendance Correction</h3><p>Authorized HRMO users can review and correct attendance records.</p></div></article>
+                    <article class="public-feature"><div><h3>Monthly Leave Accrual</h3><p>Accrue applicable leave credits through the configured monthly process.</p></div></article>
+                    <article class="public-feature"><div><h3>Holiday and Workweek Configuration</h3><p>Manage holidays and work schedules used in personnel processes.</p></div></article>
+                    <article class="public-feature"><div><h3>Notification Management</h3><p>Receive and manage notifications about relevant application and personnel updates.</p></div></article>
+                    <article class="public-feature"><div><h3>Document Management</h3><p>Store and access leave supporting documents within authorized application workflows.</p></div></article>
+                    <article class="public-feature"><div><h3>Administrative Reporting</h3><p>Review available employee, attendance, and leave reports, including CSV exports.</p></div></article>
                 </div>
             </div>
         </section>
@@ -138,7 +145,7 @@
                 <div class="public-section-heading public-workflow-heading">
                     <span class="public-section-kicker">The employee service process</span>
                     <h2 id="workflow-title">How the HRIS Works</h2>
-                    <p>Understand how the Municipality of Camalaniugan Human Resource Information System simplifies employee services, human resource operations, and administrative processes through a structured digital workflow.</p>
+                    <p>Follow the implemented sequence for secure access, employee services, HRMO verification, department review, attendance monitoring, and administrative reporting.</p>
                 </div>
 
                 <div class="workflow-process" aria-label="Leave application process">
@@ -186,7 +193,7 @@
                     </div>
                 </div>
 
-                <p class="workflow-exception"><strong>Alternate review:</strong> If an assigned Office Head is unavailable, the Mayor may act as the department-level alternate when authorized. HRMO verification remains mandatory, and the Mayor's final approval is a separate action. Personal applications by an Admin or the Mayor require explicitly assigned alternate reviewers; missing assignments are not bypassed.</p>
+                <p class="workflow-exception"><strong>Approval hierarchy:</strong> Submitted applications go to HRMO verification before Office Head review and the Mayor's separate final decision. If the assigned Office Head is unavailable, an authorized alternate may review. Admin and Mayor personal applications use separately assigned reviewers; required assignments are not bypassed.</p>
 
                 <div class="workflow-services">
                     <div class="workflow-services-heading">
@@ -196,7 +203,7 @@
                     </div>
                     <ul class="workflow-services-list">
                         <li><h4>Employee Profile Management</h4><p>HRMO and administrators manage personnel profiles; employees can view and update permitted personal information.</p></li>
-                        <li><h4>Attendance Monitoring</h4><p>Authorized staff review attendance records, import biometric CSV data, and process permitted corrections.</p></li>
+                        <li><h4>Attendance Monitoring</h4><p>Employees record attendance at configured workplaces using GPS checks; authorized staff review records and process permitted corrections and exceptions.</p></li>
                         <li><h4>Leave Credits Monitoring</h4><p>Employees can review leave balances and transactions; authorized HR staff maintain and adjust credits.</p></li>
                         <li><h4>Document Management</h4><p>Employees submit leave supporting documents, which authorized reviewers access as part of application processing.</p></li>
                         <li><h4>Reports and Analytics</h4><p>Authorized roles review employee, attendance, and leave reports, including available CSV exports.</p></li>
@@ -214,13 +221,41 @@
             </div>
         </section>
 
+        <section id="roles" class="public-section public-roles" aria-labelledby="roles-title">
+            <div class="public-section-inner">
+                <div class="public-section-heading">
+                    <span class="public-section-kicker">Role-based access</span>
+                    <h2 id="roles-title">Access for authorized municipal personnel</h2>
+                    <p>Each account has designated permissions and access to the HRIS functions appropriate to its role.</p>
+                </div>
+                <div class="public-role-grid">
+                    <article class="public-role-card">
+                        <h3>Admin / HRMO</h3>
+                        <p>Manages employee records, HR operations, user accounts, system configuration, and HRMO verification within assigned permissions.</p>
+                    </article>
+                    <article class="public-role-card">
+                        <h3>Office Head</h3>
+                        <p>Reviews and recommends leave applications routed for the assigned department and accesses permitted department information.</p>
+                    </article>
+                    <article class="public-role-card">
+                        <h3>Employee</h3>
+                        <p>Views permitted personal and personnel information, submits and follows leave applications, and uses available attendance services.</p>
+                    </article>
+                    <article class="public-role-card">
+                        <h3>Mayor</h3>
+                        <p>Provides executive oversight and makes the separate final decision on assigned applications, with only the access permitted for the role.</p>
+                    </article>
+                </div>
+            </div>
+        </section>
+
         <section id="contact" class="public-contact" aria-labelledby="contact-title">
             <div class="public-section-inner public-contact-inner">
                 <div>
                     <span class="public-section-kicker">Municipal HRMO</span>
                     <h2 id="contact-title">Human Resource Management Office</h2>
                     <p>Municipality of Camalaniugan<br>Province of Cagayan, Philippines</p>
-                    <small>For municipal personnel and authorized system users.</small>
+                    <small>The HRIS supports employee services, personnel management, attendance monitoring, and administrative workflows. For municipal personnel and authorized system users.</small>
                 </div>
                 <div class="public-contact-actions">
                     <a class="button public-contact-button" href="{{ route('login') }}">Access the HRIS Portal</a>
@@ -234,7 +269,7 @@
         <div class="public-footer-inner">
             <a class="public-footer-brand" href="#home"><img src="{{ asset('image/hrislogo.webp') }}" alt="" width="42" height="42" loading="lazy" decoding="async"><span><strong>Municipality of Camalaniugan</strong><small>Human Resource Management Office · Province of Cagayan, Philippines</small></span></a>
             <nav class="public-footer-links" aria-label="Footer navigation">
-                <a href="#home">Home</a><a href="#about">About</a><a href="#services">Services</a><a href="#features">Features</a><a href="#how-it-works">How It Works</a><a href="#contact">Contact</a>
+                <a href="#home">Home</a><a href="#about">About</a><a href="#services">Services</a><a href="#features">Features</a><a href="#how-it-works">How It Works</a><a href="#roles">Roles</a><a href="#contact">Contact</a>
             </nav>
             <a class="public-footer-portal" href="{{ route('login') }}">HRIS Portal</a>
         </div>

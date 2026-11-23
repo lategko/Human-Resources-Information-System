@@ -13,7 +13,7 @@ class Employee extends Model
     use SoftDeletes;
 
     protected $fillable = [
-        'user_id', 'department_id', 'position_id', 'employee_no', 'biometric_id',
+        'user_id', 'department_id', 'attendance_workplace_id', 'position_id', 'employee_no', 'biometric_id',
         'first_name', 'middle_name', 'last_name', 'suffix', 'sex', 'date_of_birth',
         'civil_status', 'contact_number', 'email', 'address', 'employment_status',
         'employment_type', 'date_hired', 'salary_grade', 'salary_step', 'monthly_salary',
@@ -61,9 +61,36 @@ class Employee extends Model
         return $this->hasMany(AttendanceRecord::class);
     }
 
+    public function attendanceWorkplace(): BelongsTo
+    {
+        return $this->belongsTo(AttendanceWorkplace::class, 'attendance_workplace_id');
+    }
+
+    public function workplaceAssignments(): HasMany
+    {
+        return $this->hasMany(AttendanceWorkplaceAssignment::class);
+    }
+
+    public function workplaceAssignmentHistory(): HasMany
+    {
+        return $this->hasMany(AttendanceWorkplaceAssignmentHistory::class);
+    }
+
+    public function attendanceExceptions(): HasMany
+    {
+        return $this->hasMany(AttendanceException::class);
+    }
+
     public function employmentHistories(): HasMany
     {
         return $this->hasMany(EmployeeEmploymentHistory::class)->orderBy('sequence');
+    }
+
+    public function assignmentHistories(): HasMany
+    {
+        return $this->hasMany(EmployeeAssignmentHistory::class)
+            ->orderByDesc('effective_date')
+            ->orderByDesc('id');
     }
 
     public function serviceProfile(): HasOne

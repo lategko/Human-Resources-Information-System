@@ -5,12 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\Department;
 use App\Models\OfficeHeadAvailability;
 use App\Models\User;
-use App\Services\AuditLogger;
+use App\Services\OfficeHeadAvailabilityService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
-use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
 class OfficeHeadAvailabilityController extends Controller
@@ -19,7 +17,9 @@ class OfficeHeadAvailabilityController extends Controller
     {
         $user = $request->user();
         $departments = Department::with('head')->whereNotNull('head_user_id')->orderBy('name');
-        $records = OfficeHeadAvailability::with(['department', 'officeHead', 'alternate', 'updater'])
+        $records = OfficeHeadAvailability::with([
+            'department', 'officeHead', 'alternate', 'updater', 'cancelledBy', 'history.actor',
+        ])
             ->latest('start_date');
         if ($user->isOfficeHead()) {
             $departments->where('head_user_id', $user->id);
@@ -32,14 +32,14 @@ class OfficeHeadAvailabilityController extends Controller
             'alternates' => User::query()->where('is_active', true)
                 ->where(function ($query) {
                     $query->where('role', 'office_head')
-                            ->orWhere('role', 'mayor');
+                        ->orWhere('role', 'mayor');
                 })
                 ->orderBy('name')
                 ->get(),
         ]);
     }
 
-    public function store(Request $request, AuditLogger $auditLogger): RedirectResponse
+    public function store(Request $request, OfficeHeadAvailabilityService $availabilityService): RedirectResponse
     {
         abort_unless($request->user()->isAdministrator() || $request->user()->isOfficeHead(), 403);
         $data = $request->validate([
@@ -67,50 +67,48 @@ class OfficeHeadAvailabilityController extends Controller
         }
 
         if ($data['availability_status'] === 'available' && $alternate) {
-            throw ValidationException::withMessages([
-                'alternate_user_id' => 'An alternate approver can only be assigned while the Office Head is unavailable.',
-            ]);
+            abort(422, 'An alternate approver can only be assigned while the Office Head is unavailable.');
         }
 
-        $record = DB::transaction(function () use ($data, $request, $alternate) {
-            $department = Department::query()->lockForUpdate()->with('head')->findOrFail($data['department_id']);
-            abort_unless(
-                $department->head?->isOfficeHead()
-                    && ($request->user()->isAdministrator() || $department->head_user_id === $request->user()->id),
-                422,
-                'The department must have a valid Office Head, and Office Heads may record availability only for their own department.'
-            );
-            abort_if(
-                $alternate && $alternate->id === $department->head_user_id,
-                422,
-                'Choose a different user as the temporary alternate.'
-            );
-            $overlap = OfficeHeadAvailability::query()
-                ->where('department_id', $department->id)
-                ->where('office_head_user_id', $department->head_user_id)
-                ->whereDate('start_date', '<=', $data['end_date'])
-                ->whereDate('end_date', '>=', $data['start_date'])
-                ->exists();
-            if ($overlap) {
-                throw ValidationException::withMessages([
-                    'start_date' => 'This period overlaps an existing availability record for the department Office Head.',
-                ]);
-            }
-
-            return OfficeHeadAvailability::create([
-                ...$data,
-                'office_head_user_id' => $department->head_user_id,
-                'updated_by' => $request->user()->id,
-            ]);
-        });
-        $auditLogger->record('office_head.availability_recorded', $record, [
-            'department_id' => $record->department_id,
-            'availability_status' => $record->availability_status,
-            'start_date' => $record->start_date->toDateString(),
-            'end_date' => $record->end_date->toDateString(),
-            'alternate_user_id' => $record->alternate_user_id,
-        ]);
+        $availabilityService->record($data, $request->user());
 
         return back()->with('success', 'Office Head availability period recorded.');
+    }
+
+    public function update(
+        Request $request,
+        OfficeHeadAvailability $availability,
+        OfficeHeadAvailabilityService $availabilityService
+    ): RedirectResponse {
+        abort_unless($request->user()->isAdministrator(), 403);
+        $data = $request->validate([
+            'availability_status' => ['required', Rule::in(['available', 'temporarily_unavailable', 'on_leave', 'official_business', 'unable_to_approve'])],
+            'start_date' => ['required', 'date'],
+            'end_date' => ['required', 'date', 'after_or_equal:start_date'],
+            'reason' => ['required', 'string', 'max:2000'],
+            'alternate_user_id' => ['nullable', 'integer', 'exists:users,id'],
+        ]);
+        if ($data['availability_status'] === 'available' && ! empty($data['alternate_user_id'])) {
+            abort(422, 'An alternate approver can only be assigned while the Office Head is unavailable.');
+        }
+
+        $availabilityService->update($availability, $data, $request->user());
+
+        return back()->with('success', 'Office Head availability period updated. Existing alternate assignments were preserved.');
+    }
+
+    public function cancel(
+        Request $request,
+        OfficeHeadAvailability $availability,
+        OfficeHeadAvailabilityService $availabilityService
+    ): RedirectResponse {
+        abort_unless($request->user()->isAdministrator(), 403);
+        $data = $request->validate([
+            'cancellation_reason' => ['required', 'string', 'max:2000'],
+        ]);
+
+        $availabilityService->cancel($availability, $data['cancellation_reason'], $request->user());
+
+        return back()->with('success', 'Office Head availability period cancelled and retained in history.');
     }
 }

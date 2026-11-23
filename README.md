@@ -70,9 +70,9 @@ Supporting leave documents are written to Laravel's private `local` disk (`stora
 
 ## Office Head availability and alternate routing
 
-HRMO or an administrator can record a dated Office Head availability period from **Office Head availability**. Records include the reason and, when authorized, a temporary alternate approver. Office Heads cannot create their own unavailability records. Periods for the same department cannot overlap.
+HRMO or an administrator can record a dated Office Head availability period from **Office Head availability**. Records include the reason and, when authorized, a temporary alternate approver. Office Heads cannot create their own unavailability records. Periods for the same department cannot overlap. Admin can edit or cancel an active period; each creation, change, and cancellation is retained in history and audit logs. Cancelled periods are not deleted and do not block later availability periods.
 
-Standard employee applications are routed to the assigned Office Head. If that Office Head is unavailable, the configured alternate or Mayor acting as the authorized department-level alternate performs a separately recorded review; HRMO verification remains mandatory, followed by the Mayor's separate final decision. Office Head personal applications go directly to HRMO. Admin personal applications require an assigned alternate HR reviewer. Mayor personal applications require a separately designated final authority and remain awaiting assignment until one is configured. Missing reviewers never bypass verification or create automatic approval. Leave credits are deducted only at final approval.
+Standard employee applications are routed to the assigned Office Head. If that Office Head is unavailable, the configured alternate or Mayor acting as the authorized department-level alternate performs a separately recorded review; HRMO verification remains mandatory, followed by the Mayor's separate final decision. Editing or cancelling availability never automatically returns an already-rerouted application to the original Office Head; its current reviewer remains assigned and affected applicants and reviewers are notified. Office Head personal applications go directly to HRMO. Admin personal applications require an assigned alternate HR reviewer. Mayor personal applications require a separately designated final authority and remain awaiting assignment until one is configured. Missing reviewers never bypass verification or create automatic approval. Leave credits are deducted only at final approval.
 
 ## Leave credits and monthly accrual
 
@@ -86,23 +86,20 @@ Enable Laravel's scheduler in production so the first-of-month accrual is invoke
 
 ## Database backup and deployment
 
+Admin / HRMO can create a manual database backup or restore an existing one from **System settings**. Backups run automatically every day at 2:00 AM when Laravel's scheduler is enabled. The settings page lists backup timestamps, source, and size and provides authorized download and restore actions.
+
+The module backs up the MySQL database, including routines, triggers, and events. Backup files and their metadata are encrypted with Laravel's application encryption key and stored under `storage/app/private/hris-backups`, outside the public directory. Protect that directory and preserve the active `APP_KEY` (and any configured previous application keys) for as long as backups must remain restorable. The private employee-document files stored elsewhere under `storage/app/private` are not part of the database dump and require a separate protected file backup.
+
+Restore requires an Admin / HRMO account, the account's current password, and typing `RESTORE`. The selected file is authenticated and checked against its stored hashes before import. The application enters maintenance mode, creates an encrypted pre-restore safety backup, and attempts recovery from it if import fails. Do not interrupt a restore operation. Test restoration in a separate, isolated database before relying on a backup.
+
+Configure `MYSQLDUMP_BINARY` and `MYSQL_BINARY` if the MySQL client executables are not on the PHP process `PATH`; `HRIS_BACKUP_DIRECTORY` can change the private subdirectory and `HRIS_BACKUP_PROCESS_TIMEOUT` controls the client timeout. Keep these paths under protected storage. Enable Laravel's scheduler in production so both scheduled leave accrual and automatic backups run. On Linux, configure the standard once-per-minute `schedule:run` cron entry. On Windows, create a Task Scheduler job that runs `php artisan schedule:run` each minute from the application directory.
+
 Before deploying schema changes or importing authorized personnel data:
 
 1. Confirm the target database and environment without exposing credentials: `php artisan about` and `php artisan migrate:status`.
-2. Take a consistent MySQL backup to an access-restricted location. From `cmd.exe`, use the MySQL client with a password prompt (do not put the password in the command line):
-
-   ```text
-   mysqldump --single-transaction --routines --triggers --user=<database-user> --password --result-file="C:\secure-backups\hris-before-deploy.sql" <database-name>
-   ```
-
-3. Verify that the backup is non-empty and test restoration into a separate, isolated database before relying on it. From `cmd.exe`, a restore is:
-
-   ```text
-   mysql --user=<database-user> --password <isolated-database-name> < "C:\secure-backups\hris-before-deploy.sql"
-   ```
-
-4. Deploy code, review pending migrations with `php artisan migrate:status` and `php artisan migrate --pretend`, and only apply them after an approved backup. This update includes `2026_11_16_000001_add_leave_accrual_and_policy_tracking.php` and `2026_11_16_000002_consolidate_hris_roles_and_leave_routes.php`. After their effects and the account-role mapping are reviewed and deployment is authorized, run `php artisan migrate --force` to apply pending migrations in timestamp order. Do not apply production migrations without explicit authorization. Never use `migrate:fresh` or truncate tables on a database containing records.
-5. Keep backups encrypted or otherwise access-controlled, retain them under municipal policy, and include `storage/app/private` in the protected backup plan.
+2. Create and verify a backup from **System settings**, then test restoration into a separate, isolated database before relying on it.
+3. Deploy code, review pending migrations with `php artisan migrate:status` and `php artisan migrate --pretend`, and only apply them after an approved backup. This update includes `2026_11_16_000001_add_leave_accrual_and_policy_tracking.php` and `2026_11_16_000002_consolidate_hris_roles_and_leave_routes.php`. After their effects and the account-role mapping are reviewed and deployment is authorized, run `php artisan migrate --force` to apply pending migrations in timestamp order. Do not apply production migrations without explicit authorization. Never use `migrate:fresh` or truncate tables on a database containing records.
+4. Keep backups and private documents access-controlled and retain them under municipal policy.
 
 The supplied November 2026 workbook was inspected locally: it has 100 data rows and 27 columns. Columns H and S both have the header `OFFICE` but contain different values; column X has no header and contains one date-formatted value. HRMO directed that all three remain separate source fields, with the unnamed date source-only unless HRMO explicitly approves a mapping. The workbook has not been imported; complete the HRMO review, create only verified department/position reference records, and take a verified backup before applying the pending import migrations.
 
@@ -115,6 +112,7 @@ The optional `HRIS_INITIAL_*` environment values are for first-install account b
 ## Available modules
 
 - Session authentication, role middleware, policies, account activation, and audit events
+- Encrypted database backups with a daily schedule, backup history, administrator-confirmed restore, and a pre-restore recovery copy
 - Role-aware dashboards, employee profiles, employee CRUD/archive, departments, positions, and user accounts
 - Private XLSX employee-import staging and review, pre-import validation preview, duplicate detection, explicit department/position/name/status/date mapping approval, row-level HRMO name correction, import history, audit records, and retained position/appointment history
 - Digital Application for Leave with profile snapshots, conditional leave details, private supporting files, working-day calculations, draft/submit, cancellation, approval history, and notification inbox
@@ -122,6 +120,7 @@ The optional `HRIS_INITIAL_*` environment values are for first-install account b
 - Leave credit balances, adjustments, transaction ledger, and approval-time leave-credit debits for credit-tracked leave types
 - Municipal holidays and configurable workweek used by the leave working-day calculator
 - Attendance monitoring, authorized correction with remarks, and biometric CSV import with row-level duplicate/error reporting
+- Effective-dated department workplace defaults and explicit employee-level overrides, with assignment history and admin-only assignment controls
 - Filtered employee, attendance, and leave reports with CSV downloads (Excel-compatible) and browser print
 - Two-page A4 print view for the leave application and configurable instructions/checklists
 
@@ -134,7 +133,7 @@ The optional `HRIS_INITIAL_*` environment values are for first-install account b
 - HRMO / Administrator can edit leave guidance, document checklists, sensitivity flags, and credit requirements on Leave requirements.
 - Requirements are examples based on the provided Civil Service Form No. 6 (Revised 2020) field description. Confirm current CSC rules and approved municipal policies before setting filing deadlines, entitlements, document requirements, or waivers.
 - The transparent municipal seal/logo used by the interface is `public/image/hrislogo.webp`.
-- Employee XLSX import is restricted to Admin. It retains the original workbook and per-cell source values in private storage/staging; duplicate or existing employee reference numbers are skipped, departments/positions must map to existing records, and no login accounts are created. Both `OFFICE` source columns remain distinct. The unnamed date remains unmapped by default. HRMO must review the name format, verified employment status, source-to-department/position mappings, pre-import row issues, and import preview, then explicitly confirm valid rows. Rows needing review stay staged and can be corrected without changing their original source values.
+- Employee XLSX import is restricted to Admin. It retains the original workbook and per-cell source values in private storage/staging; duplicate employee reference numbers are skipped, while validated existing employee records can be updated, and departments/positions must map to existing records. Confirmed imported employees receive active accounts with generated usernames and the locally configured temporary password, stored as a hash and required to change at first sign-in before accessing HRIS modules. Re-importing a linked employee resets that account's password to the configured temporary password and requires another change; protected Admin accounts are not changed. HR sends password setup links to available email addresses. Both `OFFICE` source columns remain distinct. The unnamed date remains unmapped by default. HRMO must review the name format, verified employment status, source-to-department/position mappings, pre-import row issues, and import preview, then explicitly confirm valid rows. Rows needing review stay staged and can be corrected without changing their original source values.
 - Only the employee, HRMO, and authorized Administrator can access documents marked sensitive. Office Heads are denied access to those downloads and do not see restricted application details.
 
 ## Leave form printing

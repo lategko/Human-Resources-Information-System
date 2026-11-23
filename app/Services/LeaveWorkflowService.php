@@ -6,6 +6,7 @@ use App\Models\LeaveApplication;
 use App\Models\LeaveApprovalHistory;
 use App\Models\LeaveCredit;
 use App\Models\LeaveCreditTransaction;
+use App\Models\OfficeHeadAvailability;
 use App\Models\User;
 use App\Notifications\LeaveApplicationUpdated;
 use Illuminate\Support\Facades\DB;
@@ -55,7 +56,23 @@ class LeaveWorkflowService
                     409,
                     'This application is no longer awaiting your authorized department review.'
                 );
-                $application->status = $action === 'return' ? 'Returned for Correction' : 'Under HRMO Verification';
+                $isMayorApplicant = $application->employee->user?->isMayor();
+                $hasAuthorizedFinalApprover = false;
+                if ($action === 'endorse' && $isMayorApplicant && $application->assigned_final_approver_id) {
+                    $finalApprover = User::query()->lockForUpdate()->find($application->assigned_final_approver_id);
+                    $hasAuthorizedFinalApprover = $finalApprover?->canApproveMayorLeave() ?? false;
+                    if (! $hasAuthorizedFinalApprover) {
+                        $application->assigned_final_approver_id = null;
+                    }
+                }
+
+                $application->status = $action === 'return'
+                    ? 'Returned for Correction'
+                    : ($isMayorApplicant
+                        ? ($hasAuthorizedFinalApprover
+                            ? 'Pending Authorized Final Approval'
+                            : 'Awaiting Authorized Final Approver Assignment')
+                        : 'Pending Final Approval');
                 $application->recommendation = $action === 'return' ? 'Returned for correction' : $data['recommendation'];
                 $application->recommendation_remarks = $data['remarks'] ?? null;
                 $application->recommended_by = $user->id;
@@ -116,7 +133,7 @@ class LeaveWorkflowService
                     if (! empty($data['waived_documents'])) {
                         $remarks = trim(($remarks ? $remarks."\n" : '').'Document waiver: '.$data['waiver_justification']);
                     }
-                    $application->status = 'Pending Final Approval';
+                    $this->assignOfficeHeadAfterHrmoVerification($application);
                     $this->recordHistory($application, $user, 'verified', $from, $application->status, $remarks);
                 }
             } elseif ($user->isMayor() || $user->canApproveMayorLeave()) {
@@ -226,6 +243,7 @@ class LeaveWorkflowService
                 $required[] = $condition['document'];
             }
         }
+
         return array_values(array_unique($required));
     }
 
@@ -249,6 +267,59 @@ class LeaveWorkflowService
                 'waived_documents' => 'Before verification, attach or formally waive each required item: '.implode('; ', $missing).'.',
             ]);
         }
+    }
+
+    private function assignOfficeHeadAfterHrmoVerification(LeaveApplication $application): void
+    {
+        $department = $application->employee->department()->with('head')->firstOrFail();
+        $head = $department->head;
+
+        if ($head
+            && $head->id !== $application->employee->user_id
+            && $head->is_active
+            && $head->isOfficeHead()) {
+            $availability = OfficeHeadAvailability::query()
+                ->where('department_id', $department->id)
+                ->where('office_head_user_id', $head->id)
+                ->where('availability_status', '!=', 'available')
+                ->whereDate('start_date', '<=', $application->end_date)
+                ->whereDate('end_date', '>=', $application->start_date)
+                ->latest('start_date')
+                ->latest('id')
+                ->first();
+
+            if (! $availability || $availability->availability_status === 'available') {
+                $application->office_head_reviewer_id = $head->id;
+                $application->office_head_routing_reason = null;
+                $application->status = 'Under Office Head Review';
+
+                return;
+            }
+
+            $alternate = $availability->alternate;
+            if ($alternate?->is_active
+                && ($alternate->isOfficeHead() || $alternate->isMayor())
+                && $alternate->id !== $application->employee->user_id) {
+                $application->office_head_reviewer_id = $alternate->id;
+                $application->office_head_routing_reason = ucfirst(str_replace('_', ' ', $availability->availability_status)).': '.$availability->reason;
+                $application->status = 'Under Alternate Office Head Review';
+
+                return;
+            }
+        }
+
+        $mayors = User::query()->where('is_active', true)->where('role', 'mayor')->orderBy('id')->limit(2)->get();
+        if ($mayors->count() !== 1 || $mayors->first()->id === $application->employee->user_id) {
+            throw ValidationException::withMessages([
+                'office_head' => 'HRMO verification cannot proceed because no authorized Office Head or alternate reviewer is available for this department.',
+            ]);
+        }
+
+        $application->office_head_reviewer_id = $mayors->first()->id;
+        $application->office_head_routing_reason = $head
+            ? 'The assigned Office Head is unavailable or cannot review this applicant.'
+            : 'No Office Head is assigned to this department.';
+        $application->status = 'Under Alternate Office Head Review';
     }
 
     private function creditSnapshot(LeaveApplication $application): array
@@ -324,12 +395,27 @@ class LeaveWorkflowService
             return;
         }
 
+        if (in_array($application->status, ['Under Office Head Review', 'Under Alternate Office Head Review'], true)
+            && $application->office_head_reviewer_id) {
+            $application->employee->user?->notify(new LeaveApplicationUpdated(
+                $application,
+                'Your leave application #'.$application->id.' was verified by HRMO and forwarded to the Office Head.'
+            ));
+            User::whereKey($application->office_head_reviewer_id)->where('is_active', true)->get()
+                ->each(fn (User $reviewer) => $reviewer->notify(
+                    new LeaveApplicationUpdated($application, 'Leave application #'.$application->id.' is awaiting Office Head verification.')
+                ));
+
+            return;
+        }
+
         if ($application->status === 'Pending Final Approval') {
             User::where('role', 'mayor')->where('is_active', true)
                 ->get()
                 ->each(fn (User $user) => $user->notify(
-                new LeaveApplicationUpdated($application, 'Leave application #'.$application->id.' is pending final approval.')
-            ));
+                    new LeaveApplicationUpdated($application, 'Leave application #'.$application->id.' is pending final approval.')
+                ));
+
             return;
         }
 
@@ -337,6 +423,7 @@ class LeaveWorkflowService
             User::whereKey($application->assigned_final_approver_id)->get()->each(fn (User $user) => $user->notify(
                 new LeaveApplicationUpdated($application, 'Mayor leave application #'.$application->id.' is assigned for your authorized final decision.')
             ));
+
             return;
         }
 

@@ -6,6 +6,7 @@ use App\Services\AuditLogger;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Password;
@@ -50,7 +51,7 @@ class AccountSetupController extends Controller
         if ($user->must_change_password) {
             $rules += [
                 'current_password' => ['required', 'current_password'],
-                'new_password' => ['required', 'string', Password::min(12), 'confirmed'],
+                'new_password' => ['required', 'string', Password::min(12), 'different:current_password', 'confirmed'],
             ];
         }
 
@@ -74,7 +75,7 @@ class AccountSetupController extends Controller
                 $user->email_verified_at = null;
             }
             if ($user->must_change_password) {
-                $user->password = $data['new_password'];
+                $user->password = Hash::make($data['new_password']);
                 $user->must_change_password = false;
             }
             $user->account_setup_completed = true;

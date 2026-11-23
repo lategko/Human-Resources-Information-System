@@ -3,12 +3,11 @@
 namespace App\Http\Controllers;
 
 use App\Http\Requests\SaveLeaveApplicationRequest;
+use App\Models\Employee;
 use App\Models\LeaveApplication;
 use App\Models\LeaveApplicationDocument;
 use App\Models\LeaveApprovalHistory;
-use App\Models\Employee;
 use App\Models\LeaveType;
-use App\Models\OfficeHeadAvailability;
 use App\Models\SystemSetting;
 use App\Models\User;
 use App\Notifications\LeaveApplicationUpdated;
@@ -17,9 +16,9 @@ use App\Services\LeaveWorkflowService;
 use App\Services\WorkingDayCalculator;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Carbon;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 use Throwable;
@@ -221,36 +220,36 @@ class LeaveApplicationController extends Controller
                     $this->assertNoOverlap($application);
                     $route = $this->resolveSubmissionRoute($request->user(), $employee, $application);
                     $application->fill([
-                    'verified_working_days' => null,
-                    'credit_certification' => null,
-                    'certified_by' => null,
-                    'certified_at' => null,
-                    'eligibility_verified_at' => null,
-                    'eligibility_verified_by' => null,
-                    'eligibility_remarks' => null,
-                    'certifier_position' => null,
-                    'certifier_signature' => null,
-                    'hr_remarks' => null,
-                    'document_waivers' => null,
-                    'recommendation' => null,
-                    'recommendation_remarks' => null,
-                    'recommended_by' => null,
-                    'recommended_at' => null,
-                    'approved_days_with_pay' => null,
-                    'approved_days_without_pay' => null,
-                    'approval_others' => null,
-                    'disapproval_reason' => null,
-                    'decision_remarks' => null,
-                    'decided_by' => null,
-                    'decided_at' => null,
-                    'alternate_decision_by' => null,
-                    'alternate_decision_action' => null,
-                    'alternate_decision_days_with_pay' => null,
-                    'alternate_decision_days_without_pay' => null,
-                    'alternate_decision_others' => null,
-                    'alternate_decision_reason' => null,
-                    'alternate_decision_remarks' => null,
-                    'alternate_decision_at' => null,
+                        'verified_working_days' => null,
+                        'credit_certification' => null,
+                        'certified_by' => null,
+                        'certified_at' => null,
+                        'eligibility_verified_at' => null,
+                        'eligibility_verified_by' => null,
+                        'eligibility_remarks' => null,
+                        'certifier_position' => null,
+                        'certifier_signature' => null,
+                        'hr_remarks' => null,
+                        'document_waivers' => null,
+                        'recommendation' => null,
+                        'recommendation_remarks' => null,
+                        'recommended_by' => null,
+                        'recommended_at' => null,
+                        'approved_days_with_pay' => null,
+                        'approved_days_without_pay' => null,
+                        'approval_others' => null,
+                        'disapproval_reason' => null,
+                        'decision_remarks' => null,
+                        'decided_by' => null,
+                        'decided_at' => null,
+                        'alternate_decision_by' => null,
+                        'alternate_decision_action' => null,
+                        'alternate_decision_days_with_pay' => null,
+                        'alternate_decision_days_without_pay' => null,
+                        'alternate_decision_others' => null,
+                        'alternate_decision_reason' => null,
+                        'alternate_decision_remarks' => null,
+                        'alternate_decision_at' => null,
                     ]);
                     $application->office_head_reviewer_id = $route['reviewer_id'];
                     $application->office_head_routing_reason = $route['reason'];
@@ -291,7 +290,13 @@ class LeaveApplicationController extends Controller
         $this->authorize('cancel', $application);
         DB::transaction(function () use ($request, $application, $auditLogger) {
             $locked = LeaveApplication::query()->lockForUpdate()->findOrFail($application->id);
-            abort_unless(in_array($locked->status, ['Draft', 'Submitted', 'Under Office Head Review', 'Returned for Correction'], true), 409);
+            abort_unless(in_array($locked->status, [
+                'Draft',
+                'Submitted',
+                'Under HRMO Verification',
+                'Under Office Head Review',
+                'Returned for Correction',
+            ], true), 409);
             $from = $locked->status;
             $locked->status = 'Cancelled';
             $locked->save();
@@ -544,9 +549,9 @@ class LeaveApplicationController extends Controller
                     'reviewer_id' => null,
                     'hr_reviewer_id' => null,
                     'final_approver_id' => $approver?->id,
-                    'status' => $approver ? 'Pending Authorized Final Approval' : 'Awaiting Authorized Final Approver Assignment',
-                    'reason' => 'Mayor personal leave requires a separately designated authorized final approver.',
-                    'action' => $approver ? 'queued_for_authorized_final_approval' : 'awaiting_final_approver_assignment',
+                    'status' => 'Under HRMO Verification',
+                    'reason' => 'Mayor personal leave requires HRMO certification, Office Head verification, and a separately designated authorized final approver.',
+                    'action' => 'queued_for_hrmo_verification',
                 ];
             }
 
@@ -562,12 +567,13 @@ class LeaveApplicationController extends Controller
             }
         }
 
-        $route = $this->resolveOfficeHeadRoute($employee, $application);
-
         return [
-            ...$route,
+            'reviewer_id' => null,
             'hr_reviewer_id' => null,
             'final_approver_id' => null,
+            'status' => 'Under HRMO Verification',
+            'reason' => null,
+            'action' => 'queued_for_hrmo_verification',
         ];
     }
 
@@ -598,60 +604,6 @@ class LeaveApplicationController extends Controller
                 ))
             );
         }
-    }
-
-    private function resolveOfficeHeadRoute(Employee $employee, LeaveApplication $application): array
-    {
-        $department = $employee->department()->with('head')->firstOrFail();
-        $head = $department->head;
-        $availability = $head
-            ? OfficeHeadAvailability::query()
-                ->where('department_id', $department->id)
-                ->where('office_head_user_id', $head->id)
-                ->where('availability_status', '!=', 'available')
-                ->whereDate('start_date', '<=', $application->end_date)
-                ->whereDate('end_date', '>=', $application->start_date)
-                ->latest('start_date')
-                ->latest('id')
-                ->first()
-            : null;
-
-        if ($head?->id !== $employee->user_id && $head?->is_active && $head->isOfficeHead()
-            && (! $availability || $availability->availability_status === 'available')) {
-            return [
-                'reviewer_id' => $head->id,
-                'status' => 'Under Office Head Review',
-                'action' => 'queued_for_office_head_review',
-                'reason' => null,
-            ];
-        }
-
-        $alternate = $availability?->alternate;
-        if (! $alternate?->is_active || (! $alternate->isOfficeHead() && ! $alternate->isMayor())) {
-            $finalApprovers = User::query()->where('is_active', true)
-                ->where('role', 'mayor')
-                ->orderBy('id')
-                ->limit(2)
-                ->get();
-            if ($finalApprovers->count() !== 1) {
-                throw ValidationException::withMessages([
-                    'availability' => 'The Office Head is unavailable and no unique Mayor is configured as the alternate reviewer. HR Office must assign an active Office Head or Mayor alternate.',
-                ]);
-            }
-            $alternate = $finalApprovers->first();
-        }
-        abort_if($alternate->id === $employee->user_id, 422, 'The applicant cannot review their own leave application.');
-
-        $reason = $availability
-            ? ucfirst(str_replace('_', ' ', $availability->availability_status)).': '.$availability->reason
-            : ($head ? 'The assigned Office Head account is inactive.' : 'No Office Head is assigned to this department.');
-
-        return [
-            'reviewer_id' => $alternate->id,
-            'status' => 'Under Alternate Office Head Review',
-            'action' => 'queued_for_alternate_office_head_review',
-            'reason' => $reason,
-        ];
     }
 
     private function saveDocuments(SaveLeaveApplicationRequest $request, LeaveApplication $application, array &$storedPaths): void

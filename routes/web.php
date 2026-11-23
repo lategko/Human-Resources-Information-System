@@ -10,6 +10,7 @@ use App\Http\Controllers\Auth\NewPasswordController;
 use App\Http\Controllers\Auth\PasswordResetLinkController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DepartmentController;
+use App\Http\Controllers\DatabaseBackupController;
 use App\Http\Controllers\EmployeeController;
 use App\Http\Controllers\EmployeeImportController;
 use App\Http\Controllers\HolidayController;
@@ -59,9 +60,22 @@ Route::middleware(['auth', 'active', 'account.setup'])->group(function () {
     Route::get('/my-profile/edit', [EmployeeController::class, 'editPersonal'])->name('my-profile.edit');
     Route::put('/my-profile', [EmployeeController::class, 'updatePersonal'])->name('my-profile.update');
     Route::get('/attendance', [AttendanceController::class, 'index'])->name('attendance.index');
-    Route::get('/attendance/template', [AttendanceController::class, 'template'])->middleware('role:admin')->name('attendance.template');
-    Route::post('/attendance/import', [AttendanceController::class, 'import'])->middleware('role:admin')->name('attendance.import');
-    Route::get('/attendance/imports/{biometricImport}', [AttendanceController::class, 'importDetails'])->middleware('role:admin')->name('attendance.imports.show');
+    Route::post('/attendance/time-in', [AttendanceController::class, 'timeIn'])->name('attendance.time-in');
+    Route::post('/attendance/time-out', [AttendanceController::class, 'timeOut'])->name('attendance.time-out');
+    Route::post('/attendance/exceptions', [AttendanceController::class, 'storeException'])->name('attendance.exceptions.store');
+    Route::post('/attendance/exceptions/{exception}/review', [AttendanceController::class, 'reviewException'])->middleware('role:admin')->name('attendance.exceptions.review');
+    Route::post('/attendance/workplaces', [AttendanceController::class, 'storeWorkplace'])->middleware('role:admin')->name('attendance.workplaces.store');
+    Route::put('/attendance/workplaces/{workplace}', [AttendanceController::class, 'updateWorkplace'])->middleware('role:admin')->name('attendance.workplaces.update');
+    Route::get('/attendance/workplaces/geocode/search', [AttendanceController::class, 'searchWorkplaceLocations'])->middleware(['role:admin', 'throttle:30,1'])->name('attendance.workplaces.geocode.search');
+    Route::get('/attendance/workplaces/geocode/reverse', [AttendanceController::class, 'reverseWorkplaceLocation'])->middleware(['role:admin', 'throttle:30,1'])->name('attendance.workplaces.geocode.reverse');
+    Route::middleware('can:manage,App\Models\AttendanceWorkplaceAssignment')->group(function () {
+        Route::get('/attendance/workplaces/department-preview', [AttendanceController::class, 'departmentWorkplaceAssignmentPreview'])
+            ->middleware('throttle:60,1')
+            ->name('attendance.workplaces.department-preview');
+        Route::post('/attendance/workplaces/department-assignment', [AttendanceController::class, 'assignDepartmentWorkplace'])->name('attendance.workplaces.assign-department');
+        Route::post('/attendance/workplaces/bulk-assignment', [AttendanceController::class, 'bulkAssignWorkplaces'])->name('attendance.workplaces.assign-bulk');
+        Route::post('/attendance/employees/{employee}/workplace', [AttendanceController::class, 'assignWorkplace'])->name('attendance.employees.workplace');
+    });
     Route::post('/attendance/{attendance}/correct', [AttendanceController::class, 'correct'])->middleware('role:admin')->name('attendance.correct');
     Route::post('/attendance/schedules', [AttendanceController::class, 'storeSchedule'])->middleware('role:admin')->name('attendance.schedules.store');
     Route::patch('/attendance/schedules/{workSchedule}/end', [AttendanceController::class, 'endSchedule'])->middleware('role:admin')->name('attendance.schedules.end');
@@ -121,10 +135,23 @@ Route::middleware(['auth', 'active', 'account.setup'])->group(function () {
         Route::get('/office-head-availability', [OfficeHeadAvailabilityController::class, 'index'])->name('office-head-availability.index');
         Route::post('/office-head-availability', [OfficeHeadAvailabilityController::class, 'store'])->name('office-head-availability.store');
     });
+    Route::middleware('role:admin')->group(function () {
+        Route::put('/office-head-availability/{availability}', [OfficeHeadAvailabilityController::class, 'update'])
+            ->name('office-head-availability.update');
+        Route::post('/office-head-availability/{availability}/cancel', [OfficeHeadAvailabilityController::class, 'cancel'])
+            ->name('office-head-availability.cancel');
+    });
 
     Route::middleware('role:admin')->group(function () {
         Route::get('/settings/system', [SystemSettingsController::class, 'index'])->name('settings.system');
         Route::put('/settings/system', [SystemSettingsController::class, 'update'])->name('settings.system.update');
+        Route::post('/settings/system/backups', [DatabaseBackupController::class, 'store'])->name('settings.system.backups.store');
+        Route::get('/settings/system/backups/{backup}/download', [DatabaseBackupController::class, 'download'])
+            ->whereUuid('backup')
+            ->name('settings.system.backups.download');
+        Route::post('/settings/system/backups/{backup}/restore', [DatabaseBackupController::class, 'restore'])
+            ->whereUuid('backup')
+            ->name('settings.system.backups.restore');
         Route::get('/users/create', [UserController::class, 'create'])->name('users.create');
         Route::post('/users', [UserController::class, 'store'])->name('users.store');
         Route::get('/users/{user}/edit', [UserController::class, 'edit'])->name('users.edit');
@@ -135,4 +162,5 @@ Route::middleware(['auth', 'active', 'account.setup'])->group(function () {
 
     Route::get('/notifications', [NotificationController::class, 'index'])->name('notifications.index');
     Route::post('/notifications/{notification}/read', [NotificationController::class, 'read'])->name('notifications.read');
+    Route::post('/notifications/read-all', [NotificationController::class, 'readAll'])->name('notifications.read-all');
 });
