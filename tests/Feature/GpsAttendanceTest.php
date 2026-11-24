@@ -127,6 +127,11 @@ class GpsAttendanceTest extends TestCase
             ->assertSee('Department Assignment')
             ->assertSee('Bulk Employee Assignment')
             ->assertSee('Individual Assignment');
+        $this->getJson(route('attendance.workplaces.individual-search', ['q' => $employee->employee_no]))
+            ->assertOk()
+            ->assertJsonCount(1, 'results')
+            ->assertJsonPath('results.0.employee_no', $employee->employee_no)
+            ->assertJsonPath('results.0.workplace', 'Field Office');
 
         $this->actingAs($employeeUser)->post(route('attendance.exceptions.store'), [
             'attendance_date' => today()->toDateString(),

@@ -31,7 +31,9 @@ class ReportController extends Controller
                 ->orderBy('name')->get(),
             'leaveTypes' => LeaveType::where('is_active', true)->orderBy('sort_order')->get(),
             'employmentStatuses' => $this->employeeQuery($request)->distinct()->orderBy('employment_status')->pluck('employment_status'),
-            'employees' => $this->employeeQuery($request)->orderBy('last_name')->get(),
+            'selectedEmployee' => $request->filled('employee_id')
+                ? $this->employeeQuery($request)->with(['department', 'position'])->first()
+                : null,
             'from' => $from,
             'to' => $to,
             'attendanceCount' => (clone $this->attendanceQuery($request, $from, $to))->count(),

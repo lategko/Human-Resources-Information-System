@@ -2,12 +2,13 @@
 @section('title', 'Leave applications')
 @section('content')
     <div class="page-heading"><div><span class="eyebrow">LEAVE MANAGEMENT</span><h1>Leave applications</h1><p>Review application status and open an application to view its record.</p></div>
-        @if(auth()->user()->employee)<a class="button button-primary" href="{{ route('leave.create') }}">＋ New application</a>@endif
+        @if(auth()->user()->employee)<a class="button button-primary" href="{{ route('leave.create') }}"><i data-lucide="file-plus-2" aria-hidden="true"></i> New application</a>@endif
     </div>
     <section class="panel leave-queue-panel">
-        <form class="filter-bar leave-queue-filters" method="GET"><label class="search-field"><span>⌕</span><input name="q" value="{{ request('q') }}" placeholder="Employee ID or last name"></label>
+        <form class="filter-bar leave-queue-filters" method="GET"><label class="search-field"><i data-lucide="search" aria-hidden="true"></i><input name="q" value="{{ request('q') }}" placeholder="Employee ID or last name"></label>
             <select name="status"><option value="">All statuses</option>@foreach(['Draft','Submitted','Under Office Head Review','Under Alternate Office Head Review','Endorsed','Returned for Correction','Under HRMO Verification','Pending Final Approval','Pending Authorized Final Approval','Awaiting Alternate HR Reviewer Assignment','Awaiting Authorized Final Approver Assignment','Approved','Disapproved','Cancelled'] as $status)<option @selected(request('status') === $status)>{{ $status }}</option>@endforeach</select>
-            <button type="submit" class="button button-outline">Filter</button>
+            <button type="submit" class="button button-outline"><i data-lucide="list-filter" aria-hidden="true"></i> Filter</button>
+            @if(request()->hasAny(['q', 'status']))<a class="button button-outline" href="{{ route('leave.index', request()->only('mine')) }}">Reset</a>@endif
         </form>
         <div class="table-wrap"><table><thead><tr>@if(!request()->boolean('mine') && !auth()->user()->isEmployee())<th>EMPLOYEE</th>@endif<th>LEAVE TYPE</th><th>DATES</th><th>DAYS</th><th>FILED</th><th>STATUS</th><th></th></tr></thead><tbody>
         @forelse($applications as $application)
@@ -18,7 +19,7 @@
                 <td>{{ $application->verified_working_days ?? $application->working_days ?? '—' }}</td>
                 <td>{{ $application->filed_at?->format('M j, Y') ?? $application->created_at->format('M j, Y') }}</td>
                 <td><span class="status-tag status-{{ \Illuminate\Support\Str::slug($application->status) }}">{{ $application->status }}</span></td>
-                <td><a class="table-link" href="{{ route('leave.show', $application) }}">Open →</a></td>
+                <td><a class="table-link" href="{{ route('leave.show', $application) }}">Open <i data-lucide="arrow-right" aria-hidden="true"></i></a></td>
             </tr>
         @empty<tr><td colspan="7"><div class="empty-note">No applications found.</div></td></tr>@endforelse
         </tbody></table></div><div class="pagination-wrap">{{ $applications->links() }}</div>

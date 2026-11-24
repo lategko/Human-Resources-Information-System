@@ -550,11 +550,161 @@ window.workplaceMapPicker = (options) => {
     };
 };
 
+window.employeePicker = (options) => ({
+    searchUrl: options.searchUrl,
+    inputId: options.inputId,
+    filters: options.filters ?? {},
+    includeEmployeeId: options.includeEmployeeId ? String(options.includeEmployeeId) : '',
+    targetUserId: options.targetUserId ? String(options.targetUserId) : '',
+    required: Boolean(options.required),
+    selected: options.selected ?? null,
+    results: [],
+    searchTerm: '',
+    page: 1,
+    hasMore: false,
+    hasLoaded: false,
+    loading: false,
+    error: '',
+    isOpen: false,
+    activeIndex: -1,
+    requestId: 0,
+    searchTimer: null,
+    init() {
+        this.searchTerm = this.selected?.label ?? '';
+        if (this.selected) {
+            this.$nextTick(() => this.$dispatch('employee-picked', this.selected));
+        }
+    },
+    async open() {
+        this.isOpen = true;
+        if (this.selected && !this.hasLoaded) {
+            this.results = [this.selected];
+            this.hasLoaded = true;
+            this.activeIndex = 0;
+            return;
+        }
+        if (!this.hasLoaded) await this.search();
+    },
+    handleInput() {
+        if (this.selected) {
+            this.selected = null;
+            this.$dispatch('employee-picked', null);
+        }
+        this.$refs.search.setCustomValidity('');
+        this.requestId += 1;
+        this.loading = false;
+        window.clearTimeout(this.searchTimer);
+        this.results = [];
+        this.page = 1;
+        this.hasMore = false;
+        this.activeIndex = -1;
+        this.error = '';
+        this.isOpen = true;
+        this.searchTimer = window.setTimeout(() => this.search(), 250);
+    },
+    async search(append = false) {
+        const requestId = ++this.requestId;
+        const params = new URLSearchParams({
+            q: this.searchTerm.trim(),
+            page: String(this.page),
+        });
+        Object.entries(this.filters).forEach(([key, value]) => {
+            if (value !== null && value !== undefined && value !== '' && value !== false) {
+                params.set(key, typeof value === 'boolean' ? (value ? '1' : '0') : String(value));
+            }
+        });
+        if (this.includeEmployeeId) params.set('include_employee_id', this.includeEmployeeId);
+        if (this.targetUserId) params.set('target_user_id', this.targetUserId);
+
+        this.loading = true;
+        this.error = '';
+        try {
+            const response = await fetch(`${this.searchUrl}?${params}`, {
+                headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.message || 'Unable to search employees.');
+            if (requestId !== this.requestId) return;
+
+            const employees = append ? [...this.results, ...result.results] : result.results;
+            this.results = [...new Map(employees.map((employee) => [String(employee.id), employee])).values()];
+            this.hasMore = result.has_more;
+            this.hasLoaded = true;
+            this.activeIndex = this.results.length ? 0 : -1;
+        } catch (error) {
+            if (requestId !== this.requestId) return;
+            this.error = error.message || 'Unable to search employees.';
+            this.results = [];
+            this.hasMore = false;
+        } finally {
+            if (requestId === this.requestId) this.loading = false;
+        }
+    },
+    loadMore() {
+        if (this.loading || !this.hasMore) return;
+        this.page += 1;
+        this.search(true);
+    },
+    choose(employee) {
+        this.selected = employee;
+        this.searchTerm = employee.label;
+        this.results = [employee];
+        this.hasMore = false;
+        this.hasLoaded = true;
+        this.isOpen = false;
+        this.activeIndex = -1;
+        this.$dispatch('employee-picked', employee);
+    },
+    clearSelection() {
+        this.selected = null;
+        this.searchTerm = '';
+        this.results = [];
+        this.page = 1;
+        this.hasMore = false;
+        this.hasLoaded = false;
+        this.isOpen = false;
+        this.activeIndex = -1;
+        this.$dispatch('employee-picked', null);
+        this.$nextTick(() => this.$refs.search.focus());
+    },
+    moveActive(direction) {
+        if (!this.isOpen) {
+            this.open();
+            return;
+        }
+        if (!this.results.length) return;
+        this.activeIndex = Math.max(0, Math.min(this.results.length - 1, this.activeIndex + direction));
+        this.$nextTick(() => document.getElementById(this.optionId(this.results[this.activeIndex]))?.scrollIntoView({ block: 'nearest' }));
+    },
+    handleEnter(event) {
+        if (!this.isOpen || this.activeIndex < 0 || !this.results[this.activeIndex]) return;
+        event.preventDefault();
+        this.choose(this.results[this.activeIndex]);
+    },
+    optionId(employee) {
+        return `${this.inputId}-option-${employee.id}`;
+    },
+    activeOptionId() {
+        return this.activeIndex >= 0 && this.results[this.activeIndex]
+            ? this.optionId(this.results[this.activeIndex])
+            : null;
+    },
+    validateBeforeSubmit(event) {
+        if (this.required && !this.$refs.search.disabled && !this.selected) {
+            event.preventDefault();
+            this.isOpen = true;
+            this.$refs.search.setCustomValidity('Choose an employee from the search results.');
+            this.$refs.search.reportValidity();
+            return;
+        }
+        this.$refs.search.setCustomValidity('');
+    },
+});
+
 window.workplaceAssignments = (options) => ({
     activeTab: options.activeTab,
     departmentEmployees: options.departmentEmployees,
     departmentPreviewUrl: options.departmentPreviewUrl,
-    employees: options.employees,
     visibleEmployeeIds: options.visibleEmployeeIds.map(String),
     selectedEmployeeIds: [],
     selectedDepartment: options.selectedDepartment ? String(options.selectedDepartment) : '',
@@ -562,8 +712,8 @@ window.workplaceAssignments = (options) => ({
     previewBusy: false,
     previewError: '',
     previewRequestId: 0,
-    selectedEmployee: options.selectedEmployee ? String(options.selectedEmployee) : '',
-    employeeSearch: '',
+    selectedEmployee: options.selectedEmployee ? String(options.selectedEmployee.id) : '',
+    selectedEmployeeDetails: options.selectedEmployee ?? null,
     async init() {
         if (this.selectedDepartment) await this.refreshDepartmentRoster();
     },
@@ -573,14 +723,9 @@ window.workplaceAssignments = (options) => ({
     individualOverrideCount() {
         return this.departmentRoster().filter((employee) => ['individual', 'bulk'].includes(employee.assignment_type)).length;
     },
-    filteredEmployees() {
-        const query = this.employeeSearch.trim().toLowerCase();
-        return Object.entries(this.employees)
-            .filter(([id, employee]) => !query || `${employee.employee_no} ${employee.name}`.toLowerCase().includes(query))
-            .map(([id, employee]) => ({ id, ...employee }));
-    },
-    selectedEmployeeDetails() {
-        return this.employees[this.selectedEmployee] ?? null;
+    setSelectedEmployee(employee) {
+        this.selectedEmployee = employee ? String(employee.id) : '';
+        this.selectedEmployeeDetails = employee;
     },
     async refreshDepartmentRoster() {
         const requestId = ++this.previewRequestId;

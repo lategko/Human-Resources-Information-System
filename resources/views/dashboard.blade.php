@@ -82,6 +82,11 @@
                 <p>Latest recorded entries</p>
             </div><a href="{{ route('attendance.index') }}" class="text-link">View attendance <i data-lucide="arrow-right"></i></a>
         </div>
+        <div class="attendance-summary">
+            <div><small>PRESENT OR LATE · CURRENT MONTH</small><b>{{ number_format($presentCount) }}</b></div>
+            <div><small>LATE RECORDS</small><b>{{ number_format($lateCount) }}</b></div>
+            <div><small>RECORDED ABSENCES</small><b>{{ number_format($absentCount) }}</b></div>
+        </div>
         @forelse($recentAttendance as $record)
         <div class="attendance-row"><span class="row-date">{{ $record->work_date->format('M d') }}</span><span class="row-main"><b>{{ $record->work_date->format('l') }}</b><small>{{ $record->time_in ? substr($record->time_in, 0, 5) : 'No time-in recorded' }}</small></span><span class="status-tag status-{{ \Illuminate\Support\Str::slug($record->status) }} {{ $record->corrected_by ? 'status-corrected' : '' }}">{{ $record->corrected_by ? 'Corrected · ' : '' }}{{ $record->display_status }}</span></div>
         @empty<p class="empty-note">No attendance records are available yet.</p>@endforelse
@@ -110,6 +115,13 @@
     </section>
 </div>
 @else
+@php
+    $topDepartments = $departmentDistribution->sortByDesc('employees_count')->take(5)->values();
+    $maxDepartmentEmployees = max(1, (int) $topDepartments->max('employees_count'));
+    $canViewDepartmentDirectory = auth()->user()->isAdministrator()
+        || auth()->user()->isOfficeHead()
+        || auth()->user()->canFinalApprove();
+@endphp
 @if($role === 'administrator')
 <div class="role-intro"><span class="role-intro-icon"><i data-lucide="briefcase-business" aria-hidden="true"></i></span>
     <div>
@@ -142,6 +154,7 @@
         </select></label>
     @endif
     <button type="submit" class="button button-outline"><i data-lucide="list-filter"></i> Apply filters</button>
+    @if(request()->hasAny(['date_from', 'date_to', 'department_id']))<a class="button button-outline" href="{{ route('dashboard') }}">Reset</a>@endif
 </form>
 
 @if($role === 'office_head')
@@ -331,11 +344,17 @@
             <div>
                 <h2>Department staffing</h2>
                 <p>Active employees by office</p>
-            </div><a href="{{ route('departments.index') }}" class="text-link">Departments <i data-lucide="arrow-right"></i></a>
+            </div>
         </div>
-        @forelse($departmentDistribution as $department)
-        <div class="distribution-row"><span><b>{{ $department->name }}</b><small>{{ $department->employees_count }} active {{ \Illuminate\Support\Str::plural('employee', $department->employees_count) }}</small></span><span class="distribution-bar" aria-hidden="true"><i style="width: {{ $employeeCount > 0 ? min(100, round($department->employees_count / $employeeCount * 100)) : 0 }}%"></i></span></div>
+        @forelse($topDepartments as $department)
+        <div class="distribution-row">
+            <div class="distribution-row-heading"><b>{{ $department->name }}</b><strong>{{ number_format($department->employees_count) }}</strong></div>
+            <span class="distribution-bar" aria-hidden="true"><i style="width: {{ round($department->employees_count / $maxDepartmentEmployees * 100) }}%"></i></span>
+        </div>
         @empty<p class="empty-note">No active departments are recorded.</p>@endforelse
+        @if($canViewDepartmentDirectory)
+            <div class="department-staffing-footer"><a class="text-link" href="{{ route('departments.index') }}">View All Departments <i data-lucide="arrow-right" aria-hidden="true"></i></a></div>
+        @endif
     </section>
     <section class="panel">
         <div class="panel-heading">
@@ -358,6 +377,8 @@
     <article class="stat-card"><span class="stat-label">PENDING FINAL DECISIONS</span><strong>{{ number_format($pendingFinalCount) }}</strong><small>leave applications awaiting your decision</small><span class="stat-icon"><i data-lucide="file-clock"></i></span></article>
     <article class="stat-card"><span class="stat-label">ESCALATED OFFICE REVIEWS</span><strong>{{ number_format($pendingAlternateCount) }}</strong><small>routed to you as alternate approver</small><span class="stat-icon"><i data-lucide="user-round-check"></i></span></article>
     <article class="stat-card"><span class="stat-label">ON APPROVED LEAVE</span><strong>{{ number_format($leaveTodayCount) }}</strong><small>approved leave covering today</small><span class="stat-icon"><i data-lucide="calendar-days"></i></span></article>
+    <article class="stat-card"><span class="stat-label">APPROVED APPLICATIONS</span><strong>{{ number_format($approvedLeaveCount) }}</strong><small>recorded municipal approvals</small><span class="stat-icon"><i data-lucide="circle-check"></i></span></article>
+    <article class="stat-card"><span class="stat-label">DISAPPROVED APPLICATIONS</span><strong>{{ number_format($disapprovedLeaveCount) }}</strong><small>recorded municipal decisions</small><span class="stat-icon"><i data-lucide="circle-x"></i></span></article>
 </div>
 <div class="content-grid dashboard-content-grid">
     <section class="panel panel-wide">
@@ -386,12 +407,18 @@
         <div class="panel-heading">
             <div>
                 <h2>Department staffing</h2>
-                <p>Active employees by department</p>
-            </div><a href="{{ route('reports.index') }}" class="text-link">Reports <i data-lucide="arrow-right"></i></a>
+                <p>Active employees by office</p>
+            </div><a href="{{ route('reports.index') }}" class="text-link">Reports <i data-lucide="arrow-right" aria-hidden="true"></i></a>
         </div>
-        @forelse($departmentDistribution as $department)
-        <div class="distribution-row"><span><b>{{ $department->name }}</b><small>{{ $department->employees_count }} active {{ \Illuminate\Support\Str::plural('employee', $department->employees_count) }}</small></span><span class="distribution-bar" aria-hidden="true"><i style="width: {{ $employeeCount > 0 ? min(100, round($department->employees_count / $employeeCount * 100)) : 0 }}%"></i></span></div>
+        @forelse($topDepartments as $department)
+        <div class="distribution-row">
+            <div class="distribution-row-heading"><b>{{ $department->name }}</b><strong>{{ number_format($department->employees_count) }}</strong></div>
+            <span class="distribution-bar" aria-hidden="true"><i style="width: {{ round($department->employees_count / $maxDepartmentEmployees * 100) }}%"></i></span>
+        </div>
         @empty<p class="empty-note">No active departments are recorded.</p>@endforelse
+        @if($canViewDepartmentDirectory)
+            <div class="department-staffing-footer"><a class="text-link" href="{{ route('departments.index') }}">View All Departments <i data-lucide="arrow-right" aria-hidden="true"></i></a></div>
+        @endif
     </section>
     <section class="panel">
         <div class="panel-heading">
@@ -449,9 +476,15 @@
                 <p>Active employees by department</p>
             </div>
         </div>
-        @forelse($departmentDistribution as $department)
-        <div class="distribution-row"><span><b>{{ $department->name }}</b><small>{{ $department->employees_count }} active employees</small></span><span class="distribution-bar" aria-hidden="true"><i style="width: {{ $employeeCount > 0 ? min(100, round($department->employees_count / $employeeCount * 100)) : 0 }}%"></i></span></div>
+        @forelse($topDepartments as $department)
+        <div class="distribution-row">
+            <div class="distribution-row-heading"><b>{{ $department->name }}</b><strong>{{ number_format($department->employees_count) }}</strong></div>
+            <span class="distribution-bar" aria-hidden="true"><i style="width: {{ round($department->employees_count / $maxDepartmentEmployees * 100) }}%"></i></span>
+        </div>
         @empty<p class="empty-note">No active departments are recorded.</p>@endforelse
+        @if($canViewDepartmentDirectory)
+            <div class="department-staffing-footer"><a class="text-link" href="{{ route('departments.index') }}">View All Departments <i data-lucide="arrow-right" aria-hidden="true"></i></a></div>
+        @endif
     </section>
     <section class="panel">
         <div class="panel-heading">

@@ -72,6 +72,9 @@ Route::middleware(['auth', 'active', 'account.setup'])->group(function () {
         Route::get('/attendance/workplaces/department-preview', [AttendanceController::class, 'departmentWorkplaceAssignmentPreview'])
             ->middleware('throttle:60,1')
             ->name('attendance.workplaces.department-preview');
+        Route::get('/attendance/workplaces/individual-search', [AttendanceController::class, 'searchWorkplaceAssignmentEmployees'])
+            ->middleware('throttle:60,1')
+            ->name('attendance.workplaces.individual-search');
         Route::post('/attendance/workplaces/department-assignment', [AttendanceController::class, 'assignDepartmentWorkplace'])->name('attendance.workplaces.assign-department');
         Route::post('/attendance/workplaces/bulk-assignment', [AttendanceController::class, 'bulkAssignWorkplaces'])->name('attendance.workplaces.assign-bulk');
         Route::post('/attendance/employees/{employee}/workplace', [AttendanceController::class, 'assignWorkplace'])->name('attendance.employees.workplace');
@@ -101,6 +104,9 @@ Route::middleware(['auth', 'active', 'account.setup'])->group(function () {
     Route::get('/users', [UserController::class, 'index'])->middleware('role:admin')->name('users.index');
 
     Route::get('/employees', [EmployeeController::class, 'index'])->name('employees.index');
+    Route::get('/employees/search', [EmployeeController::class, 'search'])
+        ->middleware(['role:admin,office_head,mayor', 'throttle:60,1'])
+        ->name('employees.search');
     Route::get('/employees/create', [EmployeeController::class, 'create'])->middleware('role:admin')->name('employees.create');
     Route::post('/employees', [EmployeeController::class, 'store'])->middleware('role:admin')->name('employees.store');
     Route::get('/employees/{employee}', [EmployeeController::class, 'show'])->name('employees.show');

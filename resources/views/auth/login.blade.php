@@ -5,10 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#12365b">
     <link rel="icon" type="image/webp" href="{{ asset('image/hrislogo.webp') }}">
+    <link rel="preload" as="image" href="{{ asset('image/backgroundlanding.jpg') }}" fetchpriority="high">
     <title>Sign in · Municipality of Camalaniugan HRMO</title>
     @vite(['resources/css/app.css', 'resources/js/app.js'])
 </head>
-<body class="login-page" style="--login-image: url('{{ asset('image/backgroundlanding.jpg') }}')" x-data="{ showPassword: false, isSubmitting: false }">
+<body class="login-page login-page-glass" style="--login-image: url('{{ asset('image/backgroundlanding.jpg') }}')" x-data="{ showPassword: false, isSubmitting: false }">
     <main class="login-panel">
         <a href="{{ route('home') }}" class="login-back">Back to portal</a>
         <div class="login-brand">
@@ -44,6 +45,5 @@
         </form>
         <p class="login-privacy">Access is limited to authorized personnel. Your activity may be logged for security and accountability.</p>
     </main>
-    <footer class="login-footer">© {{ date('Y') }} Municipality of Camalaniugan. All Rights Reserved.</footer>
 </body>
 </html>

@@ -36,4 +36,27 @@ class SharedConfirmationModalTest extends TestCase
             ->assertSee('data-hris-flash', false)
             ->assertSee('Password link sent.');
     }
+
+    public function test_temporary_password_setup_uses_the_shared_warning_confirmation(): void
+    {
+        $user = User::factory()->create([
+            'role' => 'employee',
+            'is_active' => true,
+            'must_change_password' => true,
+            'account_setup_completed' => false,
+        ]);
+
+        $response = $this->actingAs($user)
+            ->get(route('account.setup'))
+            ->assertOk()
+            ->assertSee('data-confirm-type="warning"', false)
+            ->assertSee('data-confirm-title="Change Password and Continue?"', false)
+            ->assertSee('data-confirm-text="Change Password"', false)
+            ->assertSee('You are currently using a temporary password.', false)
+            ->assertSee('Would you like to proceed?', false)
+            ->assertSee('data-hris-modal-cancel', false)
+            ->assertSee('data-hris-modal-confirm', false);
+
+        $this->assertSame(1, substr_count($response->getContent(), '<dialog'));
+    }
 }

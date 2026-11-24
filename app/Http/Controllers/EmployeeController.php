@@ -8,6 +8,7 @@ use App\Models\Position;
 use App\Services\AuditLogger;
 use App\Services\EmployeeAssignmentHistoryRecorder;
 use App\Services\OfficeHeadRoleAssignmentService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -17,6 +18,105 @@ use Illuminate\View\View;
 
 class EmployeeController extends Controller
 {
+    public function search(Request $request): JsonResponse
+    {
+        $filters = $request->validate([
+            'q' => ['nullable', 'string', 'max:100'],
+            'page' => ['nullable', 'integer', 'min:1', 'max:5000'],
+            'department_id' => ['nullable', 'integer', 'exists:departments,id'],
+            'employment_status' => ['nullable', 'string', 'max:40'],
+            'active_only' => ['nullable', 'boolean'],
+            'unlinked_only' => ['nullable', 'boolean'],
+            'office_head_only' => ['nullable', 'boolean'],
+            'include_employee_id' => ['nullable', 'integer', 'exists:employees,id'],
+            'target_user_id' => ['nullable', 'integer', 'exists:users,id'],
+        ]);
+        $user = $request->user();
+        abort_unless(
+            $user->canManageHr() || $user->isAdministrator() || $user->isOfficeHead() || $user->isMayor(),
+            403
+        );
+
+        $unlinkedOnly = (bool) ($filters['unlinked_only'] ?? false);
+        $officeHeadOnly = (bool) ($filters['office_head_only'] ?? false);
+        abort_unless(! ($unlinkedOnly || $officeHeadOnly) || $user->isAdministrator(), 403);
+        abort_unless(! isset($filters['target_user_id']) || ($unlinkedOnly && $user->isAdministrator()), 403);
+
+        $query = Employee::query()
+            ->with(['department:id,name', 'position:id,title,is_office_head_designation'])
+            ->whereNull('archived_at')
+            ->when($user->isOfficeHead(), fn ($employees) => $employees->whereHas(
+                'department',
+                fn ($department) => $department->where('head_user_id', $user->id)
+            ))
+            ->when(isset($filters['department_id']), fn ($employees) => $employees->where(
+                'department_id',
+                $filters['department_id']
+            ))
+            ->when(isset($filters['employment_status']), fn ($employees) => $employees->where(
+                'employment_status',
+                $filters['employment_status']
+            ))
+            ->when((bool) ($filters['active_only'] ?? false), fn ($employees) => $employees->where(
+                'employment_status',
+                'Active'
+            ));
+
+        if ($unlinkedOnly || $officeHeadOnly) {
+            $query->where(function ($employees) use ($filters) {
+                $employees->whereNull('user_id');
+                if (isset($filters['include_employee_id'], $filters['target_user_id'])) {
+                    $employees->orWhere(function ($selected) use ($filters) {
+                        $selected->whereKey($filters['include_employee_id'])
+                            ->where('user_id', $filters['target_user_id']);
+                    });
+                }
+            });
+        }
+
+        if ($officeHeadOnly) {
+            $query->whereHas('position', fn ($position) => $position->where('is_office_head_designation', true));
+        }
+
+        $search = trim($filters['q'] ?? '');
+        if ($search !== '') {
+            foreach (preg_split('/\s+/', $search, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $term) {
+                $query->where(fn ($employees) => $employees
+                    ->where('employee_no', 'like', "%{$term}%")
+                    ->orWhere('first_name', 'like', "%{$term}%")
+                    ->orWhere('middle_name', 'like', "%{$term}%")
+                    ->orWhere('last_name', 'like', "%{$term}%")
+                    ->orWhere('suffix', 'like', "%{$term}%"));
+            }
+        }
+
+        $page = (int) ($filters['page'] ?? 1);
+        $employees = $query
+            ->orderBy('last_name')
+            ->orderBy('first_name')
+            ->orderBy('id')
+            ->offset(($page - 1) * 20)
+            ->limit(21)
+            ->get([
+                'id', 'employee_no', 'first_name', 'middle_name', 'last_name', 'suffix',
+                'department_id', 'position_id', 'user_id',
+            ]);
+        $hasMore = $employees->count() > 20;
+
+        return response()->json([
+            'results' => $employees->take(20)->map(fn (Employee $employee) => [
+                'id' => $employee->id,
+                'employee_no' => $employee->employee_no,
+                'name' => $employee->full_name,
+                'label' => $employee->employee_no.' · '.$employee->full_name,
+                'department' => $employee->department?->name,
+                'position' => $employee->position?->title,
+            ])->values(),
+            'has_more' => $hasMore,
+            'page' => $page,
+        ]);
+    }
+
     public function index(Request $request): View
     {
         $this->authorize('viewAny', Employee::class);

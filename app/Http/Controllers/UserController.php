@@ -54,8 +54,9 @@ class UserController extends Controller
 
     public function create(Request $request): View
     {
-        $selectedEmployee = $request->integer('employee_id')
-            ? Employee::with(['department', 'position'])->whereNull('user_id')->whereNull('archived_at')->find($request->integer('employee_id'))
+        $selectedEmployeeId = $request->integer('employee_id') ?: (int) old('employee_id');
+        $selectedEmployee = $selectedEmployeeId
+            ? Employee::with(['department', 'position'])->whereNull('user_id')->whereNull('archived_at')->find($selectedEmployeeId)
             : null;
 
         return view('users.form', [
@@ -67,16 +68,8 @@ class UserController extends Controller
                 'email' => $selectedEmployee?->email,
             ]),
             'selectedEmployeeId' => $selectedEmployee?->id,
+            'selectedEmployee' => $selectedEmployee,
             'assignedDepartmentId' => $selectedEmployee?->department_id,
-            'employees' => Employee::with(['department', 'position'])->whereNull('user_id')->whereNull('archived_at')->orderBy('last_name')->get(),
-            'officeHeadEmployees' => Employee::with(['department', 'position'])
-                ->whereNull('archived_at')
-                ->whereHas('position', fn ($query) => $query->where('is_office_head_designation', true))
-                ->where(function ($query) {
-                    $query->whereNull('user_id');
-                })
-                ->orderBy('last_name')
-                ->get(),
             'departments' => Department::where('is_active', true)->orderBy('name')->get(),
             'allowedRoles' => $this->allowedRoles($request->user()),
         ]);
@@ -178,24 +171,15 @@ class UserController extends Controller
     public function edit(Request $request, User $user): View
     {
         $this->authorizeAccountManagement($request->user(), $user);
+        $selectedEmployee = Employee::with(['department', 'position'])
+            ->whereNull('archived_at')
+            ->where(fn ($employees) => $employees->whereNull('user_id')->orWhere('user_id', $user->id))
+            ->find(old('employee_id', $user->employee?->id));
 
         return view('users.form', [
             'user' => $user->load('employee'),
             'selectedEmployeeId' => $user->employee?->id,
-            'employees' => Employee::with(['department', 'position'])->whereNull('archived_at')
-                ->where(function ($query) use ($user) {
-                    $query->whereNull('user_id')->orWhere('user_id', $user->id);
-                })
-                ->orderBy('last_name')
-                ->get(),
-            'officeHeadEmployees' => Employee::with(['department', 'position'])
-                ->whereNull('archived_at')
-                ->whereHas('position', fn ($query) => $query->where('is_office_head_designation', true))
-                ->where(function ($query) use ($user) {
-                    $query->whereNull('user_id')->orWhere('user_id', $user->id);
-                })
-                ->orderBy('last_name')
-                ->get(),
+            'selectedEmployee' => $selectedEmployee,
             'departments' => Department::where('is_active', true)
                 ->orWhereHas('head', fn ($query) => $query->whereKey($user->id))
                 ->orderBy('name')

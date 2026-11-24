@@ -18,6 +18,9 @@
             @endif
             <select name="employment_status" aria-label="Filter by employment status"><option value="">All statuses</option>@foreach(['Active','On Leave','Separated','Retired'] as $status)<option @selected(request('employment_status') === $status)>{{ $status }}</option>@endforeach</select>
             <button class="button button-outline" type="submit"><i data-lucide="list-filter"></i> Filter</button>
+            @if(request()->hasAny(['q', 'department_id', 'employment_status']))
+                <a class="button button-outline" href="{{ route('employees.index', request()->only(['sort', 'direction'])) }}">Reset</a>
+            @endif
         </form>
         <div class="table-wrap"><table><thead><tr>
             <th><a class="sort-link" href="{{ request()->fullUrlWithQuery(['sort' => 'last_name', 'direction' => $nextNameDirection]) }}">EMPLOYEE <i data-lucide="arrow-up-down"></i></a></th>

@@ -50,6 +50,7 @@ class DashboardController extends Controller
                     ->get(),
                 'presentCount' => $attendance->whereIn('status', ['Present', 'Late'])->count(),
                 'lateCount' => $attendance->where('late_minutes', '>', 0)->count(),
+                'absentCount' => $attendance->where('status', 'Absent')->count(),
                 'pageTitle' => 'My workspace',
             ]);
         }
@@ -314,6 +315,7 @@ class DashboardController extends Controller
                     ->get()
                 : collect(),
             'approvedLeaveCount' => (clone $leaves)->where('status', 'Approved')->count(),
+            'disapprovedLeaveCount' => (clone $leaves)->where('status', 'Disapproved')->count(),
             'returnedLeaveCount' => (clone $leaves)->where('status', 'Returned for Correction')->count(),
             'pageTitle' => match ($user->role) {
                 'office_head' => 'Department overview',

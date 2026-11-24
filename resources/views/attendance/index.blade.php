@@ -66,17 +66,25 @@
         <form class="filter-bar attendance-filters" method="GET">
             <label>Work date<input type="date" name="date" value="{{ request('date') }}"></label>
             @if(!auth()->user()->isOfficeHead() && !auth()->user()->isEmployee())
-                <select name="department_id"><option value="">All departments</option>@foreach($departments as $department)<option value="{{ $department->id }}" @selected(request('department_id') == $department->id)>{{ $department->name }}</option>@endforeach</select>
+                <select name="department_id" aria-label="Department"><option value="">All departments</option>@foreach($departments as $department)<option value="{{ $department->id }}" @selected(request('department_id') == $department->id)>{{ $department->name }}</option>@endforeach</select>
             @endif
             @if(auth()->user()->isAdministrator())
-                <select name="employee_id"><option value="">All employees</option>@foreach($employees as $employee)<option value="{{ $employee->id }}" @selected(request('employee_id') == $employee->id)>{{ $employee->employee_no }} · {{ $employee->full_name }}</option>@endforeach</select>
+                <x-employee-picker
+                    input-id="attendance-employee-filter"
+                    label="Employee"
+                    placeholder="All employees — search by name or ID"
+                    :selected="$selectedAttendanceEmployee"
+                />
             @endif
-            <label class="search-field"><span>⌕</span><input name="q" value="{{ request('q') }}" placeholder="Employee ID or last name"></label>
-            <select name="status"><option value="">All statuses</option>@foreach(['Present','Late','Absent','On Leave','On Approved Leave','Official Business','Half Day','Rest Day','Holiday','Incomplete'] as $status)<option @selected(request('status') === $status)>{{ $status }}</option>@endforeach</select>
+            <label class="search-field"><i data-lucide="search" aria-hidden="true"></i><input type="search" name="q" value="{{ request('q') }}" placeholder="Employee ID or last name" aria-label="Employee ID or last name"></label>
+            <select name="status" aria-label="Attendance status"><option value="">All statuses</option>@foreach(['Present','Late','Absent','On Leave','On Approved Leave','Official Business','Half Day','Rest Day','Holiday','Incomplete'] as $status)<option @selected(request('status') === $status)>{{ $status }}</option>@endforeach</select>
             @if(!auth()->user()->isEmployee())
-                <select name="gps_status"><option value="">All GPS verification</option>@foreach(['Verified','Outside Area','Insufficient Accuracy','Permission Denied','Unavailable','For Review'] as $status)<option @selected(request('gps_status') === $status)>{{ $status }}</option>@endforeach</select>
+                <select name="gps_status" aria-label="GPS verification"><option value="">All GPS verification</option>@foreach(['Verified','Outside Area','Insufficient Accuracy','Permission Denied','Unavailable','For Review'] as $status)<option @selected(request('gps_status') === $status)>{{ $status }}</option>@endforeach</select>
             @endif
-            <button type="submit" class="button button-outline">Filter</button>
+            <div class="attendance-filter-actions">
+                <a class="button button-outline" href="{{ route('attendance.index') }}">Reset Filters</a>
+                <button type="submit" class="button button-primary"><i data-lucide="list-filter" aria-hidden="true"></i> Filter</button>
+            </div>
         </form>
 
         @if(auth()->user()->isAdministrator())
@@ -246,13 +254,22 @@
                     class="workplace-assignment-tabs"
                     x-data="workplaceAssignments({
                         activeTab: @js(in_array(request('assignment_tab'), ['department', 'bulk', 'individual'], true) ? request('assignment_tab') : 'department'),
-                        departmentEmployees: @js($departmentAssignmentPreview),
+                        departmentEmployees: {},
                         departmentPreviewUrl: @js(route('attendance.workplaces.department-preview')),
-                        employees: @js($employeeAssignmentLookup),
                         visibleEmployeeIds: @js($assignmentEmployees->pluck('id')->map(fn ($id) => (string) $id)->all()),
                         selectedDepartment: @js(old('department_id')),
                         selectedEffectiveDate: @js(old('effective_from', today()->toDateString())),
-                        selectedEmployee: @js(request('selected_employee')),
+                        selectedEmployee: @js($selectedAssignmentEmployee ? [
+                            'id' => $selectedAssignmentEmployee->id,
+                            'employee_no' => $selectedAssignmentEmployee->employee_no,
+                            'name' => $selectedAssignmentEmployee->full_name,
+                            'label' => $selectedAssignmentEmployee->employee_no.' · '.$selectedAssignmentEmployee->full_name,
+                            'department' => $selectedAssignmentEmployee->department?->name,
+                            'position' => $selectedAssignmentEmployee->position?->title,
+                            'workplace' => $effectiveWorkplaceAssignments[$selectedAssignmentEmployee->id]['workplace']?->name ?? null,
+                            'assignment_type' => $effectiveWorkplaceAssignments[$selectedAssignmentEmployee->id]['assignment_type'] ?? null,
+                            'effective_from' => $effectiveWorkplaceAssignments[$selectedAssignmentEmployee->id]['effective_from']?->format('M j, Y'),
+                        ] : null),
                         individualAssignmentUrl: @js(route('attendance.employees.workplace', ['employee' => '__EMPLOYEE__']))
                     })"
                 >
@@ -340,6 +357,9 @@
                                 </select>
                             </label>
                             <button class="button button-outline" type="submit">Apply filters</button>
+                            @if(request()->hasAny(['assignment_search', 'assignment_department', 'assignment_workplace', 'assignment_status']))
+                                <a class="button button-outline" href="{{ route('attendance.index', ['assignment_tab' => 'bulk']) }}">Reset</a>
+                            @endif
                         </form>
 
                         <form method="POST" action="{{ route('attendance.workplaces.assign-bulk') }}" class="form-stack workplace-bulk-form" @submit.prevent="confirmBulkAssignment($event)">
@@ -393,23 +413,30 @@
                     </div>
 
                     <div class="workplace-tab-content" x-show="activeTab === 'individual'" x-cloak>
-                        <form method="POST" x-bind:action="individualAssignmentUrl.replace('__EMPLOYEE__', selectedEmployee)" class="form-stack" data-confirm-type="form" data-confirm-title="Save Individual Workplace Assignment?" data-confirm-message="Save or clear the selected employee’s individual workplace assignment from the effective date?" data-confirm-text="Save Assignment">
+                        <form method="POST" x-bind:action="individualAssignmentUrl.replace('__EMPLOYEE__', selectedEmployee)" class="form-stack" data-confirm-type="form" data-confirm-title="Save Individual Workplace Assignment?" data-confirm-message="Save or clear the selected employee’s individual workplace assignment from the effective date?" data-confirm-text="Save Assignment" @submit="if (!selectedEmployee) { $event.preventDefault(); window.hrisNotify('warning', 'Select an employee', 'Choose an employee from the search results before saving.'); }">
                             @csrf
-                            <label>Search employee
-                                <input type="search" x-model="employeeSearch" placeholder="Search by name or employee ID">
-                            </label>
-                            <label>Employee *
-                                <select name="employee_id" x-model="selectedEmployee" required>
-                                    <option value="">Select employee</option>
-                                    <template x-for="employee in filteredEmployees()" :key="employee.id">
-                                        <option :value="employee.id" x-text="`${employee.employee_no} · ${employee.name}`"></option>
-                                    </template>
-                                </select>
-                            </label>
-                            <div class="assignment-current" x-show="selectedEmployeeDetails()" x-cloak>
+                            <x-employee-picker
+                                input-id="individual-workplace-employee"
+                                label="Employee"
+                                :search-url="route('attendance.workplaces.individual-search')"
+                                :selected="$selectedAssignmentEmployee ? [
+                                    'id' => $selectedAssignmentEmployee->id,
+                                    'employee_no' => $selectedAssignmentEmployee->employee_no,
+                                    'name' => $selectedAssignmentEmployee->full_name,
+                                    'label' => $selectedAssignmentEmployee->employee_no.' · '.$selectedAssignmentEmployee->full_name,
+                                    'department' => $selectedAssignmentEmployee->department?->name,
+                                    'position' => $selectedAssignmentEmployee->position?->title,
+                                    'workplace' => $effectiveWorkplaceAssignments[$selectedAssignmentEmployee->id]['workplace']?->name ?? null,
+                                    'assignment_type' => $effectiveWorkplaceAssignments[$selectedAssignmentEmployee->id]['assignment_type'] ?? null,
+                                    'effective_from' => $effectiveWorkplaceAssignments[$selectedAssignmentEmployee->id]['effective_from']?->format('M j, Y'),
+                                ] : null"
+                                :required="true"
+                                @employee-picked="setSelectedEmployee($event.detail)"
+                            />
+                            <div class="assignment-current" x-show="selectedEmployeeDetails" x-cloak>
                                 <b>Current effective workplace</b>
-                                <span x-text="selectedEmployeeDetails()?.workplace ?? 'No assignment'"></span>
-                                <small x-text="selectedEmployeeDetails()?.assignment_type ? `${selectedEmployeeDetails().assignment_type} assignment` : 'No active employee or department assignment'"></small>
+                                <span x-text="selectedEmployeeDetails?.workplace ?? 'No assignment'"></span>
+                                <small x-text="selectedEmployeeDetails?.assignment_type ? `${selectedEmployeeDetails.assignment_type} assignment` : 'No active employee or department assignment'"></small>
                             </div>
                             <div class="workplace-assignment-fields">
                                 <label>Individual workplace
@@ -474,7 +501,12 @@
                 <div class="panel-heading"><div><h2>Work schedules</h2><p>Schedule changes take effect only on their approved dates. Existing attendance calculations remain unchanged.</p></div></div>
                 <div class="info-note"><b>Default schedule:</b> Monday–Friday, 8:00 AM–5:00 PM; lunch 12:00–1:00 PM; zero-minute grace.</div>
                 <form method="POST" action="{{ route('attendance.schedules.store') }}" class="form-stack top-space" data-confirm-type="form" data-confirm-title="Save Approved Work Schedule?" data-confirm-message="Save this work schedule and its effective period for the selected employee or office?" data-confirm-text="Save Schedule">@csrf
-                    <label>Schedule scope<select name="employee_id"><option value="">Office-wide default</option>@foreach($employees as $employee)<option value="{{ $employee->id }}">{{ $employee->employee_no }} · {{ $employee->full_name }}</option>@endforeach</select></label>
+                    <x-employee-picker
+                        input-id="schedule-employee"
+                        label="Schedule employee (optional)"
+                        placeholder="Office-wide default or search employee"
+                        :selected="$selectedScheduleEmployee"
+                    />
                     <div class="weekday-grid">@foreach([1=>'Monday',2=>'Tuesday',3=>'Wednesday',4=>'Thursday',5=>'Friday',6=>'Saturday',7=>'Sunday'] as $day=>$name)<label class="choice-card"><input type="checkbox" name="working_days[]" value="{{ $day }}" @checked(in_array($day, old('working_days', $defaultSchedule['working_days']), false))><span><b>{{ $name }}</b></span></label>@endforeach</div>
                     <div class="form-grid"><label>Start time *<input type="time" name="start_time" value="{{ old('start_time','08:00') }}" required></label><label>End time *<input type="time" name="end_time" value="{{ old('end_time','17:00') }}" required></label><label>Lunch starts<input type="time" name="lunch_start" value="{{ old('lunch_start','12:00') }}"></label><label>Lunch ends<input type="time" name="lunch_end" value="{{ old('lunch_end','13:00') }}"></label><label>Grace period (minutes) *<input type="number" name="grace_period_minutes" min="0" max="240" value="{{ old('grace_period_minutes',0) }}" required></label><label>Effective from *<input type="date" name="effective_from" value="{{ old('effective_from',today()->toDateString()) }}" required></label><label>Effective to<input type="date" name="effective_to"></label><label class="field-span">Approved reason *<textarea name="reason" rows="2" maxlength="2000" required></textarea></label></div>
                     <button class="button button-primary" type="submit" data-loading-text="Saving…">Save approved schedule</button>

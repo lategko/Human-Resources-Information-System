@@ -65,9 +65,9 @@ class LeaveCreditController extends Controller
             'specialEntitlements' => $mine
                 ? app(EmployeeLeaveEntitlementSummary::class)->forYear($user->employee)
                 : collect(),
-            'employees' => ! $mine && $user->canManageHr()
-                ? Employee::whereNull('archived_at')->orderBy('last_name')->get()
-                : collect(),
+            'selectedEmployee' => ! $mine && $user->canManageHr() && old('employee_id')
+                ? Employee::whereNull('archived_at')->find((int) old('employee_id'))
+                : null,
             'leaveTypes' => ! $mine && $user->canManageHr()
                 ? LeaveType::where('is_active', true)->orderBy('sort_order')->get()
                 : collect(),

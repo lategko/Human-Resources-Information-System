@@ -106,6 +106,31 @@ class HrisWorkflowTest extends TestCase
         ]);
     }
 
+    public function test_mayor_dashboard_shows_municipal_approved_and_disapproved_totals(): void
+    {
+        $employee = Employee::where('employee_no', 'TEST-0001')->firstOrFail();
+        $applicationData = [
+            'employee_id' => $employee->id,
+            'leave_type_id' => LeaveType::where('code', 'VACATION')->value('id'),
+            'office_snapshot' => $employee->department->name,
+            'last_name_snapshot' => $employee->last_name,
+            'first_name_snapshot' => $employee->first_name,
+            'working_days' => 1,
+            'start_date' => today()->addDays(5),
+            'end_date' => today()->addDays(5),
+        ];
+        LeaveApplication::create($applicationData + ['status' => 'Approved']);
+        LeaveApplication::create($applicationData + ['status' => 'Disapproved']);
+
+        $this->actingAs(User::where('role', 'mayor')->firstOrFail())
+            ->get(route('dashboard'))
+            ->assertOk()
+            ->assertViewHas('approvedLeaveCount', 1)
+            ->assertViewHas('disapprovedLeaveCount', 1)
+            ->assertSee('APPROVED APPLICATIONS')
+            ->assertSee('DISAPPROVED APPLICATIONS');
+    }
+
     private function nextTwoWorkingDays(): array
     {
         $calculator = app(WorkingDayCalculator::class);
@@ -1204,7 +1229,14 @@ class HrisWorkflowTest extends TestCase
         $this->actingAs($hrmo)->get(route('attendance.index'))
             ->assertOk()
             ->assertSee('Work schedules')
-            ->assertSee('Default schedule');
+            ->assertSee('Default schedule')
+            ->assertSee('Reset Filters')
+            ->assertSee('name="date"', false)
+            ->assertSee('name="department_id"', false)
+            ->assertSee('name="employee_id"', false)
+            ->assertSee('name="q"', false)
+            ->assertSee('name="status"', false)
+            ->assertSee('name="gps_status"', false);
 
         $this->post(route('attendance.schedules.store'), $officeSchedule)
             ->assertRedirect()
@@ -1411,6 +1443,54 @@ class HrisWorkflowTest extends TestCase
             ->assertSee('Apply for leave')
             ->assertSee('My leave applications')
             ->assertDontSee('Audit logs');
+    }
+
+    public function test_dashboard_staffing_shows_only_the_five_largest_departments(): void
+    {
+        foreach (range(1, 6) as $staffCount) {
+            $department = Department::create([
+                'name' => "Staffing {$staffCount}",
+                'code' => "STAFF-{$staffCount}",
+            ]);
+
+            foreach (range(1, $staffCount) as $employeeNumber) {
+                Employee::create([
+                    'department_id' => $department->id,
+                    'employee_no' => "STAFF-{$staffCount}-{$employeeNumber}",
+                    'first_name' => 'Staffing',
+                    'last_name' => "Employee {$employeeNumber}",
+                    'employment_status' => 'Active',
+                    'employment_type' => 'Permanent',
+                    'date_hired' => '2020-01-06',
+                ]);
+            }
+        }
+
+        $response = $this->actingAs(User::where('email', 'hrmo@example.test')->firstOrFail())
+            ->get(route('dashboard'))
+            ->assertOk()
+            ->assertSee('View All Departments')
+            ->assertSee('href="' . route('departments.index') . '"', false);
+
+        $html = $response->getContent();
+        $headingPosition = strpos($html, '<h2>Department staffing</h2>');
+        $this->assertNotFalse($headingPosition);
+
+        $cardEnd = strpos($html, '</section>', $headingPosition);
+        $this->assertNotFalse($cardEnd);
+        $staffingCard = substr($html, $headingPosition, $cardEnd - $headingPosition);
+
+        preg_match_all(
+            '/<div class="distribution-row-heading"><b>(.*?)<\/b><strong>(.*?)<\/strong>/s',
+            $staffingCard,
+            $rows
+        );
+
+        $this->assertSame(
+            ['Staffing 6', 'Staffing 5', 'Staffing 4', 'Staffing 3', 'Staffing 2'],
+            $rows[1]
+        );
+        $this->assertSame(['6', '5', '4', '3', '2'], $rows[2]);
     }
 
     public function test_admin_can_manage_accounts_and_system_while_mayor_is_restricted(): void

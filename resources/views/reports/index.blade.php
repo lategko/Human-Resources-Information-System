@@ -10,14 +10,31 @@
     </header>
     <section class="panel">
         <form class="filter-bar report-filters" method="GET">
-            <label>From<input type="date" name="date_from" value="{{ request('date_from', $from) }}"></label><label>To<input type="date" name="date_to" value="{{ request('date_to', $to) }}"></label>
-            @if(!auth()->user()->isOfficeHead())<select name="department_id"><option value="">All departments</option>@foreach($departments as $department)<option value="{{ $department->id }}" @selected(request('department_id') == $department->id)>{{ $department->name }}</option>@endforeach</select>@endif
-            <select name="employee_id"><option value="">All employees</option>@foreach($employees as $employee)<option value="{{ $employee->id }}" @selected(request('employee_id') == $employee->id)>{{ $employee->employee_no }} · {{ $employee->full_name }}</option>@endforeach</select>
-            <select name="leave_type_id"><option value="">All leave categories</option>@foreach($leaveTypes as $type)<option value="{{ $type->id }}" @selected(request('leave_type_id') == $type->id)>{{ $type->name }}</option>@endforeach</select>
-            <select name="attendance_status"><option value="">All attendance statuses</option>@foreach(['Present','Late','Absent','On Leave','On Approved Leave','Official Business','Half Day','Rest Day','Holiday'] as $status)<option @selected(request('attendance_status') === $status)>{{ $status }}</option>@endforeach</select>
-            <select name="application_status"><option value="">All leave statuses</option>@foreach(['Submitted','Endorsed','Returned for Correction','Pending Final Approval','Approved','Disapproved'] as $status)<option @selected(request('application_status') === $status)>{{ $status }}</option>@endforeach</select>
-            <select name="employment_status"><option value="">All employment statuses</option>@foreach($employmentStatuses as $status)<option value="{{ $status }}" @selected(request('employment_status') === $status)>{{ $status }}</option>@endforeach</select>
-            <button type="submit" class="button button-primary">Apply filters</button>
+            <label>From<input type="date" name="date_from" value="{{ request('date_from', $from) }}"></label>
+            <label>To<input type="date" name="date_to" value="{{ request('date_to', $to) }}"></label>
+            <details class="advanced-filter-details" @if(request()->hasAny(['department_id', 'employee_id', 'leave_type_id', 'attendance_status', 'application_status', 'employment_status'])) open @endif>
+                <summary>Advanced filters</summary>
+                <div class="advanced-filter-grid">
+                    @if(!auth()->user()->isOfficeHead())
+                        <label>Department<select name="department_id"><option value="">All departments</option>@foreach($departments as $department)<option value="{{ $department->id }}" @selected(request('department_id') == $department->id)>{{ $department->name }}</option>@endforeach</select></label>
+                    @endif
+                    <x-employee-picker
+                        input-id="report-employee-filter"
+                        label="Employee"
+                        placeholder="All employees — search by name or ID"
+                        :selected="$selectedEmployee"
+                        :filters="array_filter(['department_id' => request('department_id'), 'employment_status' => request('employment_status')], fn ($value) => $value !== null && $value !== '')"
+                    />
+                    <label>Leave category<select name="leave_type_id"><option value="">All leave categories</option>@foreach($leaveTypes as $type)<option value="{{ $type->id }}" @selected(request('leave_type_id') == $type->id)>{{ $type->name }}</option>@endforeach</select></label>
+                    <label>Attendance status<select name="attendance_status"><option value="">All attendance statuses</option>@foreach(['Present','Late','Absent','On Leave','On Approved Leave','Official Business','Half Day','Rest Day','Holiday'] as $status)<option @selected(request('attendance_status') === $status)>{{ $status }}</option>@endforeach</select></label>
+                    <label>Application status<select name="application_status"><option value="">All leave statuses</option>@foreach(['Submitted','Endorsed','Returned for Correction','Pending Final Approval','Approved','Disapproved'] as $status)<option @selected(request('application_status') === $status)>{{ $status }}</option>@endforeach</select></label>
+                    <label>Employment status<select name="employment_status"><option value="">All employment statuses</option>@foreach($employmentStatuses as $status)<option value="{{ $status }}" @selected(request('employment_status') === $status)>{{ $status }}</option>@endforeach</select></label>
+                </div>
+            </details>
+            <div class="filter-actions">
+                @if(request()->hasAny(['date_from', 'date_to', 'department_id', 'employee_id', 'leave_type_id', 'attendance_status', 'application_status', 'employment_status']))<a class="button button-outline" href="{{ route('reports.index') }}">Reset</a>@endif
+                <button type="submit" class="button button-primary">Apply filters</button>
+            </div>
         </form>
         <div class="report-summary"><div><small>ATTENDANCE RECORDS</small><b>{{ $attendanceCount }}</b></div><div><small>LEAVE APPLICATIONS</small><b>{{ $leaveCount }}</b></div><div><small>REPORTING PERIOD</small><b>{{ \Carbon\Carbon::parse($from)->format('M j') }} – {{ \Carbon\Carbon::parse($to)->format('M j, Y') }}</b></div></div>
     </section>

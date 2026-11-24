@@ -16,6 +16,10 @@ class AccountAccessTest extends TestCase
     {
         $this->get(route('login'))
             ->assertOk()
+            ->assertSee('login-page-glass')
+            ->assertSee('image/backgroundlanding.jpg')
+            ->assertSee('Back to portal')
+            ->assertDontSee('All Rights Reserved')
             ->assertSee('password-toggle')
             ->assertSee('x-text="showPassword ? \'Hide\' : \'Show\'"', false);
     }
@@ -56,7 +60,34 @@ class AccountAccessTest extends TestCase
             $response = $this->get(route('dashboard'))->assertOk()->assertSee($dashboardHeading);
             preg_match('/<aside id="primary-navigation".*?>(.*?)<\/aside>/s', $response->getContent(), $sidebar);
             $this->assertArrayHasKey(1, $sidebar);
-            $this->assertStringNotContainsString('data-lucide=', $sidebar[1]);
+            $this->assertStringContainsString('data-lucide="layout-dashboard"', $sidebar[1]);
+            $this->assertStringContainsString('sidebar-profile', $sidebar[1]);
+            $this->assertStringContainsString($accounts[$role]->name, $sidebar[1]);
+            $this->assertStringContainsString(match ($role) {
+                'admin' => 'Administrator',
+                'mayor' => 'Mayor',
+                'office_head' => 'Office Head',
+                'employee' => 'Employee / Staff',
+            }, $sidebar[1]);
+            $this->assertStringContainsString(match ($role) {
+                'admin' => '<span>System settings</span>',
+                'mayor' => '<span>Leave approvals</span>',
+                'office_head' => '<span>My employees</span>',
+                'employee' => '<span>My employee record</span>',
+            }, $sidebar[1]);
+            $restrictedRoute = match ($role) {
+                'mayor' => route('users.index'),
+                'office_head' => route('settings.system'),
+                'employee' => route('reports.index'),
+                default => null,
+            };
+            if ($restrictedRoute) {
+                $this->assertStringNotContainsString('href="'.$restrictedRoute.'"', $sidebar[1]);
+            }
+            $this->assertStringContainsString('avatar-initials', $sidebar[1]);
+            $this->assertStringContainsString('aria-current="page"', $sidebar[1]);
+            $this->assertStringContainsString('aria-controls="primary-navigation"', $response->getContent());
+            $this->assertStringContainsString('sidebarCollapsed = !sidebarCollapsed', $response->getContent());
 
             $sessionId = session()->getId();
             $this->post(route('logout'))->assertRedirect(route('login'));
@@ -201,7 +232,7 @@ class AccountAccessTest extends TestCase
             ->assertOk()
             ->assertSee('Administration overview')
             ->assertSee('data-role-theme="administrator"', false)
-            ->assertSee('ADMIN · HR OFFICE');
+            ->assertSee('Administrator');
         $this->assertTrue($admin->canApproveMayorLeave());
         $this->assertFalse($admin->canFinalApprove());
     }
@@ -315,5 +346,89 @@ class AccountAccessTest extends TestCase
         ]);
         $this->assertSame($account->id, $employee->fresh()->user_id);
         $this->assertSame(1, User::where('email', 'updated-admin@example.test')->count());
+    }
+
+    public function test_employee_search_is_limited_to_twenty_results_and_matches_employee_id(): void
+    {
+        $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+        for ($number = 1; $number <= 21; $number++) {
+            Employee::create([
+                'employee_no' => sprintf('SEARCH-%03d', $number),
+                'first_name' => 'Search',
+                'last_name' => sprintf('Worker%03d', $number),
+            ]);
+        }
+
+        $firstPage = $this->actingAs($admin)
+            ->getJson(route('employees.search'))
+            ->assertOk()
+            ->assertJsonCount(20, 'results')
+            ->assertJsonPath('has_more', true);
+        $this->assertCount(1, $this->getJson(route('employees.search', ['page' => 2]))->assertOk()->json('results'));
+
+        $firstPage->assertJsonPath('results.0.employee_no', 'SEARCH-001');
+        $this->getJson(route('employees.search', ['q' => 'SEARCH-021']))
+            ->assertOk()
+            ->assertJsonCount(1, 'results')
+            ->assertJsonPath('results.0.employee_no', 'SEARCH-021');
+    }
+
+    public function test_employee_search_scopes_office_heads_to_their_department(): void
+    {
+        $officeHead = User::factory()->create(['role' => 'office_head', 'is_active' => true]);
+        $department = Department::create(['name' => 'Assigned Office', 'head_user_id' => $officeHead->id]);
+        $otherDepartment = Department::create(['name' => 'Other Office']);
+        Employee::create([
+            'department_id' => $department->id,
+            'employee_no' => 'SCOPE-IN',
+            'first_name' => 'Assigned',
+            'last_name' => 'Employee',
+        ]);
+        Employee::create([
+            'department_id' => $otherDepartment->id,
+            'employee_no' => 'SCOPE-OUT',
+            'first_name' => 'Other',
+            'last_name' => 'Employee',
+        ]);
+
+        $this->actingAs($officeHead)
+            ->getJson(route('employees.search'))
+            ->assertOk()
+            ->assertJsonCount(1, 'results')
+            ->assertJsonPath('results.0.employee_no', 'SCOPE-IN');
+    }
+
+    public function test_employee_search_only_includes_a_linked_employee_for_its_account(): void
+    {
+        $admin = User::factory()->create(['role' => 'admin', 'is_active' => true]);
+        $account = User::factory()->create(['role' => 'employee', 'is_active' => true]);
+        $otherAccount = User::factory()->create(['role' => 'employee', 'is_active' => true]);
+        $linkedEmployee = Employee::create([
+            'user_id' => $account->id,
+            'employee_no' => 'LINKED-SELF',
+            'first_name' => 'Linked',
+            'last_name' => 'Self',
+        ]);
+        Employee::create([
+            'user_id' => $otherAccount->id,
+            'employee_no' => 'LINKED-OTHER',
+            'first_name' => 'Linked',
+            'last_name' => 'Other',
+        ]);
+        Employee::create([
+            'employee_no' => 'UNLINKED',
+            'first_name' => 'Unlinked',
+            'last_name' => 'Employee',
+        ]);
+
+        $this->actingAs($admin)
+            ->getJson(route('employees.search', [
+                'unlinked_only' => 1,
+                'target_user_id' => $account->id,
+                'include_employee_id' => $linkedEmployee->id,
+            ]))
+            ->assertOk()
+            ->assertJsonCount(2, 'results')
+            ->assertJsonMissing(['employee_no' => 'LINKED-OTHER']);
     }
 }

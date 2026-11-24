@@ -32,73 +32,88 @@ class AttendanceController extends Controller
     public function index(Request $request): View
     {
         $user = $request->user();
-        $employees = $user->canManageHr() || $user->isAdministrator()
-            ? Employee::with(['department', 'attendanceWorkplace'])->whereNull('archived_at')->orderBy('last_name')->get()
-            : collect();
-        $assignmentRoster = $employees->where('employment_status', 'Active')->values();
-        $assignmentMap = $user->isAdministrator()
-            ? app(AttendanceWorkplaceAssignmentService::class)->effectiveAssignments($assignmentRoster, today()->toDateString())
-            : [];
-        $assignmentCandidates = $assignmentRoster->filter(function (Employee $employee) use ($request, $assignmentMap) {
-            $search = mb_strtolower(trim((string) $request->query('assignment_search', '')));
-            if ($search !== '' && ! str_contains(mb_strtolower($employee->employee_no.' '.$employee->full_name), $search)) {
-                return false;
+        $assignmentService = app(AttendanceWorkplaceAssignmentService::class);
+        $visibleAssignmentMap = [];
+        if ($user->isAdministrator()) {
+            $assignmentQuery = Employee::with(['department', 'attendanceWorkplace'])
+                ->whereNull('archived_at')
+                ->where('employment_status', 'Active');
+            $assignmentSearch = trim((string) $request->query('assignment_search', ''));
+            if ($assignmentSearch !== '') {
+                foreach (preg_split('/\s+/', $assignmentSearch, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $term) {
+                    $assignmentQuery->where(fn ($employees) => $employees
+                        ->where('employee_no', 'like', "%{$term}%")
+                        ->orWhere('first_name', 'like', "%{$term}%")
+                        ->orWhere('middle_name', 'like', "%{$term}%")
+                        ->orWhere('last_name', 'like', "%{$term}%")
+                        ->orWhere('suffix', 'like', "%{$term}%"));
+                }
             }
-            if ($request->filled('assignment_department')
-                && (int) $employee->department_id !== $request->integer('assignment_department')) {
-                return false;
+            if ($request->filled('assignment_department')) {
+                $assignmentQuery->where('department_id', $request->integer('assignment_department'));
             }
+            $hasEffectiveAssignmentFilter = $request->filled('assignment_workplace') || $request->filled('assignment_status');
+            if ($hasEffectiveAssignmentFilter) {
+                $candidates = $assignmentQuery->orderBy('last_name')->orderBy('first_name')->get();
+                $candidateAssignments = $assignmentService->effectiveAssignments($candidates, today()->toDateString());
+                $candidates = $candidates->filter(function (Employee $employee) use ($request, $candidateAssignments) {
+                    $assignment = $candidateAssignments[$employee->id] ?? ['workplace' => null];
+                    $workplaceFilter = $request->query('assignment_workplace');
+                    if ($workplaceFilter === 'unassigned' && $assignment['workplace']) {
+                        return false;
+                    }
+                    if (is_numeric($workplaceFilter) && (int) $assignment['workplace']?->id !== (int) $workplaceFilter) {
+                        return false;
+                    }
+                    if ($request->query('assignment_status') === 'assigned' && ! $assignment['workplace']) {
+                        return false;
+                    }
+                    if ($request->query('assignment_status') === 'unassigned' && $assignment['workplace']) {
+                        return false;
+                    }
 
-            $assignment = $assignmentMap[$employee->id] ?? ['workplace' => null];
-            $workplaceFilter = $request->query('assignment_workplace');
-            if ($workplaceFilter === 'unassigned' && $assignment['workplace']) {
-                return false;
+                    return true;
+                })->values();
+                $assignmentPage = LengthAwarePaginator::resolveCurrentPage('assignments_page');
+                $assignmentEmployees = new LengthAwarePaginator(
+                    $candidates->forPage($assignmentPage, 100)->values(),
+                    $candidates->count(),
+                    100,
+                    $assignmentPage,
+                    [
+                        'path' => LengthAwarePaginator::resolveCurrentPath(),
+                        'pageName' => 'assignments_page',
+                        'query' => $request->except('assignments_page'),
+                    ],
+                );
+                $visibleAssignmentMap = $assignmentEmployees->getCollection()
+                    ->mapWithKeys(fn (Employee $employee) => [$employee->id => $candidateAssignments[$employee->id]])
+                    ->all();
+            } else {
+                $assignmentEmployees = $assignmentQuery
+                    ->orderBy('last_name')
+                    ->orderBy('first_name')
+                    ->paginate(100, ['*'], 'assignments_page')
+                    ->appends($request->except('assignments_page'));
+                $visibleAssignmentMap = $assignmentService
+                    ->effectiveAssignments($assignmentEmployees->getCollection(), today()->toDateString());
             }
-            if (is_numeric($workplaceFilter) && (int) $assignment['workplace']?->id !== (int) $workplaceFilter) {
-                return false;
-            }
-
-            $statusFilter = $request->query('assignment_status');
-            if ($statusFilter === 'assigned' && ! $assignment['workplace']) {
-                return false;
-            }
-            if ($statusFilter === 'unassigned' && $assignment['workplace']) {
-                return false;
-            }
-
-            return true;
-        })->values();
-        $assignmentPage = LengthAwarePaginator::resolveCurrentPage('assignments_page');
-        $assignmentEmployees = new LengthAwarePaginator(
-            $assignmentCandidates->forPage($assignmentPage, 100)->values(),
-            $assignmentCandidates->count(),
-            100,
-            $assignmentPage,
-            [
+        } else {
+            $assignmentEmployees = new LengthAwarePaginator([], 0, 100, 1, [
                 'path' => LengthAwarePaginator::resolveCurrentPath(),
                 'pageName' => 'assignments_page',
-                'query' => $request->except('assignments_page'),
-            ],
-        );
-        $employeeAssignmentLookup = $assignmentRoster->mapWithKeys(fn (Employee $employee) => [
-            $employee->id => [
-                'name' => $employee->full_name,
-                'employee_no' => $employee->employee_no,
-                'workplace' => $assignmentMap[$employee->id]['workplace']?->name,
-                'assignment_type' => $assignmentMap[$employee->id]['assignment_type'],
-                'effective_from' => $assignmentMap[$employee->id]['effective_from']?->format('M j, Y'),
-            ],
-        ])->all();
-        $departmentAssignmentPreview = $assignmentRoster
-            ->filter(fn (Employee $employee) => $employee->department_id)
-            ->groupBy('department_id')
-            ->map(fn ($departmentEmployees) => $departmentEmployees->map(fn (Employee $employee) => [
-                'name' => $employee->full_name,
-                'employee_no' => $employee->employee_no,
-                'workplace' => $assignmentMap[$employee->id]['workplace']?->name,
-                'assignment_type' => $assignmentMap[$employee->id]['assignment_type'],
-            ])->values()->all())
-            ->all();
+            ]);
+        }
+        $selectedAssignmentEmployee = $user->isAdministrator() && ($request->filled('selected_employee') || old('employee_id'))
+            ? Employee::with(['department:id,name', 'position:id,title'])
+                ->whereNull('archived_at')
+                ->where('employment_status', 'Active')
+                ->find((int) old('employee_id', $request->input('selected_employee')))
+            : null;
+        if ($selectedAssignmentEmployee) {
+            $visibleAssignmentMap[$selectedAssignmentEmployee->id] ??= $assignmentService
+                ->effectiveAssignments(collect([$selectedAssignmentEmployee]), today()->toDateString())[$selectedAssignmentEmployee->id];
+        }
         $query = AttendanceRecord::with('employee.department');
         if ($user->isEmployee()) {
             $query->where('employee_id', $user->employee?->id ?? 0);
@@ -133,11 +148,15 @@ class AttendanceController extends Controller
             'departments' => Department::where('is_active', true)
                 ->when($user->isOfficeHead(), fn ($departments) => $departments->where('head_user_id', $user->id))
                 ->orderBy('name')->get(),
-            'employees' => $employees,
             'assignmentEmployees' => $assignmentEmployees,
-            'effectiveWorkplaceAssignments' => $assignmentMap,
-            'employeeAssignmentLookup' => (object) $employeeAssignmentLookup,
-            'departmentAssignmentPreview' => (object) $departmentAssignmentPreview,
+            'effectiveWorkplaceAssignments' => $visibleAssignmentMap,
+            'selectedAttendanceEmployee' => $user->isAdministrator() && $request->filled('employee_id')
+                ? Employee::whereNull('archived_at')->find($request->integer('employee_id'))
+                : null,
+            'selectedAssignmentEmployee' => $selectedAssignmentEmployee,
+            'selectedScheduleEmployee' => ($user->canManageHr() || $user->isAdministrator()) && old('employee_id')
+                ? Employee::whereNull('archived_at')->find((int) old('employee_id'))
+                : null,
             'assignmentHistory' => $user->isAdministrator()
                 ? AttendanceWorkplaceAssignmentHistory::with([
                     'employee', 'department', 'previousWorkplace', 'newWorkplace', 'assignedBy',
@@ -454,6 +473,60 @@ class AttendanceController extends Controller
                 'workplace' => $assignments[$employee->id]['workplace']?->name,
                 'assignment_type' => $assignments[$employee->id]['assignment_type'],
             ])->values(),
+        ]);
+    }
+
+    public function searchWorkplaceAssignmentEmployees(
+        Request $request,
+        AttendanceWorkplaceAssignmentService $assignmentService,
+    ): JsonResponse {
+        abort_unless($request->user()->isAdministrator(), 403);
+        $filters = $request->validate([
+            'q' => ['nullable', 'string', 'max:100'],
+            'page' => ['nullable', 'integer', 'min:1', 'max:5000'],
+        ]);
+        $query = Employee::query()
+            ->with(['department:id,name', 'position:id,title'])
+            ->whereNull('archived_at')
+            ->where('employment_status', 'Active');
+        $search = trim($filters['q'] ?? '');
+        if ($search !== '') {
+            foreach (preg_split('/\s+/', $search, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $term) {
+                $query->where(fn ($employees) => $employees
+                    ->where('employee_no', 'like', "%{$term}%")
+                    ->orWhere('first_name', 'like', "%{$term}%")
+                    ->orWhere('middle_name', 'like', "%{$term}%")
+                    ->orWhere('last_name', 'like', "%{$term}%")
+                    ->orWhere('suffix', 'like', "%{$term}%"));
+            }
+        }
+
+        $page = (int) ($filters['page'] ?? 1);
+        $employees = $query
+            ->orderBy('last_name')
+            ->orderBy('first_name')
+            ->orderBy('id')
+            ->offset(($page - 1) * 20)
+            ->limit(21)
+            ->get(['id', 'employee_no', 'first_name', 'middle_name', 'last_name', 'suffix', 'department_id', 'position_id']);
+        $hasMore = $employees->count() > 20;
+        $employees = $employees->take(20);
+        $assignments = $assignmentService->effectiveAssignments($employees, today()->toDateString());
+
+        return response()->json([
+            'results' => $employees->map(fn (Employee $employee) => [
+                'id' => $employee->id,
+                'employee_no' => $employee->employee_no,
+                'name' => $employee->full_name,
+                'label' => $employee->employee_no.' · '.$employee->full_name,
+                'department' => $employee->department?->name,
+                'position' => $employee->position?->title,
+                'workplace' => $assignments[$employee->id]['workplace']?->name,
+                'assignment_type' => $assignments[$employee->id]['assignment_type'],
+                'effective_from' => $assignments[$employee->id]['effective_from']?->format('M j, Y'),
+            ])->values(),
+            'has_more' => $hasMore,
+            'page' => $page,
         ]);
     }
 

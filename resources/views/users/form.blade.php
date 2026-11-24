@@ -34,33 +34,47 @@
                 </select>
                 <small>The selected employee’s official department must match this assignment. Each department can have one Office Head.</small>
             </label>
-            <label x-show="role === 'employee'" x-cloak>Linked employee record *
-                <select name="employee_id" :disabled="role !== 'employee'" :required="role === 'employee'">
-                    <option value="">Select an existing employee</option>
-                    @foreach($employees as $employee)
-                        <option value="{{ $employee->id }}" @selected(old('employee_id', $selectedEmployeeId ?? $user->employee?->id) == $employee->id)>{{ $employee->employee_no }} · {{ $employee->full_name }} — {{ $employee->department?->name }}</option>
-                    @endforeach
-                </select>
+            <div class="field-stack" x-show="role === 'employee'" x-cloak>
+                <x-employee-picker
+                    input-id="user-employee-record"
+                    label="Linked employee record"
+                    placeholder="Search unlinked employees by name or ID"
+                    :selected="$selectedEmployee"
+                    :filters="['unlinked_only' => true]"
+                    :required="true"
+                    :disabled-expression="'role !== \'employee\''"
+                    :include-selected="$user->exists"
+                    :target-user-id="$user->exists ? $user->id : null"
+                />
                 <small>Employee accounts must use an existing, non-archived employee record. No employee records are created here.</small>
-            </label>
-            <label x-show="role === 'office_head'" x-cloak>Verified Office Head employee record *
-                <select name="employee_id" :disabled="role !== 'office_head'" :required="role === 'office_head'">
-                    <option value="">Select a verified Office Head employee</option>
-                    @foreach($officeHeadEmployees as $employee)
-                        <option value="{{ $employee->id }}" @selected(old('employee_id', $selectedEmployeeId ?? $user->employee?->id) == $employee->id)>{{ $employee->employee_no }} · {{ $employee->full_name }} — {{ $employee->position?->title }} / {{ $employee->department?->name }}</option>
-                    @endforeach
-                </select>
+            </div>
+            <div class="field-stack" x-show="role === 'office_head'" x-cloak>
+                <x-employee-picker
+                    input-id="user-office-head-record"
+                    label="Verified Office Head employee record"
+                    placeholder="Search eligible employees by name or ID"
+                    :selected="$selectedEmployee"
+                    :filters="['unlinked_only' => true, 'office_head_only' => true]"
+                    :required="true"
+                    :disabled-expression="'role !== \'office_head\''"
+                    :include-selected="$user->exists"
+                    :target-user-id="$user->exists ? $user->id : null"
+                />
                 <small>Only employees in positions explicitly marked HR-approved for their department are eligible.</small>
-            </label>
-            <label x-show="role === 'admin' || role === 'mayor'" x-cloak>Personal employee record (optional)
-                <select name="employee_id" :disabled="role !== 'admin' && role !== 'mayor'">
-                    <option value="">No employee record linked</option>
-                    @foreach($employees as $employee)
-                        <option value="{{ $employee->id }}" @selected(old('employee_id', $user->employee?->id) == $employee->id)>{{ $employee->employee_no }} · {{ $employee->full_name }} — {{ $employee->department?->name }}</option>
-                    @endforeach
-                </select>
+            </div>
+            <div class="field-stack" x-show="role === 'admin' || role === 'mayor'" x-cloak>
+                <x-employee-picker
+                    input-id="user-personal-employee-record"
+                    label="Personal employee record (optional)"
+                    placeholder="No employee record or search by name or ID"
+                    :selected="$selectedEmployee"
+                    :filters="['unlinked_only' => true]"
+                    :disabled-expression="'role !== \'admin\' && role !== \'mayor\''"
+                    :include-selected="$user->exists"
+                    :target-user-id="$user->exists ? $user->id : null"
+                />
                 <small>Link this account to an existing employee record to enable personal leave and employee-record access.</small>
-            </label>
+            </div>
             @if(!$user->exists)
                 <label x-show="role !== 'employee'" x-cloak>Initial password *<input type="password" name="password" minlength="12" :required="role !== 'employee'" :disabled="role === 'employee'" autocomplete="new-password"><small>Employee accounts receive a random password and must be activated securely.</small></label>
                 <label x-show="role !== 'employee'" x-cloak>Confirm initial password *<input type="password" name="password_confirmation" minlength="12" :required="role !== 'employee'" :disabled="role === 'employee'" autocomplete="new-password"></label>

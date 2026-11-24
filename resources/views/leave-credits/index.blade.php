@@ -38,11 +38,12 @@
     @else
     <div class="content-grid">
         <section class="panel"><form class="filter-bar" method="GET">
-            <label class="search-field"><span>⌕</span><input name="q" value="{{ request('q') }}" placeholder="Employee ID or last name"></label>
+            <label class="search-field"><i data-lucide="search" aria-hidden="true"></i><input type="search" name="q" value="{{ request('q') }}" placeholder="Employee ID or last name"></label>
             <label>Department<select name="department_id"><option value="">All departments</option>@foreach($departments as $department)<option value="{{ $department->id }}" @selected((string)request('department_id') === (string)$department->id)>{{ $department->name }}</option>@endforeach</select></label>
             <label>Leave type<select name="leave_type_id"><option value="">All types</option>@foreach($leaveTypes as $type)<option value="{{ $type->id }}" @selected((string)request('leave_type_id') === (string)$type->id)>{{ $type->name }}</option>@endforeach</select></label>
             <label>Employment status<select name="employment_status"><option value="">All statuses</option>@foreach($employmentStatuses as $status)<option value="{{ $status }}" @selected(request('employment_status') === $status)>{{ $status }}</option>@endforeach</select></label>
-            <button class="button button-outline">Apply filters</button>
+            <button class="button button-outline"><i data-lucide="list-filter" aria-hidden="true"></i> Apply filters</button>
+            @if(request()->hasAny(['q', 'department_id', 'leave_type_id', 'employment_status']))<a class="button button-outline" href="{{ route('leave-credits.index', request()->only('mine')) }}">Reset</a>@endif
         </form>
             <p class="panel-actions"><a class="text-link" href="{{ route('reports.leave-credit.csv', ['report' => 'balances']) }}">Export balance summary</a> · <a class="text-link" href="{{ route('reports.leave-credit.csv', ['report' => 'ledger']) }}">Export ledger</a> · <a class="text-link" href="{{ route('reports.leave-credit.csv', ['report' => 'accrual']) }}">Export monthly accruals</a></p>
             <div class="table-wrap"><table><thead><tr><th>EMPLOYEE</th><th>LEAVE TYPE</th><th>BEGINNING</th><th>EARNED</th><th>USED</th><th>ADJUSTMENTS</th><th>BALANCE</th><th></th></tr></thead><tbody>
@@ -53,7 +54,7 @@
         </section>
         <aside class="panel"><div class="panel-heading"><div><h2>Create a credit account</h2><p>HR must verify the beginning balance and policy basis.</p></div></div>
             <form method="POST" action="{{ route('leave-credits.store') }}" class="form-stack" data-confirm-type="warning" data-confirm-title="Create Leave Credit Account?" data-confirm-message="Create this leave credit account with the employee, leave type, beginning balance, and stated policy basis?" data-confirm-text="Create Account">@csrf
-                <label>Employee *<select name="employee_id" required><option value="">Select employee</option>@foreach($employees as $employee)<option value="{{ $employee->id }}">{{ $employee->employee_no }} · {{ $employee->full_name }}</option>@endforeach</select></label>
+                <x-employee-picker input-id="leave-credit-employee" :selected="$selectedEmployee" :required="true" />
                 <label>Leave type *<select name="leave_type_id" required><option value="">Select leave type</option>@foreach($leaveTypes as $type)<option value="{{ $type->id }}">{{ $type->name }}</option>@endforeach</select></label>
                 <label>Beginning balance (days) *<input type="number" min="0" step=".01" name="beginning_balance" required></label><label>Effective date *<input type="date" name="effective_date" required></label><label>Basis / remarks *<textarea name="remarks" rows="3" required></textarea></label><button class="button button-primary">Create credit account</button>
             </form>

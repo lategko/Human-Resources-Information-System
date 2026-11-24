@@ -16,7 +16,9 @@
     <form method="POST" action="{{ route('account.setup.update') }}" class="panel form-panel" x-data="{ showCurrentPassword: false, showNewPassword: false, showConfirmationPassword: false }"
         data-confirm-type="warning"
         data-confirm-title="{{ $user->must_change_password ? 'Change Password and Continue?' : 'Complete Account Setup?' }}"
-        data-confirm-message="{{ $user->must_change_password ? 'Change the temporary password and save your username and contact details before continuing?' : 'Save your username and contact information to complete account setup?' }}"
+        data-confirm-message="{{ $user->must_change_password ? 'You are currently using a temporary password. To protect your account, you must create a new password before continuing.
+
+Would you like to proceed?' : 'Save your username and contact information to complete account setup?' }}"
         data-confirm-text="{{ $user->must_change_password ? 'Change Password' : 'Complete Setup' }}">
         @csrf @method('PUT')
         <div class="panel-heading"><div><h2>{{ $user->name }}</h2><p>Employee number: {{ $user->employee?->employee_no ?? 'Not linked' }}</p></div></div>

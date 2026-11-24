@@ -533,6 +533,9 @@
                 <input type="search" name="row_search" value="{{ $rowSearch }}" maxlength="100" placeholder="Name, employee number, item number">
             </label>
             <button type="submit" class="button button-secondary">Filter records</button>
+            @if(request()->hasAny(['row_status', 'row_search']))
+                <a class="button button-outline" href="{{ route('employee-imports.show', array_filter(['employeeImport' => $import, 'office_column' => $selectedOfficeColumn])) }}">Reset</a>
+            @endif
         </form>
         <p class="muted import-row-count">Showing {{ $rows->count() }} of {{ $rows->total() }} matching record(s) · {{ $summary['awaiting_validation'] }} awaiting validation · {{ $summary['corrections'] }} needing correction · {{ $summary['duplicates'] }} duplicates · {{ $summary['failed'] }} failed</p>
         <div class="table-wrap employee-import-role-table-wrap">
