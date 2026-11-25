@@ -5,10 +5,13 @@ namespace Tests\Feature;
 use App\Models\Department;
 use App\Models\Employee;
 use App\Models\User;
+use App\Notifications\EmailVerificationOtp;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Notifications\AnonymousNotifiable;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\URL;
 use Tests\TestCase;
@@ -33,12 +36,10 @@ class AccountProfileTest extends TestCase
 
     public function test_non_employee_roles_can_update_their_own_account_details_without_changing_role(): void
     {
-        foreach (['admin', 'office_head', 'mayor'] as $role) {
-            $user = $this->createUser($role);
+        Notification::fake();
 
-            if ($role === 'admin') {
-                $user->update(['can_final_approve' => true]);
-            }
+        foreach (['office_head', 'mayor'] as $role) {
+            $user = $this->createUser($role);
 
             $this->actingAs($user)->put(route('account.profile.update'), [
                 'name' => 'Updated '.ucfirst($role),
@@ -55,9 +56,146 @@ class AccountProfileTest extends TestCase
                 'email' => 'updated-'.$role.'@example.test',
                 'role' => $role,
                 'is_active' => true,
-                'can_final_approve' => $role === 'admin',
+                'can_final_approve' => false,
             ]);
         }
+    }
+
+    public function test_admin_email_changes_require_password_and_keep_the_old_email_until_otp_verification(): void
+    {
+        Notification::fake();
+        $admin = $this->createUser('admin', 'CurrentPassword123!');
+        $verifiedAt = now()->subDays(3);
+        $admin->forceFill(['email_verified_at' => $verifiedAt])->save();
+        $newEmail = 'new-admin-address@example.test';
+        $this->actingAs($admin);
+
+        $this->put(route('account.profile.update'), [
+            'name' => $admin->name,
+            'email' => $newEmail,
+        ])->assertSessionHasErrors('current_password');
+
+        $this->assertSame($admin->email, $admin->fresh()->email);
+        $this->assertSame($verifiedAt->timestamp, $admin->fresh()->email_verified_at->timestamp);
+        Notification::assertNothingSent();
+
+        $this->put(route('account.profile.update'), [
+            'name' => $admin->name,
+            'email' => $newEmail,
+            'current_password' => 'CurrentPassword123!',
+        ])->assertRedirect(route('account.profile.edit'));
+
+        $this->assertSame($admin->email, $admin->fresh()->email);
+        $this->assertSame($verifiedAt->timestamp, $admin->fresh()->email_verified_at->timestamp);
+        $this->get(route('account.profile.edit'))
+            ->assertOk()
+            ->assertSee($newEmail)
+            ->assertSee('Your current address');
+
+        $code = null;
+        Notification::assertSentOnDemand(EmailVerificationOtp::class, function ($notification, $channels, $notifiable) use (&$code, $newEmail): bool {
+            if (($notifiable->routes['mail'] ?? null) !== $newEmail) {
+                return false;
+            }
+
+            $code = $notification->code;
+
+            return true;
+        });
+        $this->assertNotNull($code);
+
+        $this->post(route('account.profile.email-change.verify'), ['code' => '000000'])
+            ->assertSessionHasErrors('code');
+        $this->assertSame($admin->email, $admin->fresh()->email);
+
+        $this->post(route('account.profile.email-change.verify'), ['code' => $code])
+            ->assertRedirect(route('account.profile.edit'));
+        $this->assertSame($newEmail, $admin->fresh()->email);
+        $this->assertNotNull($admin->fresh()->email_verified_at);
+
+        $this->post(route('account.profile.email-change.verify'), ['code' => $code])
+            ->assertSessionHasErrors('code');
+        $this->assertSame($newEmail, $admin->fresh()->email);
+    }
+
+    public function test_admin_email_change_resend_replaces_old_code_and_is_rate_limited(): void
+    {
+        Notification::fake();
+        $admin = $this->createUser('admin');
+        $newEmail = 'resend-admin@example.test';
+        $this->actingAs($admin);
+        $this->put(route('account.profile.update'), [
+            'name' => $admin->name,
+            'email' => $newEmail,
+            'current_password' => 'CurrentPassword123!',
+        ])->assertRedirect(route('account.profile.edit'));
+
+        $codes = [];
+        $captureCode = function ($notification, $channels, $notifiable) use (&$codes, $newEmail): bool {
+            if (($notifiable->routes['mail'] ?? null) !== $newEmail) {
+                return false;
+            }
+
+            $codes[] = $notification->code;
+
+            return true;
+        };
+        Notification::assertSentOnDemand(EmailVerificationOtp::class, $captureCode);
+        $firstCode = $codes[0];
+
+        $this->post(route('account.profile.email-change.resend'))
+            ->assertRedirect();
+        $codes = [];
+        Notification::sent(new AnonymousNotifiable(), EmailVerificationOtp::class, $captureCode);
+        $secondCode = $codes[1];
+
+        $this->post(route('account.profile.email-change.verify'), ['code' => $firstCode])
+            ->assertSessionHasErrors('code');
+        $this->assertSame($admin->email, $admin->fresh()->email);
+
+        $this->post(route('account.profile.email-change.resend'))
+            ->assertRedirect();
+        $codes = [];
+        Notification::sent(new AnonymousNotifiable(), EmailVerificationOtp::class, $captureCode);
+        $latestCode = $codes[count($codes) - 1];
+
+        $this->post(route('account.profile.email-change.resend'))
+            ->assertStatus(429);
+        $this->post(route('account.profile.email-change.verify'), ['code' => $latestCode])
+            ->assertRedirect(route('account.profile.edit'));
+        $this->assertSame($newEmail, $admin->fresh()->email);
+        $this->assertNotSame($firstCode, $secondCode);
+    }
+
+    public function test_admin_email_change_code_expires_after_ten_minutes(): void
+    {
+        Notification::fake();
+        $admin = $this->createUser('admin');
+        $newEmail = 'expired-admin@example.test';
+        $this->actingAs($admin);
+        $this->put(route('account.profile.update'), [
+            'name' => $admin->name,
+            'email' => $newEmail,
+            'current_password' => 'CurrentPassword123!',
+        ])->assertRedirect(route('account.profile.edit'));
+
+        $code = null;
+        Notification::assertSentOnDemand(EmailVerificationOtp::class, function ($notification, $channels, $notifiable) use (&$code, $newEmail): bool {
+            if (($notifiable->routes['mail'] ?? null) !== $newEmail) {
+                return false;
+            }
+
+            $code = $notification->code;
+
+            return true;
+        });
+
+        $this->travel(11)->minutes();
+        $this->post(route('account.profile.email-change.verify'), ['code' => $code])
+            ->assertSessionHasErrors('code');
+
+        $this->assertSame($admin->email, $admin->fresh()->email);
+        $this->assertNull($admin->fresh()->email_verified_at);
     }
 
     public function test_linked_employee_can_update_only_contact_details_without_changing_permissions(): void
@@ -115,14 +253,14 @@ class AccountProfileTest extends TestCase
             'profile_contact_number' => '09171234567',
             'profile_address' => 'Municipal address',
             'current_password' => 'CurrentPassword123!',
-            'email' => 'updated-admin@example.test',
+            'email' => $user->email,
             'role' => 'admin',
         ])->assertRedirect(route('account.profile'));
 
         $this->assertDatabaseHas('users', [
             'id' => $user->id,
             'name' => 'Updated Human Resources Officer',
-            'email' => 'updated-admin@example.test',
+            'email' => $user->email,
             'role' => 'admin',
             'first_name' => 'Updated',
             'middle_name' => 'Human',

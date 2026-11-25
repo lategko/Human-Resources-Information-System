@@ -116,7 +116,7 @@ class LeaveCreditController extends Controller
         });
         $auditLogger->record('leave_credit.created', $credit);
 
-        return back()->with('success', 'Leave credit record created.');
+        return back()->with('success', 'The employee leave credit account has been created with the entered beginning balance and effective date.');
     }
 
     public function adjust(Request $request, LeaveCredit $credit, AuditLogger $auditLogger): RedirectResponse
@@ -156,6 +156,6 @@ class LeaveCreditController extends Controller
         });
         $auditLogger->record('leave_credit.adjusted', $credit, ['type' => $data['type'], 'amount' => $data['amount']]);
 
-        return back()->with('success', 'Leave credit transaction recorded.');
+        return back()->with('success', 'The leave credit transaction has been added to the employee’s permanent balance ledger.');
     }
 }

@@ -55,7 +55,7 @@ class PositionController extends Controller
         $position = Position::create($data);
         $auditLogger->record('position.created', $position);
 
-        return back()->with('success', 'Position created.');
+        return back()->with('success', "The {$position->title} position has been added to the HRIS organization directory.");
     }
 
     public function update(
@@ -84,7 +84,7 @@ class PositionController extends Controller
             $auditLogger->record('position.updated', $position);
         });
 
-        return back()->with('success', 'Position updated.');
+        return back()->with('success', "The {$position->title} position details and active status have been updated.");
     }
 
     private function validated(Request $request, ?Position $position = null): array

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\AuditLogger;
+use App\Services\EmailVerificationOtpService;
 use App\Services\SessionSecurityService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -12,6 +13,7 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Illuminate\Validation\Rules\Password;
 use Illuminate\View\View;
 use RuntimeException;
@@ -26,15 +28,21 @@ class AccountProfileController extends Controller
         ]);
     }
 
-    public function edit(Request $request): View
+    public function edit(Request $request, EmailVerificationOtpService $emailOtp): View
     {
         return view('account.profile-edit', [
             'user' => $request->user()->load('employee.department', 'employee.position'),
+            'pendingEmail' => $request->user()->isAdministrator()
+                ? $emailOtp->pendingEmail($request->user(), 'change')
+                : null,
         ]);
     }
 
-    public function update(Request $request, AuditLogger $auditLogger): RedirectResponse
-    {
+    public function update(
+        Request $request,
+        AuditLogger $auditLogger,
+        EmailVerificationOtpService $emailOtp,
+    ): RedirectResponse {
         $user = $request->user()->loadMissing('employee');
         $employee = $user->employee;
         $request->merge([
@@ -85,8 +93,15 @@ class AccountProfileController extends Controller
 
         $data = $request->validate($rules);
         $emailChanged = $user->email !== ($data['email'] ?? null);
+        $pendingAdminEmailChange = $user->isAdministrator() && $emailChanged;
 
-        DB::transaction(function () use ($data, $emailChanged, $employee, $user): void {
+        if ($pendingAdminEmailChange && ! filled($data['email'] ?? null)) {
+            throw ValidationException::withMessages([
+                'email' => 'Enter a new email address to verify before replacing the registered address.',
+            ]);
+        }
+
+        DB::transaction(function () use ($data, $emailChanged, $employee, $pendingAdminEmailChange, $user): void {
             if ($employee) {
                 $employee->update(Arr::only($data, ['contact_number', 'address']));
             } else {
@@ -108,7 +123,7 @@ class AccountProfileController extends Controller
             }
 
             $user->username = $data['username'] ?? null;
-            if ($emailChanged) {
+            if ($emailChanged && ! $pendingAdminEmailChange) {
                 $user->email = $data['email'] ?? null;
                 $user->email_verified_at = null;
             }
@@ -123,11 +138,27 @@ class AccountProfileController extends Controller
                 $request->session()->getId()
             );
         }
+
+        $changedFields = array_keys($data);
+        if ($pendingAdminEmailChange) {
+            $changedFields = array_values(array_diff($changedFields, ['email']));
+        }
+        $auditLogger->record('account.profile_updated', $user, ['fields' => $changedFields]);
+
+        if ($pendingAdminEmailChange) {
+            $emailOtp->send($user, (string) $data['email'], 'change', 'email');
+            $request->session()->put('hris.email_change.attempts', 0);
+            $auditLogger->record('account.email_change_requested', $user, ['email_change_pending' => true]);
+
+            return redirect()->route('account.profile.edit')->with(
+                'status',
+                'A six-digit verification code was sent to '.$data['email'].'. Your current email remains active until the new address is verified.'
+            );
+        }
+
         if ($emailChanged && filled($user->email)) {
             $user->sendEmailVerificationNotification();
         }
-
-        $auditLogger->record('account.profile_updated', $user, ['fields' => array_keys($data)]);
 
         return redirect()->route('account.profile')->with(
             'success',

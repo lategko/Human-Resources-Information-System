@@ -10,7 +10,7 @@ class SharedConfirmationModalTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_authenticated_pages_render_the_shared_dialog_and_confirm_department_changes(): void
+    public function test_authenticated_pages_render_sweetalert_confirmation_hooks_for_department_changes(): void
     {
         $admin = User::factory()->create([
             'role' => 'admin',
@@ -21,9 +21,8 @@ class SharedConfirmationModalTest extends TestCase
         $this->actingAs($admin)
             ->get(route('departments.index'))
             ->assertOk()
-            ->assertSee('<dialog', false)
-            ->assertSee('data-hris-modal', false)
-            ->assertSee('id="hris-toast-region"', false)
+            ->assertDontSee('<dialog', false)
+            ->assertDontSee('data-hris-modal', false)
             ->assertSee('data-confirm-title="Add Department?"', false)
             ->assertSee('data-confirm-title="Save Department Changes?"', false);
     }
@@ -54,9 +53,8 @@ class SharedConfirmationModalTest extends TestCase
             ->assertSee('data-confirm-text="Change Password"', false)
             ->assertSee('You are currently using a temporary password.', false)
             ->assertSee('Would you like to proceed?', false)
-            ->assertSee('data-hris-modal-cancel', false)
-            ->assertSee('data-hris-modal-confirm', false);
+            ->assertDontSee('<dialog', false);
 
-        $this->assertSame(1, substr_count($response->getContent(), '<dialog'));
+        $this->assertStringNotContainsString('data-hris-modal', $response->getContent());
     }
 }

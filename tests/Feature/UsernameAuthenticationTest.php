@@ -5,14 +5,19 @@ namespace Tests\Feature;
 use App\Models\Department;
 use App\Models\Employee;
 use App\Models\User;
+use App\Notifications\EmailVerificationOtp;
+use App\Notifications\PrivilegedLoginOtp;
 use App\Services\EmployeeUsernameGenerator;
 use Illuminate\Auth\Notifications\ResetPassword;
 use Illuminate\Auth\Notifications\VerifyEmail;
+use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\URL;
+use Illuminate\Notifications\AnonymousNotifiable;
 use Tests\TestCase;
 
 class UsernameAuthenticationTest extends TestCase
@@ -48,6 +53,201 @@ class UsernameAuthenticationTest extends TestCase
             'password' => 'SecurePassword123!',
         ])->assertRedirect(route('dashboard'));
         $this->assertAuthenticatedAs($employee);
+    }
+
+    public function test_local_admin_mfa_otp_is_sent_synchronously_and_completes_login(): void
+    {
+        app()->detectEnvironment(fn () => 'local');
+        $this->withoutMiddleware(ValidateCsrfToken::class);
+        Queue::fake();
+        Notification::fake();
+        $admin = $this->createUser('local-mfa@example.test', 'local.mfa', 'admin');
+
+        $this->post(route('login.store'), [
+            'login' => $admin->username,
+            'password' => 'SecurePassword123!',
+        ])->assertRedirect(route('mfa.verify'));
+        $this->assertGuest();
+        Notification::assertSentTo($admin, PrivilegedLoginOtp::class);
+        Queue::assertNothingPushed();
+
+        $otp = null;
+        Notification::sent($admin, PrivilegedLoginOtp::class, function ($notification) use (&$otp, $admin): bool {
+            $otp = $notification->code;
+            $mail = $notification->toMail($admin);
+
+            $this->assertMatchesRegularExpression('/^\d{6}$/', $otp);
+            $this->assertSame('HRIS - Your Login Verification Code', $mail->subject);
+            $this->assertContains('Hello Admin,', $mail->introLines);
+            $this->assertContains('You have requested to sign in to the Municipality of Camalaniugan Human Resource Information System.', $mail->introLines);
+            $this->assertContains('Your verification code is:', $mail->introLines);
+            $this->assertContains($otp, $mail->introLines);
+            $this->assertContains('This code expires after 10 minutes.', $mail->introLines);
+            $this->assertContains('If you did not initiate this login attempt, please ignore this email.', $mail->introLines);
+            $this->assertContains('Municipality of Camalaniugan', $mail->introLines);
+            $this->assertContains('Human Resource Information System', $mail->introLines);
+
+            return true;
+        });
+        $this->post(route('mfa.verify.store'), ['code' => $otp])
+            ->assertRedirect(route('dashboard'));
+        $this->assertAuthenticatedAs($admin);
+    }
+
+    public function test_unverified_admin_completes_email_verification_before_mfa_and_dashboard_access(): void
+    {
+        app()->detectEnvironment(fn () => 'local');
+        $this->withoutMiddleware(ValidateCsrfToken::class);
+        Queue::fake();
+        Notification::fake();
+        $admin = $this->createUser('initial-admin@example.test', 'initial.admin', 'admin');
+        $admin->forceFill(['email_verified_at' => null])->save();
+
+        $this->post(route('login.store'), [
+            'login' => $admin->username,
+            'password' => 'IncorrectPassword123!',
+        ])->assertSessionHasErrors('login');
+        Notification::assertNothingSent();
+        $this->assertNull($admin->fresh()->email_verified_at);
+
+        $this->post(route('login.store'), [
+            'login' => $admin->username,
+            'password' => 'SecurePassword123!',
+            'remember' => true,
+        ])->assertRedirect(route('email.verify.otp'));
+        $this->assertGuest();
+        $this->assertNull($admin->fresh()->email_verified_at);
+        $this->get(route('dashboard'))->assertRedirect(route('login'));
+        $emailParts = explode('@', $admin->email, 2);
+        $maskedEmail = substr($emailParts[0], 0, 1)
+            .str_repeat('*', max(3, strlen($emailParts[0]) - 1))
+            .'@'.$emailParts[1];
+        $challengePage = $this->get(route('email.verify.otp'))
+            ->assertOk()
+            ->assertSeeText('Municipality of Camalaniugan')
+            ->assertSeeText('Human Resource Information System')
+            ->assertSeeText('Admin Email Verification')
+            ->assertSeeText('Verify Your Email Address')
+            ->assertSeeText($maskedEmail)
+            ->assertDontSee($admin->email)
+            ->assertSee('data-resend-countdown', false)
+            ->assertSee('data-cooldown-seconds=', false);
+        $this->assertSame(6, substr_count($challengePage->getContent(), 'data-otp-digit'));
+
+        $emailCode = null;
+        Notification::assertSentOnDemand(EmailVerificationOtp::class, function ($notification, $channels, $notifiable) use (&$emailCode, $admin): bool {
+            if (($notifiable->routes['mail'] ?? null) !== $admin->email) {
+                return false;
+            }
+
+            $emailCode = $notification->code;
+            $mail = $notification->toMail($notifiable);
+            $this->assertSame('Camalaniugan HRIS | Verify Your Email Address', $mail->subject);
+            $this->assertSame('emails.auth.email-verification-otp', $mail->view['html']);
+            $this->assertSame('emails.auth.email-verification-otp-text', $mail->view['text']);
+            $html = view($mail->view['html'], $mail->viewData)->render();
+            $text = view($mail->view['text'], $mail->viewData)->render();
+            $this->assertStringContainsString('Hello, Admin!', $html);
+            $this->assertStringContainsString($notification->code, $html);
+            $this->assertStringContainsString('expires in 10 minutes and can only be used once', $html);
+            $this->assertStringContainsString($notification->code, $text);
+
+            return true;
+        });
+        $this->assertIsString($emailCode);
+        $this->assertMatchesRegularExpression('/^\d{6}$/', $emailCode);
+        Queue::assertNothingPushed();
+
+        $this->post(route('email.verify.otp.resend'))
+            ->assertRedirect()
+            ->assertSessionHas('status', 'A new email verification code was sent to your registered email address.');
+        $this->get(route('email.verify.otp'))
+            ->assertOk()
+            ->assertSeeText('A new email verification code was sent to your registered email address.')
+            ->assertSee('data-cooldown-seconds=', false);
+        $resendCodes = [];
+        Notification::sent(new AnonymousNotifiable(), EmailVerificationOtp::class, function ($notification, $channels, $notifiable) use (&$resendCodes, $admin): bool {
+            if (($notifiable->routes['mail'] ?? null) !== $admin->email) {
+                return false;
+            }
+
+            $resendCodes[] = $notification->code;
+
+            return true;
+        });
+        $resendCode = end($resendCodes);
+        $this->assertNotFalse($resendCode);
+        $this->assertNotSame($emailCode, $resendCode);
+        Queue::assertNothingPushed();
+
+        $this->post(route('email.verify.otp.store'), ['code' => $emailCode])
+            ->assertSessionHasErrors('code');
+        $this->assertNull($admin->fresh()->email_verified_at);
+
+        $this->post(route('email.verify.otp.store'), ['code' => $resendCode])
+            ->assertRedirect(route('mfa.verify'));
+        $this->assertNotNull($admin->fresh()->email_verified_at);
+        $this->assertGuest();
+        $this->assertTrue(session('hris.mfa.remember'));
+        Queue::assertNothingPushed();
+
+        $mfaCode = null;
+        Notification::sent($admin, \App\Notifications\PrivilegedLoginOtp::class, function ($notification) use (&$mfaCode): bool {
+            $mfaCode = $notification->code;
+
+            return true;
+        });
+        $this->post(route('mfa.verify.store'), ['code' => $mfaCode])
+            ->assertRedirect(route('dashboard'));
+        $this->assertAuthenticatedAs($admin);
+        $this->assertNotNull($admin->fresh()->remember_token);
+
+        $this->post(route('email.verify.otp.store'), ['code' => $emailCode])
+            ->assertRedirect(route('dashboard'));
+        $this->assertAuthenticatedAs($admin);
+    }
+
+    public function test_unverified_admin_email_code_expires_after_ten_minutes(): void
+    {
+        Notification::fake();
+        $admin = $this->createUser('expired-initial-admin@example.test', 'expired.initial.admin', 'admin');
+        $admin->forceFill(['email_verified_at' => null])->save();
+
+        $this->post(route('login.store'), [
+            'login' => $admin->username,
+            'password' => 'SecurePassword123!',
+        ])->assertRedirect(route('email.verify.otp'));
+
+        $this->travel(11)->minutes();
+        $this->post(route('email.verify.otp.store'), ['code' => '123456'])
+            ->assertRedirect(route('login'))
+            ->assertSessionHasErrors('login');
+
+        $this->assertGuest();
+        $this->assertNull($admin->fresh()->email_verified_at);
+        $this->get(route('dashboard'))->assertRedirect(route('login'));
+    }
+
+    public function test_unverified_mayor_and_office_head_cannot_use_admin_initial_email_flow(): void
+    {
+        Notification::fake();
+
+        foreach (['mayor', 'office_head'] as $role) {
+            $user = $this->createUser($role.'-unverified@example.test', $role.'.unverified', $role);
+            $user->forceFill(['email_verified_at' => null])->save();
+
+            $this->post(route('login.store'), [
+                'login' => $user->email,
+                'password' => 'SecurePassword123!',
+            ])->assertSessionHasErrors([
+                'login' => 'A verified email address is required for privileged account login.',
+            ]);
+
+            $this->assertGuest();
+            Notification::assertNotSentTo($user, \App\Notifications\PrivilegedLoginOtp::class);
+        }
+
+        Notification::assertNothingSent();
     }
 
     public function test_first_login_requires_setup_and_prevents_employee_data_or_permission_changes(): void

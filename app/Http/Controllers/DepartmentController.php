@@ -87,7 +87,7 @@ class DepartmentController extends Controller
         $department = Department::create($data);
         $auditLogger->record('department.created', $department);
 
-        return back()->with('success', 'Department created.');
+        return back()->with('success', "The {$department->name} department has been added to the HRIS organization directory.");
     }
 
     public function update(Request $request, Department $department, AuditLogger $auditLogger): RedirectResponse
@@ -142,7 +142,7 @@ class DepartmentController extends Controller
             }
         });
 
-        return back()->with('success', 'Department updated.');
+        return back()->with('success', "The {$data['name']} department details, active status, and Office Head assignment have been updated.");
     }
 
     private function verifiedOfficeHeads(): Collection

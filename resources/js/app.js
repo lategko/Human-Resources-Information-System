@@ -10,6 +10,7 @@ import {
     UserRoundPlus, UserRoundX, Users, UsersRound, Wallet,
 } from 'lucide';
 import Chart from 'chart.js/auto';
+import Swal from 'sweetalert2';
 
 window.Alpine = Alpine;
 Chart.defaults.font.family = '"Inter Variable", Inter, "Segoe UI", Arial, sans-serif';
@@ -36,129 +37,226 @@ window.applyHrisChartTheme = () => {
 
 window.applyHrisChartTheme();
 
-const modal = document.querySelector('[data-hris-modal]');
-const modalTitle = modal?.querySelector('[data-hris-modal-title]');
-const modalKind = modal?.querySelector('[data-hris-modal-kind]');
-const modalDescription = modal?.querySelector('[data-hris-modal-description]');
-const modalIndicator = modal?.querySelector('[data-hris-modal-indicator]');
-const modalCancel = modal?.querySelector('[data-hris-modal-cancel]');
-const modalConfirm = modal?.querySelector('[data-hris-modal-confirm]');
-let modalResolver = null;
-
 const modalTypes = {
-    confirmation: { label: 'Confirmation', tone: 'info', role: 'alertdialog' },
-    form: { label: 'Confirm changes', tone: 'info', role: 'alertdialog' },
-    delete: { label: 'Delete confirmation', tone: 'danger', role: 'alertdialog' },
-    approval: { label: 'Approval confirmation', tone: 'success', role: 'alertdialog' },
-    rejection: { label: 'Rejection confirmation', tone: 'danger', role: 'alertdialog' },
-    import: { label: 'Import confirmation', tone: 'info', role: 'alertdialog' },
-    success: { label: 'Success', tone: 'success', role: 'dialog' },
-    warning: { label: 'Warning', tone: 'warning', role: 'alertdialog' },
-    error: { label: 'Error', tone: 'danger', role: 'alertdialog' },
-    info: { label: 'Information', tone: 'info', role: 'dialog' },
+    confirmation: {
+        label: 'Confirmation',
+        icon: 'question',
+        tone: 'info',
+        confirmText: 'Confirm',
+        confirmTitle: 'Confirm HRIS action?',
+        confirmMessage: 'Review the displayed HRIS details before continuing.',
+    },
+    question: {
+        label: 'Question',
+        icon: 'question',
+        tone: 'info',
+        confirmText: 'Continue',
+        confirmTitle: 'Continue with this HRIS request?',
+        confirmMessage: 'Review the displayed request details before continuing.',
+    },
+    form: {
+        label: 'Save changes',
+        icon: 'question',
+        tone: 'info',
+        confirmText: 'Save Changes',
+        confirmTitle: 'Save HRIS changes?',
+        confirmMessage: 'Review the entered changes before saving them.',
+    },
+    delete: {
+        label: 'Delete record',
+        icon: 'warning',
+        tone: 'danger',
+        confirmText: 'Delete Record',
+        confirmTitle: 'Delete this HRIS record?',
+        confirmMessage: 'The selected HRIS record will be permanently deleted.',
+    },
+    approval: {
+        label: 'Approve request',
+        icon: 'question',
+        tone: 'success',
+        confirmText: 'Approve Request',
+        confirmTitle: 'Approve this HRIS request?',
+        confirmMessage: 'The approval decision will be recorded against the selected request.',
+    },
+    rejection: {
+        label: 'Reject request',
+        icon: 'warning',
+        tone: 'danger',
+        confirmText: 'Reject Request',
+        confirmTitle: 'Reject this HRIS request?',
+        confirmMessage: 'The rejection decision and its reason will be recorded against the selected request.',
+    },
+    import: {
+        label: 'Confirm import',
+        icon: 'question',
+        tone: 'info',
+        confirmText: 'Confirm Import',
+        confirmTitle: 'Confirm employee import?',
+        confirmMessage: 'The ready employee records will be imported as summarized in the preview.',
+    },
+    success: { label: 'Success', icon: 'success', tone: 'success' },
+    warning: { label: 'Warning', icon: 'warning', tone: 'warning' },
+    error: { label: 'Error', icon: 'error', tone: 'danger' },
+    info: { label: 'Information', icon: 'info', tone: 'info' },
 };
 
-const finishModal = (confirmed) => {
-    if (!modal || !modal.open) return;
-    const resolve = modalResolver;
-    modalResolver = null;
-    modal.close();
-    resolve?.(confirmed);
+const isDarkTheme = () => document.documentElement.dataset.theme === 'dark';
+const recentToasts = new Map();
+
+const getTypeInfo = (type) => modalTypes[type] ?? modalTypes.info;
+
+const createPopupClasses = (type) => {
+    const typeInfo = getTypeInfo(type);
+
+    return {
+        popup: 'hris-swal-popup',
+        title: 'hris-swal-title',
+        htmlContainer: 'hris-swal-message',
+        confirmButton: `hris-swal-button ${typeInfo.tone === 'danger' ? 'hris-swal-button-danger' : 'hris-swal-button-primary'}`,
+        cancelButton: 'hris-swal-button hris-swal-button-cancel',
+        actions: 'hris-swal-actions',
+    };
 };
 
-const openModal = (options = {}, confirmation = false) => {
-    if (!modal || !modal.showModal || !modalTitle || !modalDescription || !modalConfirm) {
-        window.hrisNotify?.(
-            'error',
-            'Confirmation unavailable',
-            'The dialog could not be opened, so the requested action was not submitted.'
-        );
-        return Promise.resolve(false);
-    }
-
-    if (modal.open) finishModal(false);
-
+const showHrisModal = async (options = {}, confirmation = false) => {
     const type = modalTypes[options.type] ? options.type : 'confirmation';
-    const typeInfo = modalTypes[type];
-    modal.dataset.tone = typeInfo.tone;
-    modal.setAttribute('role', typeInfo.role);
-    modalKind.textContent = options.kind || typeInfo.label;
-    modalTitle.textContent = options.title || (confirmation ? 'Confirm action' : typeInfo.label);
-    modalDescription.textContent = options.message || 'Please review this action before continuing.';
-    modalConfirm.textContent = options.confirmText || (confirmation ? 'Confirm' : 'Close');
-    modalConfirm.classList.toggle('button-danger', typeInfo.tone === 'danger');
-    modalConfirm.classList.toggle('button-primary', typeInfo.tone !== 'danger');
-    modalCancel.hidden = !confirmation;
-    modalCancel.textContent = options.cancelText || 'Cancel';
-    modalIndicator?.setAttribute('aria-label', typeInfo.label);
-
-    return new Promise((resolve) => {
-        modalResolver = resolve;
-        modal.showModal();
-        modalConfirm.focus();
+    const typeInfo = getTypeInfo(type);
+    const result = await Swal.fire({
+        titleText: options.title ?? (confirmation ? typeInfo.confirmTitle : typeInfo.label),
+        text: options.message ?? (confirmation ? typeInfo.confirmMessage : ''),
+        icon: options.icon || typeInfo.icon,
+        showCancelButton: confirmation,
+        confirmButtonText: options.confirmText ?? (confirmation ? typeInfo.confirmText : 'Close'),
+        cancelButtonText: options.cancelText ?? 'Cancel',
+        reverseButtons: confirmation,
+        focusCancel: confirmation,
+        allowOutsideClick: !confirmation,
+        buttonsStyling: false,
+        customClass: createPopupClasses(type),
+        background: isDarkTheme() ? '#1e293b' : '#ffffff',
+        color: isDarkTheme() ? '#e2e8f0' : '#1e293b',
     });
+
+    return result.isConfirmed;
 };
+
+const toast = Swal.mixin({
+    toast: true,
+    position: 'top-end',
+    showConfirmButton: false,
+    showCloseButton: true,
+    timerProgressBar: true,
+    buttonsStyling: false,
+    customClass: {
+        popup: 'hris-swal-toast',
+        title: 'hris-swal-title',
+        htmlContainer: 'hris-swal-message',
+    },
+});
 
 window.HrisModal = {
-    confirm: (options) => openModal(options, true),
-    show: (options) => openModal(options, false),
+    confirm: (options) => showHrisModal(options, true),
+    show: (options) => showHrisModal(options, false),
 };
 
 window.hrisNotify = (type, title, message) => {
-    const region = document.getElementById('hris-toast-region');
-    if (!region) {
-        console.error(`[HRIS ${type}] ${title}: ${message}`);
-        return;
-    }
+    const notificationType = modalTypes[type] ? type : 'info';
+    const key = `${notificationType}\u0000${title}\u0000${message}`;
+    if (recentToasts.has(key)) return;
 
-    const notice = document.createElement('section');
-    notice.className = `hris-toast hris-toast-${modalTypes[type]?.tone ?? 'info'}`;
-    notice.setAttribute('role', type === 'error' ? 'alert' : 'status');
-    notice.dataset.notificationKey = `${type}\u0000${title}\u0000${message}`;
+    recentToasts.set(key, true);
+    window.setTimeout(() => recentToasts.delete(key), 1500);
 
-    const copy = document.createElement('div');
-    copy.className = 'hris-toast-copy';
-    const heading = document.createElement('strong');
-    heading.textContent = title;
-    const description = document.createElement('p');
-    description.textContent = message;
-    copy.append(heading, description);
-
-    const dismiss = document.createElement('button');
-    dismiss.type = 'button';
-    dismiss.className = 'hris-notice-dismiss';
-    dismiss.textContent = 'Dismiss';
-    dismiss.setAttribute('aria-label', 'Dismiss notification');
-    dismiss.addEventListener('click', () => notice.remove());
-    notice.append(copy, dismiss);
-
-    const duplicate = [...region.children].find((item) => item.dataset.notificationKey === notice.dataset.notificationKey);
-    duplicate?.remove();
-    region.append(notice);
-
-    if (type !== 'error') {
-        window.setTimeout(() => notice.remove(), type === 'warning' ? 10000 : 7000);
-    }
+    const isPersistent = notificationType === 'error';
+    toast.fire({
+        icon: getTypeInfo(notificationType).icon,
+        titleText: String(title || getTypeInfo(notificationType).label),
+        text: String(message || ''),
+        timer: isPersistent ? undefined : notificationType === 'warning' ? 8000 : 5000,
+        timerProgressBar: !isPersistent,
+        background: isDarkTheme() ? '#1e293b' : '#ffffff',
+        color: isDarkTheme() ? '#e2e8f0' : '#1e293b',
+    });
 };
+
+window.HrisAlerts = {
+    success: (title, message = '') => window.hrisNotify('success', title, message),
+    error: (title, message = '') => window.hrisNotify('error', title, message),
+    warning: (title, message = '') => window.hrisNotify('warning', title, message),
+    info: (title, message = '') => window.hrisNotify('info', title, message),
+    question: (title, message = '') => window.hrisNotify('question', title, message),
+    toast: (type, title, message = '') => window.hrisNotify(type, title, message),
+    confirm: (options = {}) => window.HrisModal.confirm(options),
+    confirmDelete: (options = {}) => window.HrisModal.confirm({
+        ...options,
+        type: 'delete',
+        confirmText: options.confirmText ?? 'Delete Record',
+    }),
+    confirmApproval: (options = {}) => window.HrisModal.confirm({
+        ...options,
+        type: 'approval',
+        confirmText: options.confirmText ?? 'Approve Request',
+    }),
+    confirmRejection: (options = {}) => window.HrisModal.confirm({
+        ...options,
+        type: 'rejection',
+        confirmText: options.confirmText ?? 'Reject Request',
+    }),
+    loading: (title = 'Updating HRIS records', message = 'Please wait while the HRIS records are updated.') => {
+        return Swal.fire({
+            titleText: title,
+            text: message,
+            allowOutsideClick: false,
+            allowEscapeKey: false,
+            showConfirmButton: false,
+            buttonsStyling: false,
+            customClass: createPopupClasses('info'),
+            background: isDarkTheme() ? '#1e293b' : '#ffffff',
+            color: isDarkTheme() ? '#e2e8f0' : '#1e293b',
+            didOpen: () => Swal.showLoading(),
+        });
+    },
+    closeLoading: () => Swal.close(),
+};
+
+const flashStack = document.querySelector('[data-hris-flash]');
+if (flashStack) {
+    const notices = [...flashStack.querySelectorAll('.hris-notice')].map((notice) => {
+        const copy = notice.querySelector('.hris-notice-copy');
+        const type = ['success', 'warning', 'error'].find((name) => notice.classList.contains(`hris-notice-${name}`)) || 'info';
+        const title = copy?.querySelector('strong')?.textContent?.trim() || getTypeInfo(type).label;
+        const message = [
+            copy?.querySelector('p')?.textContent?.trim(),
+            ...[...(copy?.querySelectorAll('li') ?? [])].map((item) => item.textContent?.trim()),
+        ].filter(Boolean).join('\n');
+
+        return { type, title, message };
+    });
+
+    if (notices.length) {
+        const type = notices.find((notice) => notice.type === 'error')?.type
+            || notices.find((notice) => notice.type === 'warning')?.type
+            || notices[0].type;
+        const hasValidationErrors = flashStack.querySelector('.hris-notice-copy ul');
+        const title = notices.length === 1 && !hasValidationErrors
+            ? notices[0].message || notices[0].title
+            : notices.length === 1 ? notices[0].title : '';
+        const message = notices.length === 1 && title === notices[0].message
+            ? ''
+            : notices.map((notice) => notice.message || notice.title).filter(Boolean).join('\n');
+
+        if (notices.length === 1 && (type === 'success' || type === 'info')) {
+            window.hrisNotify(type, notices[0].message || notices[0].title, '');
+        } else {
+            window.HrisModal.show({ type, title, message });
+        }
+        flashStack.remove();
+    }
+}
 
 document.addEventListener('click', (event) => {
     if (!(event.target instanceof Element)) return;
     event.target.closest('[data-dismiss-notice]')?.closest('.hris-notice')?.remove();
-});
-
-modalCancel?.addEventListener('click', () => finishModal(false));
-modalConfirm?.addEventListener('click', () => finishModal(true));
-modal?.addEventListener('cancel', (event) => {
-    event.preventDefault();
-    finishModal(false);
-});
-modal?.addEventListener('click', (event) => {
-    if (event.target === modal) finishModal(false);
-});
-modal?.addEventListener('close', () => {
-    const resolve = modalResolver;
-    modalResolver = null;
-    resolve?.(false);
 });
 
 document.addEventListener('submit', (event) => {
@@ -176,10 +274,13 @@ document.addEventListener('submit', (event) => {
         if (form.dataset.hrisConfirmPending === 'true' || form.dataset.hrisSubmitting === 'true') return;
 
         const statusChoice = form.querySelector('[data-confirm-status]');
-        let message = confirmSource.dataset.confirmMessage || 'Please confirm that you want to continue.';
+        let message = confirmSource.dataset.confirmMessage
+            || `Review the details for “${confirmTitle.replace(/[?]+$/, '').trim()}” before continuing.`;
         let title = confirmTitle;
         let type = confirmSource.dataset.confirmType || 'form';
-        let confirmText = confirmSource.dataset.confirmText || 'Continue';
+        let confirmText = confirmSource.dataset.confirmText
+            || modalTypes[type]?.confirmText
+            || 'Continue';
 
         if (statusChoice?.value === 'Approved') {
             title = 'Approve Attendance Exception?';
@@ -191,6 +292,12 @@ document.addEventListener('submit', (event) => {
             message = 'Confirm that this attendance exception should be rejected.';
             type = 'rejection';
             confirmText = 'Reject Exception';
+        } else if (submitter?.value === 'endorse'
+            && form.querySelector('[name="recommendation"]')?.value === 'For disapproval') {
+            title = 'Recommend Disapproval of Leave Application?';
+            message = 'Submit a recommendation to disapprove this leave application. The authorized final reviewer will make the separate final decision.';
+            type = 'rejection';
+            confirmText = 'Submit Recommendation';
         }
 
         form.dataset.hrisConfirmPending = 'true';
@@ -209,7 +316,12 @@ document.addEventListener('submit', (event) => {
             else form.requestSubmit();
         }).catch((error) => {
             delete form.dataset.hrisConfirmPending;
-            window.hrisNotify('error', 'Confirmation failed', error.message || 'The action was not submitted.');
+            const actionLabel = confirmTitle.replace(/[?]+$/, '').trim();
+            window.hrisNotify(
+                'error',
+                `${actionLabel} could not be confirmed`,
+                'The form was not submitted. Please try again.'
+            );
         });
 
         return;
@@ -231,6 +343,129 @@ document.addEventListener('submit', (event) => {
         button.disabled = true;
     });
 });
+
+const emailVerificationForm = document.querySelector('[data-email-verification-form]');
+if (emailVerificationForm) {
+    const otpInputs = [...emailVerificationForm.querySelectorAll('[data-otp-digit]')];
+    const codeInput = emailVerificationForm.querySelector('[data-otp-code]');
+    const otpGroup = emailVerificationForm.querySelector('[data-otp-inputs]');
+    const fallbackLabel = emailVerificationForm.querySelector('[data-otp-fallback-label]');
+    const clientError = emailVerificationForm.querySelector('[data-otp-client-error]');
+
+    if (otpInputs.length === 6 && codeInput instanceof HTMLInputElement && otpGroup) {
+        codeInput.type = 'hidden';
+        codeInput.required = false;
+        codeInput.removeAttribute('pattern');
+        if (fallbackLabel) fallbackLabel.hidden = true;
+        otpGroup.hidden = false;
+
+        const syncCode = () => {
+            codeInput.value = otpInputs.map((input) => input.value).join('');
+            if (clientError) {
+                clientError.hidden = true;
+                clientError.textContent = '';
+            }
+        };
+
+        const fillCode = (value) => {
+            const digits = value.replace(/\D/g, '').slice(0, 6);
+            otpInputs.forEach((input, index) => {
+                input.value = digits[index] ?? '';
+            });
+            syncCode();
+            otpInputs[Math.min(digits.length, otpInputs.length - 1)].focus();
+        };
+
+        otpInputs.forEach((input, index) => {
+            input.addEventListener('input', () => {
+                const digits = input.value.replace(/\D/g, '');
+                if (digits.length > 1) {
+                    fillCode(digits);
+                    return;
+                }
+
+                input.value = digits.slice(0, 1);
+                syncCode();
+                if (input.value && otpInputs[index + 1]) otpInputs[index + 1].focus();
+            });
+
+            input.addEventListener('paste', (event) => {
+                const pasted = event.clipboardData?.getData('text') ?? '';
+                const digits = pasted.replace(/\D/g, '').slice(0, 6);
+                if (!digits) return;
+
+                event.preventDefault();
+                fillCode(digits);
+            });
+
+            input.addEventListener('keydown', (event) => {
+                if (event.key === 'Backspace' && !input.value && index > 0) {
+                    event.preventDefault();
+                    otpInputs[index - 1].value = '';
+                    otpInputs[index - 1].focus();
+                    syncCode();
+                    return;
+                }
+
+                if (event.key === 'ArrowLeft' && index > 0) {
+                    event.preventDefault();
+                    otpInputs[index - 1].focus();
+                } else if (event.key === 'ArrowRight' && index < otpInputs.length - 1) {
+                    event.preventDefault();
+                    otpInputs[index + 1].focus();
+                } else if (event.key.length === 1
+                    && !/^\d$/.test(event.key)
+                    && !event.ctrlKey
+                    && !event.metaKey
+                    && !event.altKey) {
+                    event.preventDefault();
+                }
+            });
+        });
+
+        emailVerificationForm.addEventListener('submit', (event) => {
+            syncCode();
+            if (/^\d{6}$/.test(codeInput.value)) return;
+
+            event.preventDefault();
+            if (clientError) {
+                clientError.textContent = 'Enter all six digits of the verification code.';
+                clientError.hidden = false;
+            }
+            otpInputs.find((input) => !input.value)?.focus();
+        }, true);
+    }
+}
+
+const emailOtpResendForm = document.querySelector('[data-email-otp-resend]');
+if (emailOtpResendForm) {
+    const resendButton = emailOtpResendForm.querySelector('[data-resend-button]');
+    const countdown = emailOtpResendForm.querySelector('[data-resend-countdown]');
+    let remaining = Number.parseInt(emailOtpResendForm.dataset.cooldownSeconds ?? '0', 10);
+    remaining = Number.isFinite(remaining) ? Math.max(0, remaining) : 0;
+
+    if (resendButton instanceof HTMLButtonElement && countdown) {
+        const renderCountdown = () => {
+            resendButton.disabled = remaining > 0;
+            if (remaining > 0) {
+                const minutes = Math.floor(remaining / 60).toString().padStart(2, '0');
+                const seconds = (remaining % 60).toString().padStart(2, '0');
+                countdown.textContent = `You can resend a code in ${minutes}:${seconds}.`;
+            } else {
+                countdown.textContent = 'You can request a new code now.';
+            }
+        };
+
+        renderCountdown();
+        if (remaining > 0) {
+            const timer = window.setInterval(() => {
+                remaining = Math.max(0, remaining - 1);
+                renderCountdown();
+                if (remaining === 0) window.clearInterval(timer);
+            }, 1000);
+        }
+    }
+}
 
 window.publicNavigation = () => ({
     menuOpen: false,
@@ -768,7 +1003,11 @@ window.workplaceAssignments = (options) => ({
     async confirmDepartmentAssignment(event) {
         const roster = this.departmentRoster();
         if (this.previewBusy || this.previewError) {
-            window.hrisNotify('error', 'Workplace assignment unavailable', this.previewError || 'Wait for the affected employee list to finish loading.');
+            window.hrisNotify(
+                'error',
+                'Department workplace assignment unavailable',
+                this.previewError || 'Wait for the affected employee list to finish loading before saving the department workplace assignment.'
+            );
             return;
         }
         if (!roster.length) {
@@ -789,7 +1028,11 @@ window.workplaceAssignments = (options) => ({
                 confirmText: 'Apply Assignment',
             });
         } catch (error) {
-            window.hrisNotify('error', 'Confirmation failed', error.message || 'The assignment was not submitted.');
+            window.hrisNotify(
+                'error',
+                'Department workplace assignment could not be confirmed',
+                'No department workplace changes were submitted. Please try again.'
+            );
             return;
         }
         if (!confirmed) return;
@@ -817,7 +1060,11 @@ window.workplaceAssignments = (options) => ({
                 confirmText: 'Assign Workplace',
             });
         } catch (error) {
-            window.hrisNotify('error', 'Confirmation failed', error.message || 'The assignment was not submitted.');
+            window.hrisNotify(
+                'error',
+                'Employee workplace assignment could not be confirmed',
+                'No employee workplace changes were submitted. Please try again.'
+            );
             return;
         }
         if (!confirmed) return;

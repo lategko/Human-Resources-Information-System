@@ -11,6 +11,11 @@ class PublicLandingWorkflowTest extends TestCase
         $this->get(route('home'))
             ->assertOk()
             ->assertSee('href="#how-it-works"', false)
+            ->assertSee('MUNICIPALITY OF CAMALANIUGAN - HRMO')
+            ->assertSee('A centralized Human Resource Information System designed to streamline HR processes, manage personnel records, and enhance workforce efficiency in the Municipality of Camalaniugan.')
+            ->assertSee('PUBLIC SERVICE - GOOD GOVERNANCE')
+            ->assertSee('Peoples • Progress • Excellence')
+            ->assertSee('A More Efficient, Transparent, and People-Centered Local Government')
             ->assertSee('How It Works')
             ->assertSee('How the HRIS Works')
             ->assertSee('Submitted applications go to HRMO verification before Office Head review')
@@ -39,6 +44,7 @@ class PublicLandingWorkflowTest extends TestCase
             ->assertSee('href="#roles"', false)
             ->assertSee('id="roles"', false)
             ->assertSee(route('login'), false)
+            ->assertSee('Sign In')
             ->assertSee('Access HRIS Portal')
             ->assertSee('Ready to Access Municipal HR Services?');
     }

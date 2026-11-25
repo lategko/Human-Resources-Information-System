@@ -71,7 +71,19 @@ class LeaveReviewController extends Controller
         $data = $request->validate($rules);
 
         $workflow->act($application, $user, $data);
+        $reviewerLabel = $user->isMayor() ? 'authorized alternate reviewer' : 'Office Head';
+        $message = match ($data['action']) {
+            'assign_hr_reviewer' => "An alternate HR reviewer has been assigned to leave application #{$application->id}, which is now queued for HRMO verification.",
+            'assign_final_approver' => "The designated final approver has been assigned to Mayor leave application #{$application->id}.",
+            'endorse' => $data['recommendation'] === 'For disapproval'
+                ? "The {$reviewerLabel} has recommended disapproval for leave application #{$application->id}; the authorized final reviewer will make the separate decision."
+                : "The {$reviewerLabel} has recommended approval for leave application #{$application->id}; final approval is still pending.",
+            'verify' => "HRMO verification for leave application #{$application->id} is complete; it has been sent to the assigned Office Head or authorized alternate.",
+            'approve' => "Leave application #{$application->id} has been approved by the authorized final reviewer.",
+            'disapprove' => "Leave application #{$application->id} has been disapproved, and the reason has been recorded.",
+            'return' => "Leave application #{$application->id} has been returned to the employee for correction.",
+        };
 
-        return redirect()->route('leave.show', $application)->with('success', 'The leave application review has been recorded.');
+        return redirect()->route('leave.show', $application)->with('success', $message);
     }
 }

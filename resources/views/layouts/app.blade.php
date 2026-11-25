@@ -23,7 +23,7 @@
         default => 'Municipal HRIS',
     };
 @endphp
-<body data-role-theme="{{ $roleTheme }}" x-data="{ sidebarOpen: false, sidebarCollapsed: false, profileOpen: false, notificationOpen: false, notificationUnreadCount: {{ $unreadCount }}, init() { const resetCollapsedSidebar = () => { if (window.matchMedia('(max-width: 1060px)').matches) this.sidebarCollapsed = false; }; resetCollapsedSidebar(); window.addEventListener('resize', resetCollapsedSidebar, { passive: true }); }, async markNotification(url, redirectUrl = null) { const response = await fetch(url, { method: 'POST', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content } }); if (!response.ok) throw new Error('Unable to update notification.'); const result = await response.json(); this.notificationUnreadCount = result.unread_count; if (redirectUrl) window.location.assign(redirectUrl); else window.location.reload(); }, async markAllNotifications() { const response = await fetch('{{ route('notifications.read-all') }}', { method: 'POST', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content } }); if (!response.ok) throw new Error('Unable to mark notifications as read.'); const result = await response.json(); this.notificationUnreadCount = result.unread_count; document.querySelectorAll('.notification-dropdown-item').forEach((row) => row.classList.remove('is-unread')); document.querySelectorAll('.notification-dropdown-dot').forEach((dot) => dot.classList.remove('is-unread')); document.querySelectorAll('.notification-dropdown-mark').forEach((button) => button.remove()); } }" @keydown.escape.window="notificationOpen=false">
+<body data-role-theme="{{ $roleTheme }}" x-data="{ sidebarOpen: false, sidebarCollapsed: false, profileOpen: false, notificationOpen: false, notificationUnreadCount: {{ $unreadCount }}, init() { const resetCollapsedSidebar = () => { if (window.matchMedia('(max-width: 1060px)').matches) this.sidebarCollapsed = false; }; resetCollapsedSidebar(); window.addEventListener('resize', resetCollapsedSidebar, { passive: true }); }, async markNotification(url, redirectUrl = null) { const response = await fetch(url, { method: 'POST', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content } }); if (!response.ok) throw new Error('This notification could not be marked as read. Refresh the page and try again.'); const result = await response.json(); this.notificationUnreadCount = result.unread_count; if (redirectUrl) window.location.assign(redirectUrl); else window.location.reload(); }, async markAllNotifications() { const response = await fetch('{{ route('notifications.read-all') }}', { method: 'POST', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content } }); if (!response.ok) throw new Error('Unread notifications could not be marked as read. Refresh the page and try again.'); const result = await response.json(); this.notificationUnreadCount = result.unread_count; document.querySelectorAll('.notification-dropdown-item').forEach((row) => row.classList.remove('is-unread')); document.querySelectorAll('.notification-dropdown-dot').forEach((dot) => dot.classList.remove('is-unread')); document.querySelectorAll('.notification-dropdown-mark').forEach((button) => button.remove()); } }" @keydown.escape.window="notificationOpen=false">
     <div class="app-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
         <aside id="primary-navigation" class="sidebar" :class="{ 'sidebar-open': sidebarOpen }" :inert="sidebarCollapsed" aria-label="Primary navigation">
             <a class="brand" href="{{ route('dashboard') }}" @click="sidebarOpen=false">
@@ -167,7 +167,7 @@
                                     <strong>Notifications</strong>
                                     <span x-text="notificationUnreadCount === 1 ? '1 unread' : notificationUnreadCount + ' unread'"></span>
                                 </div>
-                                <button type="button" class="notification-mark-all" @click="markAllNotifications().catch(error => window.hrisNotify('error', 'Notification update failed', error.message))" :disabled="notificationUnreadCount === 0">Mark all as read</button>
+                                <button type="button" class="notification-mark-all" @click="markAllNotifications().catch(error => window.hrisNotify('error', 'Unread notifications were not updated', error.message))" :disabled="notificationUnreadCount === 0">Mark all as read</button>
                             </div>
                             <div class="notification-dropdown-body">
                                 @forelse($dropdownNotifications as $notification)
@@ -193,14 +193,14 @@
                                     @endphp
                                     <article class="notification-dropdown-item {{ $notification->read_at ? '' : 'is-unread' }}">
                                         <span class="notification-dropdown-dot {{ $notification->read_at ? '' : 'is-unread' }}" aria-hidden="true"></span>
-                                        <button type="button" class="notification-dropdown-main" @click="markNotification('{{ route('notifications.read', $notification->id) }}', {{ $applicationUrl ? "'" . e($applicationUrl) . "'" : 'null' }}).catch(error => window.hrisNotify('error', 'Notification update failed', error.message))">
+                                        <button type="button" class="notification-dropdown-main" @click="markNotification('{{ route('notifications.read', $notification->id) }}', {{ $applicationUrl ? "'" . e($applicationUrl) . "'" : 'null' }}).catch(error => window.hrisNotify('error', 'Notification was not marked as read', error.message))">
                                             <span class="notification-category">{{ $category }}</span>
                                             <strong>{{ $message }}</strong>
                                             <small>{{ $description }}</small>
                                             <time datetime="{{ $notification->created_at->toIso8601String() }}">{{ $notification->created_at->format('M j, Y · g:i A') }}</time>
                                         </button>
                                         @unless($notification->read_at)
-                                            <button type="button" class="notification-dropdown-mark" @click.stop="markNotification('{{ route('notifications.read', $notification->id) }}').catch(error => window.hrisNotify('error', 'Notification update failed', error.message))">Mark as read</button>
+                                            <button type="button" class="notification-dropdown-mark" @click.stop="markNotification('{{ route('notifications.read', $notification->id) }}').catch(error => window.hrisNotify('error', 'Notification was not marked as read', error.message))">Mark as read</button>
                                         @endunless
                                     </article>
                                 @empty
@@ -238,6 +238,5 @@
             </section>
         </main>
     </div>
-    @include('shared.confirmation-modal')
 </body>
 </html>

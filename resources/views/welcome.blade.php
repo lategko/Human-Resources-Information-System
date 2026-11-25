@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#12365b">
+    <meta name="theme-color" content="#092c54">
     <meta name="description" content="The Municipality of Camalaniugan Human Resource Information System public portal.">
     <link rel="icon" type="image/webp" href="{{ asset('image/hrislogo.webp') }}">
     <link rel="preload" as="image" href="{{ asset('image/backgroundlanding.jpg') }}" fetchpriority="high">
@@ -27,30 +27,43 @@
             <a href="#how-it-works" :aria-current="activeSection === 'how-it-works' ? 'page' : null" @click="menuOpen = false">How It Works</a>
             <a href="#roles" :aria-current="activeSection === 'roles' ? 'page' : null" @click="menuOpen = false">Roles</a>
             <a href="#contact" :aria-current="activeSection === 'contact' ? 'page' : null" @click="menuOpen = false">Contact</a>
-            <a class="button button-primary public-sign-in" href="{{ route('login') }}">Sign in</a>
+            <a class="button button-primary public-sign-in" href="{{ route('login') }}">Sign In</a>
         </nav>
     </header>
 
     <main>
         <section id="home" class="public-hero" aria-labelledby="hero-title">
+            <svg class="public-hero-decoration public-hero-decoration-top" viewBox="0 0 500 170" preserveAspectRatio="none" aria-hidden="true">
+                <path d="M0 0h500C360 24 170 82 0 158V0Z" fill="#061D3A" fill-opacity=".72"/>
+                <path d="M0 145C155 78 340 24 500 0" fill="none" stroke="#F4B942" stroke-width="7"/>
+                <path d="M0 160C155 93 340 39 500 15" fill="none" stroke="#092C54" stroke-width="8"/>
+            </svg>
+            <svg class="public-hero-decoration public-hero-decoration-bottom" viewBox="0 0 1100 130" preserveAspectRatio="none" aria-hidden="true">
+                <path d="M-20 92C215 28 420 122 660 82S970 21 1120 30" fill="none" stroke="#061D3A" stroke-width="24"/>
+                <path d="M-20 78C215 14 420 108 660 68S970 7 1120 16" fill="none" stroke="#F4B942" stroke-width="7"/>
+            </svg>
             <div class="public-hero-inner">
                 <div class="public-hero-copy">
-                    <span class="public-eyebrow"><span class="public-eyebrow-mark" aria-hidden="true"></span> Municipality of Camalaniugan · HRMO</span>
+                    <span class="public-eyebrow"><span class="public-eyebrow-mark" aria-hidden="true"></span> MUNICIPALITY OF CAMALANIUGAN - HRMO</span>
                     <h1 id="hero-title">Municipal Service.<br><span>People First.</span></h1>
-                    <p>A centralized Human Resource Information System designed to improve employee services, personnel management, attendance monitoring, and administrative efficiency in the Municipality of Camalaniugan.</p>
+                    <p>A centralized Human Resource Information System designed to streamline HR processes, manage personnel records, and enhance workforce efficiency in the Municipality of Camalaniugan.</p>
                     <div class="public-hero-actions">
                         <a class="button button-primary public-hero-primary" href="{{ route('login') }}">Access HRIS Portal</a>
                         <a class="button public-hero-secondary" href="#services">Explore Our Services</a>
                         <a class="button public-hero-secondary public-hero-workflow" href="#how-it-works">How It Works</a>
                     </div>
-                    <p class="public-hero-note">Secure access for authorized municipal personnel</p>
+                    <div class="public-hero-statement">
+                        <span aria-hidden="true"></span>
+                        <p>A More Efficient, Transparent, and People-Centered Local Government</p>
+                        <span aria-hidden="true"></span>
+                    </div>
                 </div>
                 <div class="public-hero-identity">
                     <img src="{{ asset('image/hrislogo.webp') }}" alt="Municipality of Camalaniugan HRMO seal" width="72" height="72" decoding="async">
                     <div>
-                        <span>PUBLIC SERVICE · CAGAYAN</span>
+                        <span>PUBLIC SERVICE - GOOD GOVERNANCE</span>
                         <strong>Human Resource<br>Information System</strong>
-                        <small>Province of Cagayan, Philippines</small>
+                        <small>Peoples • Progress • Excellence</small>
                     </div>
                 </div>
             </div>

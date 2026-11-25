@@ -184,7 +184,7 @@ class EmployeeController extends Controller
             return $employee;
         });
 
-        return redirect()->route('employees.show', $employee)->with('success', 'Employee record created.');
+        return redirect()->route('employees.show', $employee)->with('success', "Employee record for {$employee->full_name} has been created.");
     }
 
     public function show(Request $request, Employee $employee): View
@@ -300,7 +300,7 @@ class EmployeeController extends Controller
             $auditLogger->record('employee.updated', $employee);
         });
 
-        return redirect()->route('employees.show', $employee)->with('success', 'Employee record updated.');
+        return redirect()->route('employees.show', $employee)->with('success', "Employee record for {$employee->full_name} has been updated.");
     }
 
     public function archive(Employee $employee, AuditLogger $auditLogger): RedirectResponse
@@ -310,7 +310,7 @@ class EmployeeController extends Controller
         $employee->delete();
         $auditLogger->record('employee.archived', $employee);
 
-        return redirect()->route('employees.index')->with('success', 'Employee record archived.');
+        return redirect()->route('employees.index')->with('success', "Employee record for {$employee->full_name} has been archived and removed from active personnel.");
     }
 
     private function validated(Request $request, ?Employee $employee = null): array

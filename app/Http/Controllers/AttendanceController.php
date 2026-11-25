@@ -687,7 +687,7 @@ class AttendanceController extends Controller
             ]);
         });
 
-        return back()->with('success', 'Attendance exception request reviewed.');
+        return back()->with('success', 'The attendance exception request has been '.strtolower($data['status']).'.');
     }
 
     public function storeSchedule(Request $request, AuditLogger $auditLogger): RedirectResponse

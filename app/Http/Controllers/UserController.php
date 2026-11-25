@@ -164,7 +164,7 @@ class UserController extends Controller
             $activationRequired ? 'warning' : 'success',
             $activationRequired
                 ? 'Employee account created without an email. Add a verified contact address and send an activation link from account management.'
-                : 'User account created.'
+                : "User account for {$user->name} has been created."
         );
     }
 
@@ -264,7 +264,7 @@ class UserController extends Controller
             'department_id' => Department::where('head_user_id', $user->id)->value('id'),
         ]);
 
-        return redirect()->route('users.index')->with('success', 'User account updated.');
+        return redirect()->route('users.index')->with('success', "User account for {$user->name} and its role-based access settings have been updated.");
     }
 
     public function sendActivationLink(Request $request, User $user, AuditLogger $auditLogger): RedirectResponse

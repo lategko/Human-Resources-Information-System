@@ -40,10 +40,10 @@
             </div>
         @endif
 
-        <div class="panel-heading account-form-section-heading"><div><h2>Account information</h2><p>Sign in using your username or email address. Email is optional; a new address must be verified.</p></div></div>
+        <div class="panel-heading account-form-section-heading"><div><h2>Account information</h2><p>Sign in using your username or email address. @if($user->isAdministrator())A changed Admin email is not saved until its verification code is confirmed.@else Email is optional; a new address must be verified.@endif</p></div></div>
         <div class="form-grid">
             <label>Username<input name="username" value="{{ old('username', $user->username) }}" autocomplete="username" minlength="3" maxlength="100" @required((bool) $user->employee)></label>
-            <label>Email address (optional)<input type="email" name="email" value="{{ old('email', $user->email) }}" autocomplete="email"></label>
+            <label>{{ $user->isAdministrator() ? 'Email address' : 'Email address (optional)' }}<input type="email" name="email" value="{{ old('email', $pendingEmail ?? $user->email) }}" autocomplete="email" @required($user->isAdministrator())></label>
             <label class="field-span">New password (optional)<input type="password" name="new_password" autocomplete="new-password" minlength="12"><small>Enter your current password below to confirm this change.</small></label>
             <label>Current password<input type="password" name="current_password" autocomplete="current-password"><small>Required to change sign-in details.</small></label>
             <label>Confirm new password<input type="password" name="new_password_confirmation" autocomplete="new-password" minlength="12"></label>
@@ -59,4 +59,33 @@
             <button class="button button-primary" type="submit" data-loading-text="Saving…">Save changes</button>
         </div>
     </form>
+
+    @if(! $pendingEmail && $errors->has('code'))
+        <span class="field-error top-space" role="alert">{{ $errors->first('code') }}</span>
+    @endif
+
+    @if($user->isAdministrator() && $pendingEmail)
+        <section class="panel form-panel account-edit-form top-space">
+            <div class="panel-heading">
+                <div>
+                    <h2>Verify new email address</h2>
+                    <p>A code was sent to {{ $pendingEmail }}. Your current address, {{ $user->email }}, remains active until verification succeeds.</p>
+                </div>
+            </div>
+            <form method="POST" action="{{ route('account.profile.email-change.verify') }}" class="form-stack">
+                @csrf
+                <label for="email-change-code">Six-digit verification code
+                    <input id="email-change-code" type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+                </label>
+                @error('code')<span class="field-error" role="alert">{{ $message }}</span>@enderror
+                <div class="form-actions">
+                    <button class="button button-primary" type="submit">Verify new email</button>
+                </div>
+            </form>
+            <form method="POST" action="{{ route('account.profile.email-change.resend') }}">
+                @csrf
+                <button class="button button-outline" type="submit">Resend verification code</button>
+            </form>
+        </section>
+    @endif
 @endsection

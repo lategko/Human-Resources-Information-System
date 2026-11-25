@@ -32,6 +32,13 @@ Route::view('/', 'welcome')->name('home');
 Route::middleware('guest')->group(function () {
     Route::get('/login', [AuthenticatedSessionController::class, 'create'])->name('login');
     Route::post('/login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:6,1')->name('login.store');
+    Route::get('/email/verify-code', [EmailVerificationController::class, 'initialChallenge'])->name('email.verify.otp');
+    Route::post('/email/verify-code', [EmailVerificationController::class, 'verifyInitial'])
+        ->middleware('throttle:6,1')
+        ->name('email.verify.otp.store');
+    Route::post('/email/verify-code/resend', [EmailVerificationController::class, 'resendInitial'])
+        ->middleware('throttle:3,1')
+        ->name('email.verify.otp.resend');
     Route::get('/forgot-password', [PasswordResetLinkController::class, 'create'])->name('password.request');
     Route::post('/forgot-password', [PasswordResetLinkController::class, 'store'])->middleware('throttle:6,1')->name('password.email');
     Route::get('/mfa/verify', [MfaChallengeController::class, 'create'])->name('mfa.verify');
@@ -57,6 +64,12 @@ Route::middleware(['auth', 'active', 'account.setup'])->group(function () {
     Route::get('/account/profile', AccountProfileController::class)->name('account.profile');
     Route::get('/account/profile/edit', [AccountProfileController::class, 'edit'])->name('account.profile.edit');
     Route::put('/account/profile', [AccountProfileController::class, 'update'])->name('account.profile.update');
+    Route::post('/account/profile/email-change/verify', [EmailVerificationController::class, 'verifyEmailChange'])
+        ->middleware(['role:admin', 'throttle:6,1'])
+        ->name('account.profile.email-change.verify');
+    Route::post('/account/profile/email-change/resend', [EmailVerificationController::class, 'resendEmailChange'])
+        ->middleware(['role:admin', 'throttle:3,1'])
+        ->name('account.profile.email-change.resend');
     Route::post('/account/profile/photo', [AccountProfileController::class, 'updatePhoto'])->name('account.profile.photo');
     Route::delete('/account/profile/photo', [AccountProfileController::class, 'deletePhoto'])->name('account.profile.photo.delete');
     Route::put('/account/profile/password', [AccountProfileController::class, 'updatePassword'])->name('account.profile.password');

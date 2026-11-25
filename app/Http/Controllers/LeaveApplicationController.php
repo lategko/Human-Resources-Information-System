@@ -164,8 +164,8 @@ class LeaveApplicationController extends Controller
         }
 
         return redirect()->route('leave.show', $application)->with('success', $submitted
-            ? 'Your leave application has been submitted for review.'
-            : 'Your draft has been saved.');
+            ? 'Your leave application has been submitted to the HRMO and approval workflow for review.'
+            : "Your leave application draft #{$application->id} has been saved. You can return to Leave Management to continue.");
     }
 
     public function show(LeaveApplication $application, LeaveWorkflowService $workflow): View
@@ -289,7 +289,7 @@ class LeaveApplicationController extends Controller
             $this->notifySubmissionReviewer($application);
         }
 
-        return redirect()->route('leave.show', $application)->with('success', 'Your application has been saved.');
+        return redirect()->route('leave.show', $application)->with('success', "Your leave application #{$application->id} has been saved.");
     }
 
     public function cancel(Request $request, LeaveApplication $application, AuditLogger $auditLogger): RedirectResponse
@@ -318,7 +318,7 @@ class LeaveApplicationController extends Controller
             $auditLogger->record('leave.cancelled', $locked);
         });
 
-        return redirect()->route('leave.index')->with('success', 'Leave application cancelled.');
+        return redirect()->route('leave.index')->with('success', "Leave application #{$application->id} has been cancelled and withdrawn from the approval workflow.");
     }
 
     public function print(LeaveApplication $application): View
