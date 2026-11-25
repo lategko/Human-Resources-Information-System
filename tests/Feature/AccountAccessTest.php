@@ -6,6 +6,10 @@ use App\Models\Department;
 use App\Models\Employee;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Notification;
+use Illuminate\Auth\Notifications\ResetPassword;
 use Tests\TestCase;
 
 class AccountAccessTest extends TestCase
@@ -32,6 +36,7 @@ class AccountAccessTest extends TestCase
                 $role => User::factory()->create([
                     'name' => ucfirst($role).' User',
                     'email' => $role.'@example.test',
+                    'email_verified_at' => now(),
                     'role' => $role,
                     'password' => 'InitialPassword123!',
                     'is_active' => true,
@@ -45,6 +50,11 @@ class AccountAccessTest extends TestCase
             'last_name' => 'User',
         ]);
         $department->update(['head_user_id' => $accounts['office_head']->id]);
+        foreach (['admin', 'mayor', 'office_head'] as $role) {
+            $accounts[$role]->update([
+                'mfa_recovery_codes' => [Hash::make('HRIS-TESTRECOVERY')],
+            ]);
+        }
 
         foreach ([
             'admin' => 'Administration overview',
@@ -52,10 +62,7 @@ class AccountAccessTest extends TestCase
             'office_head' => 'Department overview',
             'employee' => 'My workspace',
         ] as $role => $dashboardHeading) {
-            $this->post(route('login.store'), [
-                'email' => $accounts[$role]->email,
-                'password' => 'InitialPassword123!',
-            ])->assertRedirect(route('dashboard'));
+            $this->actingAs($accounts[$role]);
 
             $response = $this->get(route('dashboard'))->assertOk()->assertSee($dashboardHeading);
             preg_match('/<aside id="primary-navigation".*?>(.*?)<\/aside>/s', $response->getContent(), $sidebar);
@@ -96,7 +103,7 @@ class AccountAccessTest extends TestCase
         }
     }
 
-    public function test_login_rejects_an_incorrect_password_and_unknown_email(): void
+    public function test_login_uses_generic_feedback_for_wrong_password_and_unknown_email(): void
     {
         $user = User::factory()->create([
             'email' => 'authorized@example.test',
@@ -107,14 +114,83 @@ class AccountAccessTest extends TestCase
         $this->post(route('login.store'), [
             'email' => $user->email,
             'password' => 'IncorrectPassword123!',
-        ])->assertSessionHasErrors('email');
+        ])->assertSessionHasErrors('email')
+            ->assertSessionHasErrors(['email' => 'The provided username/email and password do not match our records.'])
+            ->assertSessionHas('_old_input.login', $user->email);
+        $this->assertArrayNotHasKey('password', session('_old_input', []));
         $this->assertGuest();
+        $this->get(route('login'))
+            ->assertSee('The provided username/email and password do not match our records.')
+            ->assertSee('aria-invalid="true"', false)
+            ->assertSee('value="authorized@example.test"', false)
+            ->assertDontSee('value="IncorrectPassword123!"', false)
+            ->assertSee('Dismiss');
 
         $this->post(route('login.store'), [
             'email' => 'unknown@example.test',
             'password' => 'CorrectPassword123!',
-        ])->assertSessionHasErrors('email');
+        ])->assertSessionHasErrors('email')
+            ->assertSessionHasErrors(['email' => 'The provided username/email and password do not match our records.']);
         $this->assertGuest();
+        $this->get(route('login'))
+            ->assertSee('The provided username/email and password do not match our records.')
+            ->assertSee('value="unknown@example.test"', false);
+    }
+
+    public function test_login_requires_both_credentials(): void
+    {
+        $this->from(route('login'))->post(route('login.store'), [
+            'login' => '',
+            'password' => '',
+        ])->assertRedirect(route('login'))
+            ->assertSessionHasErrors(['login', 'password']);
+        $this->assertGuest();
+        $this->get(route('login'))
+            ->assertSee('Enter your username or email address.')
+            ->assertSee('Enter your password.')
+            ->assertSee('aria-invalid="true"', false);
+    }
+
+    public function test_login_throttle_rejects_repeated_failed_attempts(): void
+    {
+        for ($attempt = 0; $attempt < 6; $attempt++) {
+            $this->from(route('login'))->post(route('login.store'), [
+                'login' => 'missing@example.test',
+                'password' => 'NotAValidPassword123!',
+            ])->assertRedirect(route('login'));
+        }
+
+        $this->post(route('login.store'), [
+            'login' => 'missing@example.test',
+            'password' => 'NotAValidPassword123!',
+        ])->assertStatus(429);
+    }
+
+    public function test_password_reset_requests_are_generic_for_known_and_unknown_emails(): void
+    {
+        Notification::fake();
+        $known = User::factory()->create([
+            'email' => 'known.reset@example.test',
+            'is_active' => true,
+        ]);
+
+        $knownResponse = $this->post(route('password.email'), [
+            'email' => $known->email,
+        ]);
+        $knownResponse->assertRedirect()
+            ->assertSessionHas('status', 'If an account matches this email address, a password setup link will be sent.');
+
+        $unknownResponse = $this->post(route('password.email'), [
+            'email' => 'unknown.reset@example.test',
+        ]);
+        $unknownResponse->assertRedirect()
+            ->assertSessionHas('status', 'If an account matches this email address, a password setup link will be sent.');
+
+        Notification::assertSentTo($known, ResetPassword::class);
+        Notification::assertNotSentTo(
+            User::factory()->create(['email' => 'notified-unused@example.test']),
+            ResetPassword::class
+        );
     }
 
     public function test_office_head_can_only_review_employee_records_in_their_assigned_department(): void
@@ -306,9 +382,15 @@ class AccountAccessTest extends TestCase
             'password' => 'InitialPassword123!',
         ])->assertRedirect(route('dashboard'));
         $this->post(route('logout'))->assertRedirect(route('login'));
+        $admin->update([
+            'mfa_recovery_codes' => [Hash::make('HRIS-ADMINRECOVERY')],
+        ]);
         $this->post(route('login.store'), [
             'email' => $admin->email,
             'password' => 'InitialPassword123!',
+        ])->assertRedirect(route('mfa.verify'));
+        $this->post(route('mfa.verify.store'), [
+            'code' => 'HRIS-ADMINRECOVERY',
         ])->assertRedirect(route('dashboard'));
 
         $this->get(route('users.index'))

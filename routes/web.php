@@ -8,6 +8,7 @@ use App\Http\Controllers\Auth\AuthenticatedSessionController;
 use App\Http\Controllers\Auth\EmailVerificationController;
 use App\Http\Controllers\Auth\NewPasswordController;
 use App\Http\Controllers\Auth\PasswordResetLinkController;
+use App\Http\Controllers\Auth\MfaChallengeController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DatabaseBackupController;
 use App\Http\Controllers\DepartmentController;
@@ -33,6 +34,8 @@ Route::middleware('guest')->group(function () {
     Route::post('/login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:6,1')->name('login.store');
     Route::get('/forgot-password', [PasswordResetLinkController::class, 'create'])->name('password.request');
     Route::post('/forgot-password', [PasswordResetLinkController::class, 'store'])->middleware('throttle:6,1')->name('password.email');
+    Route::get('/mfa/verify', [MfaChallengeController::class, 'create'])->name('mfa.verify');
+    Route::post('/mfa/verify', [MfaChallengeController::class, 'store'])->middleware('throttle:6,1')->name('mfa.verify.store');
     Route::get('/reset-password/{token}', [NewPasswordController::class, 'create'])->name('password.reset');
     Route::post('/reset-password', [NewPasswordController::class, 'store'])->middleware('throttle:6,1')->name('password.update');
 });
@@ -57,6 +60,9 @@ Route::middleware(['auth', 'active', 'account.setup'])->group(function () {
     Route::post('/account/profile/photo', [AccountProfileController::class, 'updatePhoto'])->name('account.profile.photo');
     Route::delete('/account/profile/photo', [AccountProfileController::class, 'deletePhoto'])->name('account.profile.photo.delete');
     Route::put('/account/profile/password', [AccountProfileController::class, 'updatePassword'])->name('account.profile.password');
+    Route::post('/account/profile/mfa/recovery-codes', [AccountProfileController::class, 'generateMfaRecoveryCodes'])
+        ->middleware('role:admin,mayor,office_head')
+        ->name('account.profile.mfa.recovery-codes');
     Route::get('/my-profile/edit', [EmployeeController::class, 'editPersonal'])->name('my-profile.edit');
     Route::put('/my-profile', [EmployeeController::class, 'updatePersonal'])->name('my-profile.update');
     Route::get('/attendance', [AttendanceController::class, 'index'])->name('attendance.index');

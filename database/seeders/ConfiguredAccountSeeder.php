@@ -139,6 +139,9 @@ class ConfiguredAccountSeeder extends Seeder
         if ($role !== 'admin') {
             $user->can_final_approve = false;
         }
+        if (in_array($role, ['admin', 'mayor', 'office_head'], true) && ! $user->hasVerifiedEmail()) {
+            $user->email_verified_at = now();
+        }
         $user->seed_key = $key;
         $user->save();
 

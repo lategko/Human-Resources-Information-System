@@ -6928,6 +6928,13 @@ body[data-role-theme] .button-primary {
 
 html[data-theme="dark"] {
     color-scheme: dark;
+    --hris-dark-surface: #111c2c;
+    --hris-dark-surface-raised: #142236;
+    --hris-dark-surface-hover: #1a3150;
+    --hris-dark-border: #334155;
+    --hris-dark-text: #e5eef8;
+    --hris-dark-text-muted: #b6c5d6;
+    --hris-dark-control: #0f1b2b;
 }
 
 html[data-theme="dark"] .app-shell {
@@ -7076,18 +7083,24 @@ html[data-theme="dark"] .app-shell .notification-copy b {
 
 html[data-theme="dark"] .app-shell .profile-dropdown {
     border-color: #334155;
-    background: rgb(17 28 44 / 97%);
+    background: var(--hris-dark-surface);
 }
 
 html[data-theme="dark"] .app-shell .profile-dropdown a,
 html[data-theme="dark"] .app-shell .profile-dropdown button,
+html[data-theme="dark"] .app-shell .profile-dropdown strong,
 html[data-theme="dark"] .app-shell .profile-dropdown small {
+    background: transparent;
     color: #dbe5f0;
 }
 
 html[data-theme="dark"] .app-shell .profile-dropdown a:hover,
 html[data-theme="dark"] .app-shell .profile-dropdown button:hover {
-    background: #1a3150;
+    background: var(--hris-dark-surface-hover);
+}
+
+html[data-theme="dark"] .app-shell .profile-dropdown-identity {
+    border-bottom-color: #334155 !important;
 }
 
 html[data-theme="dark"] .app-shell .status-approved,
@@ -8646,19 +8659,31 @@ html[data-theme="dark"] .hris-notice {
 }
 
 html[data-theme="dark"] .hris-modal-surface {
-    border-color: #e2e8f0;
-    background: #fff;
-    color: #26394b;
+    border-color: #334155;
+    background: var(--hris-dark-surface);
+    color: #dbe5f0;
 }
 
 html[data-theme="dark"] .hris-modal h2 {
-    color: #1e293b;
+    color: #e5eef8;
 }
 
 html[data-theme="dark"] .hris-modal-kind,
 html[data-theme="dark"] .hris-modal-description,
 html[data-theme="dark"] .hris-modal p {
-    color: #52677a;
+    color: #b6c5d6;
+}
+
+html[data-theme="dark"] .hris-modal-actions .button-outline {
+    border-color: #475569;
+    background: var(--hris-dark-surface-raised);
+    color: #dbe5f0;
+}
+
+html[data-theme="dark"] .hris-modal-actions .button-outline:hover {
+    border-color: #64748b;
+    background: var(--hris-dark-surface-hover);
+    color: #f8fafc;
 }
 
 html[data-theme="dark"] .hris-modal[data-tone="success"] .hris-modal-indicator {
@@ -8864,7 +8889,35 @@ html[data-theme="dark"] .app-shell .table-sub {
 }
 
 html[data-theme="dark"] .approval-tracker li > span {
+    border-color: #475569;
     background: #16263a;
+    color: #dbe5f0;
+}
+
+html[data-theme="dark"] .approval-tracker li {
+    color: #b6c5d6;
+}
+
+html[data-theme="dark"] .approval-tracker li:not(:last-child)::after {
+    background: #475569;
+}
+
+html[data-theme="dark"] .approval-tracker li.is-complete > span {
+    border-color: #4c9a6f;
+    background: #123523;
+    color: #bbf7d0;
+}
+
+html[data-theme="dark"] .approval-tracker li.is-pending > span {
+    border-color: #3b82f6;
+    background: #142f52;
+    color: #bfdbfe;
+}
+
+html[data-theme="dark"] .approval-tracker li.is-disapproved > span {
+    border-color: #c36c68;
+    background: #451d24;
+    color: #fecaca;
 }
 
 html[data-theme="dark"] .approval-tracker li b,
@@ -10779,5 +10832,255 @@ html[data-theme="dark"] .app-shell .employee-picker-more {
 
     .app-shell .account-search-panel .form-actions {
         width: 100%;
+    }
+}
+
+html[data-theme="dark"] .app-shell .topbar-user:hover,
+html[data-theme="dark"] .app-shell .topbar-user[aria-expanded="true"] {
+    border-color: var(--hris-dark-border);
+    background: var(--hris-dark-surface-hover);
+}
+
+html[data-theme="dark"] .app-shell .search-field,
+html[data-theme="dark"] .app-shell .filter-bar .search-field {
+    border-color: var(--hris-dark-border);
+    background: var(--hris-dark-control);
+    color: var(--hris-dark-text-muted);
+}
+
+html[data-theme="dark"] .app-shell .search-field input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not([type="file"]),
+html[data-theme="dark"] .app-shell .filter-bar .search-field input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not([type="file"]) {
+    border: 0;
+    background: transparent;
+    color: var(--hris-dark-text);
+}
+
+html[data-theme="dark"] .app-shell input[readonly]:not([type="hidden"]),
+html[data-theme="dark"] .app-shell input:disabled:not([type="hidden"]),
+html[data-theme="dark"] .app-shell select:disabled,
+html[data-theme="dark"] .app-shell textarea:disabled {
+    border-color: #334155;
+    background: #1b293b;
+    color: #b6c5d6;
+    opacity: 1;
+}
+
+html[data-theme="dark"] .app-shell option {
+    background: var(--hris-dark-control);
+    color: var(--hris-dark-text);
+}
+
+html[data-theme="dark"] .app-shell .choice-card {
+    border-color: var(--hris-dark-border);
+    background: var(--hris-dark-surface-raised);
+    color: #dbe5f0;
+}
+
+html[data-theme="dark"] .app-shell .choice-card:hover {
+    border-color: #8d7139;
+    background: var(--hris-dark-surface-hover);
+}
+
+html[data-theme="dark"] .app-shell .choice-card b {
+    color: #e5eef8;
+}
+
+html[data-theme="dark"] .app-shell .choice-card small {
+    color: #b6c5d6;
+}
+
+html[data-theme="dark"] .app-shell .profile-avatar,
+html[data-theme="dark"] .app-shell .profile-photo-large {
+    border-color: #475569;
+    background: var(--hris-dark-surface-raised);
+    color: #dbe5f0;
+}
+
+html[data-theme="dark"] .app-shell .profile-photo-form {
+    border-color: var(--hris-dark-border);
+}
+
+html[data-theme="dark"] .app-shell .pagination-wrap a,
+html[data-theme="dark"] .app-shell .pagination-wrap span[aria-current] span,
+html[data-theme="dark"] .app-shell .pagination-wrap span[aria-disabled] span {
+    border-color: #334155;
+    color: #cbd5e1;
+}
+
+html[data-theme="dark"] .app-shell .pagination-wrap a:hover,
+html[data-theme="dark"] .app-shell .pagination-wrap a:focus-visible {
+    background: var(--hris-dark-surface-hover);
+    color: #f8fafc;
+}
+
+html[data-theme="dark"] .app-shell .pagination-wrap span[aria-current] span {
+    border-color: #2563eb;
+    background: #2563eb;
+    color: #fff;
+}
+
+html[data-theme="dark"] .app-shell .pagination-wrap span[aria-disabled] span {
+    color: #8292a5;
+}
+
+html[data-theme="dark"] .app-shell .field-error {
+    color: #fca5a5;
+}
+
+html[data-theme="dark"] .app-shell .notification-mark-all,
+html[data-theme="dark"] .app-shell .notification-dropdown-mark,
+html[data-theme="dark"] .app-shell .notification-view-all {
+    color: #93c5fd;
+}
+
+html[data-theme="dark"] .app-shell .notification-mark-all:disabled {
+    color: #8292a5;
+}
+
+html[data-theme="dark"] .app-shell .dashboard-heading h1,
+html[data-theme="dark"] .app-shell .report-summary b,
+html[data-theme="dark"] .app-shell .notification-center .notification-row {
+    color: var(--hris-dark-text);
+}
+
+html[data-theme="dark"] .app-shell .report-summary small,
+html[data-theme="dark"] .app-shell .super-admin-filter-form label {
+    color: var(--hris-dark-text-muted);
+}
+
+html[data-theme="dark"] .app-shell .import-progress li a {
+    border-color: var(--hris-dark-border);
+    background: var(--hris-dark-surface-raised);
+    color: var(--hris-dark-text-muted);
+}
+
+html[data-theme="dark"] .app-shell .import-progress li a:hover {
+    border-color: #64748b;
+    background: var(--hris-dark-surface-hover);
+    color: var(--hris-dark-text);
+}
+
+html[data-theme="dark"] .app-shell .import-progress li a span {
+    background: #26364a;
+    color: #dbe5f0;
+}
+
+html[data-theme="dark"] .app-shell .import-progress li.is-current a {
+    border-color: #60a5fa;
+    background: #142f52;
+    color: #dbeafe;
+}
+
+html[data-theme="dark"] .app-shell .import-progress li.is-current a span,
+html[data-theme="dark"] .app-shell .import-progress li.is-complete a span {
+    background: #385b76;
+    color: #fff;
+}
+
+html[data-theme="dark"] .app-shell .import-progress li.is-complete a {
+    color: var(--hris-dark-text);
+}
+
+html[data-theme="dark"] .app-shell .needs-attention {
+    border-color: var(--hris-dark-border);
+}
+
+html[data-theme="dark"] .app-shell .attention-item {
+    border-color: var(--hris-dark-border);
+    background: var(--hris-dark-surface-raised);
+    color: var(--hris-dark-text);
+}
+
+html[data-theme="dark"] .app-shell .attention-item:hover {
+    border-color: #64748b;
+    background: var(--hris-dark-surface-hover);
+}
+
+html[data-theme="dark"] .app-shell .attention-item b,
+html[data-theme="dark"] .app-shell .import-summary-group h3,
+html[data-theme="dark"] .app-shell .summary-primary b,
+html[data-theme="dark"] .app-shell .summary-line b,
+html[data-theme="dark"] .app-shell .summary-list b {
+    color: var(--hris-dark-text);
+}
+
+html[data-theme="dark"] .app-shell .attention-item small,
+html[data-theme="dark"] .app-shell .import-summary-group,
+html[data-theme="dark"] .app-shell .summary-primary span,
+html[data-theme="dark"] .app-shell .summary-line span,
+html[data-theme="dark"] .app-shell .summary-empty,
+html[data-theme="dark"] .app-shell .summary-list,
+html[data-theme="dark"] .app-shell .import-summary-group details summary {
+    color: var(--hris-dark-text-muted);
+}
+
+html[data-theme="dark"] .app-shell .import-summary-group {
+    border-color: var(--hris-dark-border);
+    background: var(--hris-dark-surface-raised);
+}
+
+html[data-theme="dark"] .app-shell .summary-line,
+html[data-theme="dark"] .app-shell .import-summary-group details {
+    border-color: var(--hris-dark-border);
+}
+
+.login-auth-error {
+    display: flex;
+    max-width: 100%;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin: -4px 0 18px;
+    padding: 13px 15px;
+    overflow-wrap: anywhere;
+    border: 1px solid #fecaca;
+    border-radius: 10px;
+    background: rgb(254 242 242 / 96%);
+    color: #7f1d1d;
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.login-auth-error > div {
+    min-width: 0;
+}
+
+.login-auth-error strong {
+    display: block;
+    margin-bottom: 4px;
+    color: #7f1d1d;
+    font-size: 13px;
+}
+
+.login-auth-error ul {
+    margin: 0;
+    padding-left: 18px;
+}
+
+.login-auth-error button {
+    flex: 0 0 auto;
+    padding: 2px 0;
+    border: 0;
+    background: transparent;
+    color: #7f1d1d;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.login-auth-error button:hover {
+    color: #991b1b;
+}
+
+@media (max-width: 460px) {
+    .login-auth-error {
+        gap: 10px;
+        padding: 12px;
+    }
+
+    .login-auth-error button {
+        align-self: flex-end;
     }
 }

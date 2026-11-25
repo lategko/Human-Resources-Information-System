@@ -24,15 +24,28 @@
             <h1>Welcome Back</h1>
             <p>Sign in to access your municipal Human Resource Information System.</p>
         </div>
-        @include('shared.flash-messages')
+        @include('shared.flash-messages', ['showValidationErrors' => false])
+        @if($errors->any())
+            <section class="login-auth-error" id="login-errors" role="alert" x-data="{ visible: true }" x-show="visible" x-cloak>
+                <div>
+                    <strong>Please review your login credentials.</strong>
+                    <ul>
+                        @foreach($errors->all() as $error)
+                            <li>{{ $error }}</li>
+                        @endforeach
+                    </ul>
+                </div>
+                <button type="button" @click="visible = false">Dismiss</button>
+            </section>
+        @endif
         <form method="POST" action="{{ route('login.store') }}" class="form-stack login-form" @submit="isSubmitting = true">
             @csrf
             <label for="login">Username or Email Address
-                <input id="login" type="text" name="login" value="{{ old('login') }}" placeholder="Enter your username or email address" autocomplete="username" required autofocus @if($errors->any()) aria-describedby="validation-errors" aria-invalid="true" @endif>
+                <input id="login" type="text" name="login" value="{{ old('login', old('email')) }}" placeholder="Enter your username or email address" autocomplete="username" required autofocus @if($errors->has('login') || $errors->has('email')) aria-describedby="login-errors" aria-invalid="true" @endif>
             </label>
             <label for="password">Password
                 <span class="password-control">
-                    <input id="password" :type="showPassword ? 'text' : 'password'" name="password" placeholder="Enter your password" autocomplete="current-password" required @if($errors->any()) aria-describedby="validation-errors" aria-invalid="true" @endif>
+                    <input id="password" :type="showPassword ? 'text' : 'password'" name="password" placeholder="Enter your password" autocomplete="current-password" required @if($errors->has('password')) aria-describedby="login-errors" aria-invalid="true" @endif>
                     <button type="button" class="password-toggle" @click="showPassword = !showPassword" :aria-label="showPassword ? 'Hide password' : 'Show password'" :aria-pressed="showPassword.toString()" x-text="showPassword ? 'Hide' : 'Show'"></button>
                 </span>
             </label>

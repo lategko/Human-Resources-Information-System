@@ -3,10 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Services\AuditLogger;
+use App\Services\SessionSecurityService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -115,6 +117,12 @@ class AccountProfileController extends Controller
             }
             $user->save();
         });
+        if (filled($data['new_password'] ?? null)) {
+            app(SessionSecurityService::class)->invalidateOtherSessions(
+                $user,
+                $request->session()->getId()
+            );
+        }
         if ($emailChanged && filled($user->email)) {
             $user->sendEmailVerificationNotification();
         }
@@ -181,9 +189,38 @@ class AccountProfileController extends Controller
         $user = $request->user();
         $user->password = $data['new_password'];
         $user->save();
+        app(SessionSecurityService::class)->invalidateOtherSessions(
+            $user,
+            $request->session()->getId()
+        );
         $auditLogger->record('account.password_updated', $user);
 
         return redirect()->route('account.profile')->with('success', 'Your password has been changed.');
+    }
+
+    public function generateMfaRecoveryCodes(Request $request, AuditLogger $auditLogger): RedirectResponse
+    {
+        abort_unless(in_array($request->user()->role, ['admin', 'mayor', 'office_head'], true), 403);
+
+        $codes = [];
+        $hashedCodes = [];
+        for ($index = 0; $index < 10; $index++) {
+            $code = 'HRIS-'.strtoupper(Str::random(10));
+            $codes[] = $code;
+            $hashedCodes[] = Hash::make($code);
+        }
+
+        $request->user()->forceFill([
+            'mfa_recovery_codes' => $hashedCodes,
+            'mfa_recovery_codes_generated_at' => now(),
+        ])->save();
+
+        $auditLogger->record('account.mfa_recovery_codes_generated', $request->user());
+
+        return redirect()->route('account.profile')->with(
+            'mfa_recovery_codes',
+            $codes
+        );
     }
 
     private function deleteStoredPhoto(?string $path): void

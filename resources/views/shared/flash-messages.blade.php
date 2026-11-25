@@ -1,4 +1,5 @@
 @php
+    $showValidationErrors = $showValidationErrors ?? true;
     $flashNotices = collect([
         ['type' => 'success', 'title' => 'Success', 'message' => session('success')],
         ['type' => 'warning', 'title' => 'Review required', 'message' => session('warning')],
@@ -9,7 +10,7 @@
         ->unique('message')
         ->values();
 
-    if ($errors->any()) {
+    if ($showValidationErrors && $errors->any()) {
         $flashNotices->prepend([
             'type' => 'error',
             'title' => 'Please review the highlighted fields',
@@ -19,7 +20,7 @@
 @endphp
 
 @if($flashNotices->isNotEmpty())
-    <div class="hris-flash-stack" data-hris-flash @if($errors->any()) id="validation-errors" @endif>
+    <div class="hris-flash-stack" data-hris-flash @if($showValidationErrors && $errors->any()) id="validation-errors" @endif>
         @foreach($flashNotices as $notice)
             <section class="hris-notice hris-notice-{{ $notice['type'] }}" role="{{ $notice['type'] === 'error' ? 'alert' : 'status' }}">
                 <div class="hris-notice-copy">
@@ -27,7 +28,7 @@
                     @if($notice['message'])
                         <p>{{ $notice['message'] }}</p>
                     @endif
-                    @if($notice['type'] === 'error' && $errors->any())
+                    @if($showValidationErrors && $notice['type'] === 'error' && $errors->any())
                         <ul>
                             @foreach($errors->all() as $error)
                                 <li>{{ $error }}</li>

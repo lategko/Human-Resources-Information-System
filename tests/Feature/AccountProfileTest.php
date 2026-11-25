@@ -8,6 +8,7 @@ use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\URL;
 use Tests\TestCase;
@@ -225,6 +226,66 @@ class AccountProfileTest extends TestCase
         ])->assertRedirect(route('account.profile'));
 
         $this->assertTrue(Hash::check('NewSecurePassword123!', $user->fresh()->password));
+    }
+
+    public function test_password_change_invalidates_other_database_sessions_and_rotates_remember_token(): void
+    {
+        $user = $this->createUser('office_head', 'CurrentPassword123!');
+        $originalRememberToken = $user->remember_token;
+        $this->actingAs($user);
+
+        DB::table('sessions')->insert([
+            [
+                'id' => 'current-session',
+                'user_id' => $user->id,
+                'ip_address' => '127.0.0.1',
+                'user_agent' => 'current',
+                'payload' => 'current',
+                'last_activity' => time(),
+            ],
+            [
+                'id' => 'stolen-session',
+                'user_id' => $user->id,
+                'ip_address' => '127.0.0.1',
+                'user_agent' => 'stolen',
+                'payload' => 'stolen',
+                'last_activity' => time(),
+            ],
+        ]);
+
+        $this->withSession(['last_activity' => time()])
+            ->put(route('account.profile.password'), [
+                'current_password' => 'CurrentPassword123!',
+                'new_password' => 'NewSecurePassword123!',
+                'new_password_confirmation' => 'NewSecurePassword123!',
+            ])
+            ->assertRedirect(route('account.profile'));
+
+        $user->refresh();
+        $this->assertTrue(Hash::check('NewSecurePassword123!', $user->password));
+        $this->assertNotSame($originalRememberToken, $user->remember_token);
+        $this->assertDatabaseMissing('sessions', ['id' => 'stolen-session']);
+    }
+
+    public function test_privileged_user_can_generate_and_employee_cannot_generate_recovery_codes(): void
+    {
+        foreach (['admin', 'mayor', 'office_head'] as $role) {
+            $user = $this->createUser($role);
+            $this->actingAs($user)
+                ->post(route('account.profile.mfa.recovery-codes'))
+                ->assertRedirect(route('account.profile'))
+                ->assertSessionHas('mfa_recovery_codes');
+
+            $user->refresh();
+            $this->assertIsArray($user->mfa_recovery_codes);
+            $this->assertCount(10, $user->mfa_recovery_codes);
+            $this->assertNotNull($user->mfa_recovery_codes_generated_at);
+        }
+
+        $employee = $this->createUser('employee');
+        $this->actingAs($employee)
+            ->post(route('account.profile.mfa.recovery-codes'))
+            ->assertForbidden();
     }
 
     private function createUser(string $role, string $password = 'CurrentPassword123!'): User

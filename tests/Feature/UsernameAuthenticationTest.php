@@ -11,6 +11,7 @@ use Illuminate\Auth\Notifications\VerifyEmail;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Notification;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\URL;
 use Tests\TestCase;
 
@@ -20,13 +21,25 @@ class UsernameAuthenticationTest extends TestCase
 
     public function test_existing_administrator_can_sign_in_with_normalized_email_and_employee_with_username(): void
     {
+        Notification::fake();
         $admin = $this->createUser('ADMIN@EXAMPLE.TEST', null, 'admin');
         $employee = $this->createUser(null, 'Juan.DelaCruz', 'employee');
 
         $this->post(route('login.store'), [
             'login' => '  ADMIN@EXAMPLE.TEST ',
             'password' => 'SecurePassword123!',
-        ])->assertRedirect(route('dashboard'));
+        ])->assertRedirect(route('mfa.verify'));
+        $this->assertGuest();
+        $this->get(route('dashboard'))->assertRedirect(route('login'));
+
+        Notification::assertSentTo($admin, \App\Notifications\PrivilegedLoginOtp::class);
+        $otp = null;
+        Notification::sent($admin, \App\Notifications\PrivilegedLoginOtp::class, function ($notification) use (&$otp): bool {
+            $otp = $notification->code;
+            return true;
+        });
+        $this->post(route('mfa.verify.store'), ['code' => $otp])
+            ->assertRedirect(route('dashboard'));
         $this->assertAuthenticatedAs($admin);
 
         $this->post(route('logout'));
@@ -87,16 +100,63 @@ class UsernameAuthenticationTest extends TestCase
         $admin = $this->createUser('hr-admin@example.test', null, 'admin', [
             'must_change_password' => true,
             'account_setup_completed' => false,
+            'mfa_recovery_codes' => [Hash::make('HRIS-ADMINRECOVERY')],
         ]);
 
         $this->post(route('login.store'), [
             'login' => $admin->email,
             'password' => 'SecurePassword123!',
+        ])->assertRedirect(route('mfa.verify'));
+        $this->post(route('mfa.verify.store'), [
+            'code' => 'HRIS-ADMINRECOVERY',
         ])->assertRedirect(route('dashboard'));
 
         $this->get(route('account.setup'))->assertRedirect(route('dashboard'));
         $this->get(route('account.profile'))->assertOk();
         $this->get(route('account.profile.edit'))->assertOk();
+    }
+
+    public function test_completed_non_admin_accounts_cannot_use_the_setup_endpoint(): void
+    {
+        $user = $this->createUser('completed@example.test', 'completed.user', 'employee', [
+            'must_change_password' => false,
+            'account_setup_completed' => true,
+        ]);
+
+        $this->actingAs($user);
+        $this->get(route('account.setup'))->assertRedirect(route('account.profile.edit'));
+        $this->put(route('account.setup.update'), [
+            'username' => 'changed.username',
+            'email' => 'changed@example.test',
+            'contact_number' => '09170000000',
+            'address' => 'Changed address',
+            'current_password' => 'SecurePassword123!',
+        ])->assertRedirect(route('account.profile.edit'));
+
+        $user->refresh();
+        $this->assertSame('completed.user', $user->username);
+        $this->assertSame('completed@example.test', $user->email);
+        $this->assertTrue(Hash::check('SecurePassword123!', $user->password));
+    }
+
+    public function test_incomplete_account_requires_current_password_for_setup_credentials(): void
+    {
+        $user = $this->createUser('incomplete@example.test', 'incomplete.user', 'employee', [
+            'must_change_password' => false,
+            'account_setup_completed' => false,
+        ]);
+
+        $this->actingAs($user);
+        $this->put(route('account.setup.update'), [
+            'username' => 'changed.incomplete',
+            'email' => 'changed.incomplete@example.test',
+            'contact_number' => '09170000001',
+            'address' => 'Incomplete address',
+        ])->assertSessionHasErrors('current_password');
+
+        $user->refresh();
+        $this->assertSame('incomplete.user', $user->username);
+        $this->assertSame('incomplete@example.test', $user->email);
     }
 
     public function test_employees_can_register_email_and_verify_it_with_a_signed_link(): void
@@ -155,6 +215,129 @@ class UsernameAuthenticationTest extends TestCase
             ])->assertSessionHasErrors('login');
             $this->assertGuest();
         }
+
+        $this->get(route('login'))
+            ->assertSee('The provided username/email and password do not match our records.')
+            ->assertDontSee('inactive or restricted');
+    }
+
+    public function test_mayor_and_office_head_require_mfa_and_employee_does_not(): void
+    {
+        Notification::fake();
+
+        foreach (['mayor', 'office_head'] as $role) {
+            $user = $this->createUser($role.'@example.test', $role.'.user', $role);
+
+            $this->post(route('login.store'), [
+                'login' => $user->email,
+                'password' => 'SecurePassword123!',
+            ])->assertRedirect(route('mfa.verify'));
+            $this->assertGuest();
+            $this->get(route('dashboard'))->assertRedirect(route('login'));
+
+            Notification::assertSentTo($user, \App\Notifications\PrivilegedLoginOtp::class);
+
+            $otp = null;
+            Notification::sent($user, \App\Notifications\PrivilegedLoginOtp::class, function ($notification) use (&$otp): bool {
+                $otp = $notification->code;
+                return true;
+            });
+            $this->post(route('mfa.verify.store'), ['code' => $otp])
+                ->assertRedirect(route('dashboard'));
+            $this->assertAuthenticatedAs($user);
+            $this->post(route('logout'));
+        }
+
+        $employee = $this->createUser('employee@example.test', 'employee.user', 'employee');
+        $this->post(route('login.store'), [
+            'login' => $employee->email,
+            'password' => 'SecurePassword123!',
+        ])->assertRedirect(route('dashboard'));
+        $this->assertAuthenticatedAs($employee);
+    }
+
+    public function test_mfa_attempt_limit_locks_the_challenge(): void
+    {
+        Notification::fake();
+        $admin = $this->createUser('mfa-limit@example.test', 'mfa.limit', 'admin');
+
+        $this->post(route('login.store'), [
+            'login' => $admin->email,
+            'password' => 'SecurePassword123!',
+        ])->assertRedirect(route('mfa.verify'));
+
+        for ($attempt = 0; $attempt < 4; $attempt++) {
+            $this->post(route('mfa.verify.store'), ['code' => '000000'])
+                ->assertSessionHasErrors('code');
+        }
+
+        $this->post(route('mfa.verify.store'), ['code' => '000000'])
+            ->assertSessionHasErrors(['code' => 'Too many verification attempts. Please sign in again.']);
+        $this->assertGuest();
+        $this->get(route('mfa.verify'))->assertRedirect(route('login'));
+    }
+
+    public function test_mfa_code_expiration_and_successful_reuse_are_rejected(): void
+    {
+        Notification::fake();
+        $admin = $this->createUser('mfa-reuse@example.test', 'mfa.reuse', 'admin');
+
+        $this->post(route('login.store'), [
+            'login' => $admin->email,
+            'password' => 'SecurePassword123!',
+        ])->assertRedirect(route('mfa.verify'));
+
+        $otp = null;
+        Notification::sent($admin, \App\Notifications\PrivilegedLoginOtp::class, function ($notification) use (&$otp): bool {
+            $otp = $notification->code;
+            return true;
+        });
+        Cache::forget('hris:mfa:otp:'.$admin->id);
+        $this->post(route('mfa.verify.store'), ['code' => $otp])
+            ->assertSessionHasErrors('code');
+        $this->assertGuest();
+
+        $this->post(route('login.store'), [
+            'login' => $admin->email,
+            'password' => 'SecurePassword123!',
+        ])->assertRedirect(route('mfa.verify'));
+
+        Notification::sent($admin, \App\Notifications\PrivilegedLoginOtp::class, function ($notification) use (&$otp): bool {
+            $otp = $notification->code;
+            return true;
+        });
+        $this->post(route('mfa.verify.store'), ['code' => $otp])
+            ->assertRedirect(route('dashboard'));
+        $this->post(route('logout'));
+        $this->post(route('mfa.verify.store'), ['code' => $otp])
+            ->assertRedirect();
+        $this->assertGuest();
+    }
+
+    public function test_recovery_code_is_single_use(): void
+    {
+        Notification::fake();
+        $admin = $this->createUser('mfa-recovery@example.test', 'mfa.recovery', 'admin');
+        $recoveryCode = 'HRIS-SINGLEUSE';
+        $admin->update(['mfa_recovery_codes' => [Hash::make($recoveryCode)]]);
+
+        $this->post(route('login.store'), [
+            'login' => $admin->email,
+            'password' => 'SecurePassword123!',
+        ])->assertRedirect(route('mfa.verify'));
+        $this->post(route('mfa.verify.store'), ['code' => $recoveryCode])
+            ->assertRedirect(route('dashboard'));
+
+        $this->post(route('logout'));
+        $admin->refresh();
+        $this->assertSame([], $admin->mfa_recovery_codes);
+        $this->post(route('login.store'), [
+            'login' => $admin->email,
+            'password' => 'SecurePassword123!',
+        ])->assertRedirect(route('mfa.verify'));
+        $this->post(route('mfa.verify.store'), ['code' => $recoveryCode])
+            ->assertSessionHasErrors('code');
+        $this->assertGuest();
     }
 
     public function test_hr_can_create_an_employee_account_and_send_a_secure_activation_link(): void
@@ -325,7 +508,7 @@ class UsernameAuthenticationTest extends TestCase
 
     private function createUser(?string $email, ?string $username, string $role, array $extra = []): User
     {
-        return User::create([
+        $user = User::create([
             'name' => ucfirst($role).' Test Account',
             'email' => $email,
             'username' => $username,
@@ -334,5 +517,7 @@ class UsernameAuthenticationTest extends TestCase
             'is_active' => true,
             ...$extra,
         ]);
+        $user->forceFill(['email_verified_at' => now()])->save();
+        return $user;
     }
 }

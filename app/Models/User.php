@@ -10,7 +10,6 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
-
 class User extends Authenticatable implements MustVerifyEmail
 {
     protected $attributes = [
@@ -52,6 +51,8 @@ class User extends Authenticatable implements MustVerifyEmail
         'profile_birthdate',
         'profile_contact_number',
         'profile_address',
+        'mfa_recovery_codes',
+        'mfa_recovery_codes_generated_at',
     ];
 
     /**
@@ -62,6 +63,7 @@ class User extends Authenticatable implements MustVerifyEmail
     protected $hidden = [
         'password',
         'remember_token',
+        'mfa_recovery_codes',
     ];
 
     /**
@@ -79,6 +81,8 @@ class User extends Authenticatable implements MustVerifyEmail
             'is_active' => 'boolean',
             'can_final_approve' => 'boolean',
             'profile_birthdate' => 'date',
+            'mfa_recovery_codes' => 'array',
+            'mfa_recovery_codes_generated_at' => 'datetime',
         ];
     }
 

@@ -19,6 +19,9 @@ class AccountSetupController extends Controller
         if ($request->user()->isAdministrator()) {
             return redirect()->route('dashboard');
         }
+        if ($request->user()->account_setup_completed && ! $request->user()->must_change_password) {
+            return redirect()->route('account.profile.edit');
+        }
 
         return view('account.setup', [
             'user' => $request->user()->load('employee'),
@@ -30,6 +33,9 @@ class AccountSetupController extends Controller
         $user = $request->user()->loadMissing('employee');
         if ($user->isAdministrator()) {
             return redirect()->route('dashboard');
+        }
+        if ($user->account_setup_completed && ! $user->must_change_password) {
+            return redirect()->route('account.profile.edit');
         }
 
         $request->merge([
@@ -48,6 +54,11 @@ class AccountSetupController extends Controller
             'contact_number' => ['nullable', 'string', 'max:40'],
             'address' => ['nullable', 'string', 'max:2000'],
         ];
+        $usernameChanged = $user->username !== $request->input('username');
+        $emailChanged = $user->email !== $request->input('email');
+        if ($usernameChanged || $emailChanged) {
+            $rules['current_password'] = ['required', 'current_password'];
+        }
         if ($user->must_change_password) {
             $rules += [
                 'current_password' => ['required', 'current_password'],

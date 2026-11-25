@@ -106,6 +106,38 @@
                     <div class="form-actions"><button class="button button-primary" type="submit" data-loading-text="Changing…">Change password</button></div>
                 </form>
             </section>
+
+            @if(in_array($user->role, ['admin', 'mayor', 'office_head'], true))
+                <section class="panel form-panel">
+                    <div class="panel-heading">
+                        <div>
+                            <h2>Sign-in recovery</h2>
+                            <p>Generate one-time recovery codes for privileged sign-in recovery. Store these codes securely and offline.</p>
+                        </div>
+                    </div>
+                    @if(session('mfa_recovery_codes'))
+                        <div class="alert alert-info">
+                            <strong>Save these recovery codes now.</strong>
+                            <p>They will not be shown again. Each code can be used once.</p>
+                            <ul>
+                                @foreach(session('mfa_recovery_codes') as $recoveryCode)
+                                    <li><code>{{ $recoveryCode }}</code></li>
+                                @endforeach
+                            </ul>
+                        </div>
+                    @endif
+                    <form method="POST" action="{{ route('account.profile.mfa.recovery-codes') }}"
+                        data-confirm-type="warning"
+                        data-confirm-title="Generate Recovery Codes?"
+                        data-confirm-message="Generating new codes replaces all existing privileged sign-in recovery codes."
+                        data-confirm-text="Generate Codes">
+                        @csrf
+                        <div class="form-actions">
+                            <button class="button button-outline" type="submit">Generate recovery codes</button>
+                        </div>
+                    </form>
+                </section>
+            @endif
         </div>
     </div>
 @endsection

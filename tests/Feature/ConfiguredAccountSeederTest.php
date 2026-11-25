@@ -48,7 +48,14 @@ class ConfiguredAccountSeederTest extends TestCase
             $this->post(route('login.store'), [
                 'email' => $user->email,
                 'password' => 'InitialPassword123!',
-            ])->assertRedirect(route('dashboard'));
+            ])->assertRedirect(in_array($role, ['admin', 'mayor'], true) ? route('mfa.verify') : route('dashboard'));
+            if (in_array($role, ['admin', 'mayor'], true)) {
+                $recoveryCode = strtoupper('HRIS-SEEDED-'.$role);
+                $user->update(['mfa_recovery_codes' => [Hash::make($recoveryCode)]]);
+                $this->post(route('mfa.verify.store'), [
+                    'code' => $recoveryCode,
+                ])->assertRedirect(route('dashboard'));
+            }
             $this->get(route('dashboard'))
                 ->assertOk()
                 ->assertSee($dashboardHeading)
@@ -121,6 +128,10 @@ class ConfiguredAccountSeederTest extends TestCase
         $this->post(route('login.store'), [
             'email' => 'old-admin@example.test',
             'password' => 'ExistingPassword123!',
+        ])->assertRedirect(route('mfa.verify'));
+        $user->update(['mfa_recovery_codes' => [Hash::make('HRIS-EXISTING-ADMIN')]]);
+        $this->post(route('mfa.verify.store'), [
+            'code' => 'HRIS-EXISTING-ADMIN',
         ])->assertRedirect(route('dashboard'));
     }
 
@@ -162,8 +173,13 @@ class ConfiguredAccountSeederTest extends TestCase
             ['legacy-admin@example.test', 'LegacyAdminPassword123!'],
             ['legacy-hrmo@example.test', 'LegacyHrmoPassword123!'],
         ] as [$email, $password]) {
+            $user = User::where('email', $email)->firstOrFail();
+            $user->update(['mfa_recovery_codes' => [Hash::make('HRIS-LEGACY-ADMIN')]]);
             $this->post(route('login.store'), compact('email', 'password'))
-                ->assertRedirect(route('dashboard'));
+                ->assertRedirect(route('mfa.verify'));
+            $this->post(route('mfa.verify.store'), [
+                'code' => 'HRIS-LEGACY-ADMIN',
+            ])->assertRedirect(route('dashboard'));
             $this->get(route('dashboard'))->assertOk()->assertSee('Administration overview');
             $this->post(route('logout'));
         }
